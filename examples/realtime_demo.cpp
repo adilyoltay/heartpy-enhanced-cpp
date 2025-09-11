@@ -41,10 +41,32 @@ int main(int argc, char** argv) {
 
     heartpy::Options opt;
     opt.lowHz = 0.5; opt.highHz = 5.0; opt.iirOrder = 2;
-    opt.nfft = 1024; // finer df so SNR band widths (±0.12/0.15/0.18 Hz) are effective
+    opt.nfft = 1024; // finer df so SNR band widths (±0.12/0.18 Hz) are effective
     opt.refractoryMs = 320.0; opt.thresholdScale = 0.5;
     opt.useHPThreshold = true; opt.maPerc = 30.0; opt.adaptiveMaPerc = true;
     opt.breathingAsBpm = false;
+
+    // Named CLI overrides for streaming Options
+    for (int i = 1; i + 1 < argc; ++i) {
+        std::string key = argv[i]; std::string val = argv[i + 1];
+        auto to_d = [&](const std::string& s){ return std::atof(s.c_str()); };
+        auto to_i = [&](const std::string& s){ return std::atoi(s.c_str()); };
+        if (key == "--nfft") opt.nfft = to_i(val);
+        if (key == "--ref-ms") opt.refractoryMs = to_d(val);
+        if (key == "--minrr-coeff") opt.minRRGateFactor = to_d(val);
+        if (key == "--minrr-floor-relaxed") opt.minRRFloorRelaxed = to_d(val);
+        if (key == "--minrr-floor-strict") opt.minRRFloorStrict = to_d(val);
+        if (key == "--rr-merge-band-low") opt.rrMergeBandLow = to_d(val);
+        if (key == "--rr-merge-band-high") opt.rrMergeBandHigh = to_d(val);
+        if (key == "--rr-merge-eq-low") opt.rrMergeEqualBandLow = to_d(val);
+        if (key == "--rr-merge-eq-high") opt.rrMergeEqualBandHigh = to_d(val);
+        if (key == "--periodic-supp-tol") opt.periodicSuppressionTol = to_d(val);
+        if (key == "--snr-band-passive") opt.snrBandPassive = to_d(val);
+        if (key == "--snr-band-active") opt.snrBandActive = to_d(val);
+        if (key == "--snr-active-tau") opt.snrActiveTauSec = to_d(val);
+        if (key == "--snr-band-blend") opt.snrBandBlendFactor = to_d(val);
+        if (key == "--threshold-scale") opt.thresholdScale = to_d(val);
+    }
 
     if (refMsOverride > 0) opt.refractoryMs = refMsOverride;
     heartpy::RealtimeAnalyzer rt(fs, opt);
@@ -86,26 +108,15 @@ int main(int argc, char** argv) {
                 bpm_stream = 60.0 * out.quality.f0Hz;
             }
             if (jsonEnabled) {
-                // Emit JSON line
+                // Emit JSON line (only acceptance-relevant fields)
                 jsonFile << "{"
                          << "\"t\":" << tsec
-                         << ",\"bpm\":" << out.bpm
                          << ",\"stream_bpm\":" << bpm_stream
                          << ",\"conf\":" << out.quality.confidence
                          << ",\"snr_db\":" << out.quality.snrDb
-                         << ",\"f0_used_hz\":" << out.quality.f0Hz
                          << ",\"ma_perc\":" << out.quality.maPercActive
                          << ",\"rejection\":" << out.quality.rejectionRate
-                         << ",\"soft_dbl\":" << (out.quality.softDoublingFlag ? 1 : 0)
                          << ",\"hard_dbl\":" << (out.quality.doublingFlag ? 1 : 0)
-                         << ",\"soft_streak\":" << out.quality.softStreak
-                         << ",\"doubling_hint\":" << (out.quality.doublingHintFlag ? 1 : 0)
-                         << ",\"p_half_over_fund\":" << out.quality.pHalfOverFund
-                         << ",\"pair_frac\":" << out.quality.pairFrac
-                         << ",\"short_frac\":" << out.quality.rrShortFrac
-                         << ",\"long_rr_ms\":" << out.quality.rrLongMs
-                         << ",\"refractory_ms\":" << out.quality.refractoryMsActive
-                         << ",\"min_rr_ms\":" << out.quality.minRRBoundMs
                          << "}" << '\n';
                 jsonFile.flush();
             } else {

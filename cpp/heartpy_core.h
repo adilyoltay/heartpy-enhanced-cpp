@@ -38,6 +38,32 @@ struct Options {
 	double maPerc = 30.0;            // HeartPy-like ma_perc (10..60 typical)
 	bool   adaptiveMaPerc = true;    // enable light grid search per poll
 
+	// Streaming tunables (defaults preserve current behavior)
+	// Min-RR gating
+	double minRRGateFactor = 0.86;     // multiply longRR estimate
+	double minRRFloorRelaxed = 400.0;  // ms floor after warmup
+	double minRRFloorStrict = 500.0;   // ms floor during early phase
+	double minRRCeiling = 1200.0;      // ms ceiling for RR bounds
+
+	// Periodic suppression tolerance (fraction of period)
+	double periodicSuppressionTol = 0.24;
+
+	// RR merge bands
+	double rrMergeBandLow = 0.75;      // lower bound for near-median checks
+	double rrMergeBandHigh = 1.25;     // upper bound for near-median checks
+	double rrMergeEqualBandLow = 0.85; // equal-pair near-median band low
+	double rrMergeEqualBandHigh = 1.15;// equal-pair near-median band high
+
+	// PSD half/fund ratio thresholds
+	double pHalfOverFundThresholdSoft = 2.0; // soft activation
+	double pHalfOverFundThresholdLow = 1.6;  // looser hint hold
+
+	// SNR band and EMA behavior
+	double snrBandPassive = 0.12;      // Hz half-width in passive mode
+	double snrBandActive = 0.18;       // Hz half-width in active mode
+	double snrActiveTauSec = 7.0;      // EMA tau when active
+	double snrBandBlendFactor = 0.30;  // blend toward instant when band changes
+
 	// Preprocessing options
 	bool interpClipping = false;
 	double clippingThreshold = 1020.0;

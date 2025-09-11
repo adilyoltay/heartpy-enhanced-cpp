@@ -109,6 +109,8 @@ private:
     bool   snrEmaValid_ {false};
     double snrTauSec_ {10.0};
     double lastSnrUpdateTime_ {0.0};
+    bool   lastSnrActiveMode_ {false};
+    double lastSnrBaseBw_ {0.12};
 
     // Streaming BPM prior (for ma_perc bias)
     double bpmEma_ {0.0};

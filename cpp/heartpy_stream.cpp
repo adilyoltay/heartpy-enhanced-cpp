@@ -222,12 +222,12 @@ void RealtimeAnalyzer::append(const float* x, size_t n) {
                         double tnow = firstTsApprox_ + ((double)(absIdx - firstAbs_)) / effFsLoc;
                         double bpm_prior = bpmEmaValid_ ? bpmEma_ : (0.5 * (opt_.bpmMin + opt_.bpmMax));
                         bpm_prior = std::max(opt_.bpmMin, std::min(opt_.bpmMax, bpm_prior));
-                        double rr_prior_ms = std::max(400.0, std::min(1200.0, 60000.0 / std::max(1e-6, bpm_prior)));
+                        double rr_prior_ms = std::max(opt_.minRRFloorRelaxed, std::min(opt_.minRRCeiling, 60000.0 / std::max(1e-6, bpm_prior)));
                         int acceptedRR = std::max(0, (int)acceptedPeaksTotal_ - 1);
                         bool gateRel = (tnow >= 15.0) && (acceptedRR >= 10) && (bpmEmaValid_ && bpmEma_ < 100.0);
-                        double floor_ms = gateRel ? 400.0 : 500.0;
+                        double floor_ms = gateRel ? opt_.minRRFloorRelaxed : opt_.minRRFloorStrict;
                         double min_rr_ms = std::max(0.7 * rr_prior_ms, floor_ms);
-                        // Soft/hard/hint PSD-only gating during acceptance with robust longRR estimate
+                        // Unified long-RR gating when soft/hard/hint is active
                         if (softDoublingActive_ || doublingActive_ || doublingHintActive_) {
                             double longEst = 0.0;
                             if (doublingLongRRms_ > 0.0) longEst = std::max(longEst, doublingLongRRms_);
@@ -239,33 +239,17 @@ void RealtimeAnalyzer::append(const float* x, size_t n) {
                             }
                             if (lastF0Hz_ > 1e-9) longEst = std::max(longEst, 1000.0 / lastF0Hz_);
                             if (longEst > 0.0) {
-                                longEst = std::clamp(longEst, 600.0, 1200.0);
-                                double minSoft = 0.86 * longEst;
-                                minSoft = std::clamp(minSoft, 400.0, 1200.0);
+                                longEst = std::clamp(longEst, 600.0, opt_.minRRCeiling);
+                                double minSoft = std::clamp(opt_.minRRGateFactor * longEst, opt_.minRRFloorRelaxed, opt_.minRRCeiling);
                                 min_rr_ms = std::max(min_rr_ms, minSoft);
-                            }
-                        }
-                        if (doublingActive_ && (tnow <= hardFallbackUntil_) && (doublingLongRRms_ > 0.0)) {
-                            min_rr_ms = std::max(min_rr_ms, 0.9 * doublingLongRRms_);
-                        } else if (doublingActive_ && (tnow < doublingHoldUntil_) && (doublingLongRRms_ > 0.0)) {
-                            min_rr_ms = std::max(min_rr_ms, 0.8 * doublingLongRRms_);
-                        }
-                        // Soft/hard/hint gating: require RR ≥ 0.8×longRR estimate when active
-                        if (softDoublingActive_ || doublingActive_ || doublingHintActive_) {
-                            double longEst = 0.0;
-                            if (doublingLongRRms_ > 0.0) longEst = std::max(longEst, doublingLongRRms_);
-                            if (!lastRR_.empty()) {
-                                std::vector<double> tmpRR = lastRR_;
-                                std::nth_element(tmpRR.begin(), tmpRR.begin() + tmpRR.size()/2, tmpRR.end());
-                                double med = tmpRR[tmpRR.size()/2];
-                                longEst = std::max(longEst, 2.0 * med);
-                            }
-                            if (lastF0Hz_ > 1e-9) longEst = std::max(longEst, 1000.0 / lastF0Hz_);
-                            if (longEst > 0.0) {
-                                longEst = std::clamp(longEst, 600.0, 1200.0);
-                                double minSoft = 0.86 * longEst;
-                                minSoft = std::clamp(minSoft, 400.0, 1200.0);
-                                min_rr_ms = std::max(min_rr_ms, minSoft);
+                                // Hard doubling fallback bounds folded here for coherence
+                                if (doublingActive_ && (doublingLongRRms_ > 0.0)) {
+                                    if (tnow <= hardFallbackUntil_) {
+                                        min_rr_ms = std::max(min_rr_ms, 0.9 * doublingLongRRms_);
+                                    } else if (tnow < doublingHoldUntil_) {
+                                        min_rr_ms = std::max(min_rr_ms, 0.8 * doublingLongRRms_);
+                                    }
+                                }
                             }
                         }
                         if (rr_new_ms < min_rr_ms) {
@@ -424,9 +408,20 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
         rollWin_.push_back(y);
         rollSum_ += y;
         rollSumSq_ += static_cast<double>(y) * static_cast<double>(y);
+        // rectified window update for HP-style thresholding
+        {
+            float yr = std::max(0.0f, y);
+            rollWinRect_.push_back(yr);
+            rollRectSum_ += yr;
+            rollRectSumSq_ += static_cast<double>(yr) * static_cast<double>(yr);
+        }
         while ((int)rollWin_.size() > winSamples_) {
             float u = rollWin_.front(); rollWin_.pop_front();
             rollSum_ -= u; rollSumSq_ -= static_cast<double>(u) * static_cast<double>(u);
+        }
+        while ((int)rollWinRect_.size() > winSamples_) {
+            float u = rollWinRect_.front(); rollWinRect_.pop_front();
+            rollRectSum_ -= u; rollRectSumSq_ -= static_cast<double>(u) * static_cast<double>(u);
         }
         // incremental local-max detection using 1-sample look-ahead
         if (dst >= 2) {
@@ -464,10 +459,10 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
                         double tnow = firstTsApprox_ + ((double)(absIdx - firstAbs_)) / effFsLoc;
                         double bpm_prior = bpmEmaValid_ ? bpmEma_ : (0.5 * (opt_.bpmMin + opt_.bpmMax));
                         bpm_prior = std::max(opt_.bpmMin, std::min(opt_.bpmMax, bpm_prior));
-                        double rr_prior_ms = std::max(400.0, std::min(1200.0, 60000.0 / std::max(1e-6, bpm_prior)));
+                        double rr_prior_ms = std::max(opt_.minRRFloorRelaxed, std::min(opt_.minRRCeiling, 60000.0 / std::max(1e-6, bpm_prior)));
                         int acceptedRR = std::max(0, (int)acceptedPeaksTotal_ - 1);
                         bool gateRel = (tnow >= 15.0) && (acceptedRR >= 10) && (bpmEmaValid_ && bpmEma_ < 100.0);
-                        double floor_ms = gateRel ? 400.0 : 500.0;
+                        double floor_ms = gateRel ? opt_.minRRFloorRelaxed : opt_.minRRFloorStrict;
                         double min_rr_ms = std::max(0.7 * rr_prior_ms, floor_ms);
                         if (rr_new_ms < min_rr_ms) {
                             size_t relLast = lastAbs >= firstAbs_ ? (lastAbs - firstAbs_) : 0;
@@ -821,7 +816,7 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                 if (rrFallbackDrivingHint_) {
                     // no suppression; rely on min-RR gate + refractory
                 } else {
-                double tol = 0.24 * T; // conservative (active only)
+                double tol = opt_.periodicSuppressionTol * T; // conservative (active only)
                 const size_t n0 = lastPeaks_.size();
                 size_t removed = 0, merges = 0;
                 std::vector<char> keepP(lastPeaks_.size(), 1);
@@ -898,13 +893,13 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                 // Generic doubling pattern: two short intervals whose sum ~ 2x median
                 if (!merge) {
                     double m_long = 2.0 * m;
-                    if ((std::min(r1, r2) < 0.85 * m) && (sum >= 0.75 * m_long && sum <= 1.25 * m_long)) merge = true;
+                    if ((std::min(r1, r2) < 0.85 * m) && (sum >= opt_.rrMergeBandLow * m_long && sum <= opt_.rrMergeBandHigh * m_long)) merge = true;
                 }
                 // Equal short pair merge when soft/hard active: both ~median and sum ~2×median
                 if (!merge && (softDoublingActive_ || doublingActive_)) {
                     double m_long = 2.0 * m;
-                    bool bothShortish = (r1 >= 0.85 * m && r1 <= 1.15 * m && r2 >= 0.85 * m && r2 <= 1.15 * m);
-                    bool sumLongish = (sum >= 0.85 * m_long && sum <= 1.15 * m_long);
+                    bool bothShortish = (r1 >= opt_.rrMergeEqualBandLow * m && r1 <= opt_.rrMergeEqualBandHigh * m && r2 >= opt_.rrMergeEqualBandLow * m && r2 <= opt_.rrMergeEqualBandHigh * m);
+                    bool sumLongish = (sum >= opt_.rrMergeEqualBandLow * m_long && sum <= opt_.rrMergeEqualBandHigh * m_long);
                     if (bothShortish && sumLongish) merge = true;
                 }
                 if (merge) {
@@ -937,8 +932,10 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
             // Aggressive pass when soft/hard/hint doubling is active; iterate until no changes
             if ((softDoublingActive_ || doublingActive_ || doublingHintActive_) && !rrFallbackDrivingHint_) {
                 bool changed = true; size_t removedTotal = 0; const size_t nInit = lastPeaks_.size();
-                while (changed) {
+                int iteration = 0; const int maxIterations = 10;
+                while (changed && iteration < maxIterations) {
                     changed = false;
+                    ++iteration;
                     if (lastRR_.size() >= 3) {
                         std::vector<double> rrs = lastRR_;
                         std::vector<double> tmp2 = rrs; std::nth_element(tmp2.begin(), tmp2.begin() + tmp2.size()/2, tmp2.end());
@@ -949,9 +946,9 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                             double r1 = rrs[i];
                             double r2 = rrs[i + 1];
                             double sum = r1 + r2;
-                            bool condShortPairA = (r1 < 0.85 * m2) && (sum >= 0.75 * two && sum <= 1.25 * two);
+                            bool condShortPairA = (r1 < 0.85 * m2) && (sum >= opt_.rrMergeBandLow * two && sum <= opt_.rrMergeBandHigh * two);
                             bool condShortPairB = (r1 < 0.75 * m2) && (sum >= 0.8 * two && sum <= 1.2 * two);
-                            bool bothNearMed = (r1 >= 0.75 * m2 && r1 <= 1.25 * m2 && r2 >= 0.75 * m2 && r2 <= 1.25 * m2);
+                            bool bothNearMed = (r1 >= opt_.rrMergeBandLow * m2 && r1 <= opt_.rrMergeBandHigh * m2 && r2 >= opt_.rrMergeBandLow * m2 && r2 <= opt_.rrMergeBandHigh * m2);
                             bool sumNearTwo = (sum >= 0.80 * two && sum <= 1.20 * two);
                             bool mergeEq = bothNearMed && sumNearTwo;
                             if (condShortPairA || condShortPairB || mergeEq) {
@@ -994,7 +991,7 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                         double r1 = lastRR_[i];
                         double r2 = lastRR_[i + 1];
                         double sum = r1 + r2;
-                        bool nearMedBoth = (r1 >= 0.75 * m2 && r1 <= 1.25 * m2 && r2 >= 0.75 * m2 && r2 <= 1.25 * m2);
+                        bool nearMedBoth = (r1 >= opt_.rrMergeBandLow * m2 && r1 <= opt_.rrMergeBandHigh * m2 && r2 >= opt_.rrMergeBandLow * m2 && r2 <= opt_.rrMergeBandHigh * m2);
                         bool sumNearLong = (sum >= 0.93 * two && sum <= 1.07 * two);
                         if (nearMedBoth && sumNearLong) {
                             int pL = lastPeaks_[i];
@@ -1161,10 +1158,8 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     if (hintLastTrueTs_ > 0.0) lastActiveTs = std::max(lastActiveTs, hintLastTrueTs_);
     bool persistMapLoc = (lastActiveTs > 0.0) && ((lastTs_ - lastActiveTs) <= 5.0);
     bool activeSnr = doublingHintActive_ || softDoublingActive_ || doublingActive_ || persistMapLoc;
-    // SNR signal-band half-width (Hz):
-    // - Passive: a touch wider to be less conservative on clean sine (0.12 Hz)
-    // - Active (hint/soft/hard/persist): widen to 0.18 Hz for robust integration
-    double baseBw = activeSnr ? 0.18 : 0.12;
+    // SNR signal-band half-width (Hz): Options control passive/active widths
+    double baseBw = activeSnr ? opt_.snrBandActive : opt_.snrBandPassive;
     double band = std::max(2.0 * df, baseBw);
     double guard = 0.03; // extra exclusion around signal bands
     double peakPow = 0.0; // integrated signal power
@@ -1189,14 +1184,25 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
         noiseBaseline = noiseVals[noiseVals.size()/2];
     }
     double snrDbInst = (signalPow > 0.0 && noiseBaseline > 0.0) ? (10.0 * std::log10(signalPow / (noiseBaseline * (band * 2.0 / std::max(1e-6, df))))) : 0.0;
+    if (!std::isfinite(snrDbInst)) snrDbInst = 0.0;
     // EMA smoothing over time (tau = 8s when active)
     double now = lastTs_;
     double dt = (lastSnrUpdateTime_ > 0.0) ? (now - lastSnrUpdateTime_) : psdUpdateSec_;
-    double tau = activeSnr ? 7.0 : snrTauSec_;
+    double tau = activeSnr ? opt_.snrActiveTauSec : snrTauSec_;
     double alpha = 1.0 - std::exp(-dt / std::max(1e-3, tau));
     if (!snrEmaValid_) { snrEmaDb_ = snrDbInst; snrEmaValid_ = true; }
-    else snrEmaDb_ = (1.0 - alpha) * snrEmaDb_ + alpha * snrDbInst;
+    else {
+        snrEmaDb_ = (1.0 - alpha) * snrEmaDb_ + alpha * snrDbInst;
+    }
+    // Blend toward instant value when band mode or width changes to avoid step bias
+    bool bandWidthChanged = (std::fabs(baseBw - lastSnrBaseBw_) > 1e-9) || (activeSnr != lastSnrActiveMode_);
+    if (bandWidthChanged) {
+        double bf = std::clamp(opt_.snrBandBlendFactor, 0.0, 1.0);
+        snrEmaDb_ = (1.0 - bf) * snrEmaDb_ + bf * snrDbInst;
+    }
+    lastSnrBaseBw_ = baseBw; lastSnrActiveMode_ = activeSnr;
     lastSnrUpdateTime_ = now;
+    if (!std::isfinite(snrEmaDb_)) snrEmaDb_ = 0.0;
     out.quality.snrDb = snrEmaDb_;
     out.quality.f0Hz = lastF0Hz_;
 
@@ -1243,19 +1249,21 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     }
     // Tiered harmonic suppression
     double ratioHalfFund = (pFund > 0.0 ? (pHalf / pFund) : 0.0);
-    // Track half-f0 stability over recent PSD updates
-    if (f0Half > 0.0) { halfF0Hist_.push_back(f0Half); if (halfF0Hist_.size() > 3) halfF0Hist_.pop_front(); }
-    else halfF0Hist_.clear();
-    bool halfStable = false; if (halfF0Hist_.size() >= 2) { double fmin = *std::min_element(halfF0Hist_.begin(), halfF0Hist_.end()); double fmax = *std::max_element(halfF0Hist_.begin(), halfF0Hist_.end()); halfStable = ((fmax - fmin) <= 0.05); }
+    // Compute warm-up first (used for adaptive drift tolerance)
     int acceptedRR = std::max(0, (int)acceptedPeaksTotal_ - 1);
-    // Warm-up for soft flag: time ≥15s AND ≥10 accepted RR (decouple from bpmEma)
     bool warmupPassed = ((lastTs_ - firstTsApprox_) >= 15.0) && (acceptedRR >= 10);
+    // Track half-f0 stability over recent PSD updates (longer history, adaptive drift)
+    if (f0Half > 0.0) { halfF0Hist_.push_back(f0Half); if (halfF0Hist_.size() > 5) halfF0Hist_.pop_front(); }
+    else halfF0Hist_.clear();
+    double driftTol = warmupPassed ? 0.06 : 0.10;
+    bool halfStable = false; if (halfF0Hist_.size() >= 2) { double fmin = *std::min_element(halfF0Hist_.begin(), halfF0Hist_.end()); double fmax = *std::max_element(halfF0Hist_.begin(), halfF0Hist_.end()); halfStable = ((fmax - fmin) <= driftTol); }
+    // Warm-up for soft flag: time ≥15s AND ≥10 accepted RR (decouple from bpmEma)
     bool softGuards = (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.30) && warmupPassed;
     // Anchor soft logic to start only after warm-up passes; reset on transition
     if (warmupPassed && !warmupWasPassed_) { softConsecPass_ = 0; halfF0Hist_.clear(); }
     warmupWasPassed_ = warmupPassed;
     // Immediate soft activation post warm-up on PSD dominance (no streak requirement)
-    bool softPass = warmupPassed && (ratioHalfFund >= 2.0) && halfStable && softGuards;
+    bool softPass = warmupPassed && (ratioHalfFund >= opt_.pHalfOverFundThresholdSoft) && halfStable && softGuards;
     if (softPass) {
         if (!softDoublingActive_) softStartTs_ = lastTs_;
         softDoublingActive_ = true;
@@ -1275,8 +1283,9 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
         doublingHoldUntil_ = std::max(doublingHoldUntil_, lastTs_ + 5.0);
         doublingLastTrueTs_ = lastTs_;
         if (longRR > 0.0) doublingLongRRms_ = longRR;
-        // Extend fallback window to 5s
-        hardFallbackUntil_ = lastTs_ + 5.0;
+        // Bound hard fallback window to ≤3s and within hold window
+        double hardRemain = std::max(0.0, doublingHoldUntil_ - lastTs_);
+        hardFallbackUntil_ = lastTs_ + std::min(3.0, hardRemain);
     }
     bool hardGuardsOk = (ratioHalfFund >= 1.5) && halfStable && (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.20);
     if (doublingActive_) { if (hardGuardsOk) doublingLastTrueTs_ = lastTs_; if ((lastTs_ - doublingLastTrueTs_) >= 5.0 && lastTs_ >= doublingHoldUntil_) doublingActive_ = false; }
@@ -1290,17 +1299,20 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
         bool dblActive = (doublingHintActive_ || softDoublingActive_ || doublingActive_);
         if (dblActive && (lastTs_ >= 20.0) && (bpmEst > 0.0 && bpmEst < 40.0)) {
             if (chokeStartTs_ <= 0.0) chokeStartTs_ = lastTs_;
-            if ((lastTs_ - chokeStartTs_) >= 3.0) chokeRelaxUntil_ = lastTs_ + 3.0; // relax for next 3s
+            if ((lastTs_ - chokeStartTs_) >= 3.0) {
+                double recoveryTime = (bpmEst < 35.0) ? 7.0 : 5.0;
+                chokeRelaxUntil_ = lastTs_ + recoveryTime; // adaptive relax
+            }
         } else {
             chokeStartTs_ = 0.0;
         }
     }
     // Doubling hint (post warm-up): PSD path or RR-centric fallback under conservative guards
-    bool psdHintPass = warmupPassed && (ratioHalfFund >= 2.0) && halfStable && (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.30);
+    bool psdHintPass = warmupPassed && (ratioHalfFund >= opt_.pHalfOverFundThresholdSoft) && halfStable && (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.30);
     // Optional subdominant PSD fallback (>=1.6 for ~6s, slightly looser drift)
     bool halfStableLoose = false; if (halfF0Hist_.size() >= 2) { double fmin2 = *std::min_element(halfF0Hist_.begin(), halfF0Hist_.end()); double fmax2 = *std::max_element(halfF0Hist_.begin(), halfF0Hist_.end()); halfStableLoose = ((fmax2 - fmin2) <= 0.08); }
     static double psdLoStart = 0.0;
-    bool psdLoNow = warmupPassed && (ratioHalfFund >= 1.6) && halfStableLoose && (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.20);
+    bool psdLoNow = warmupPassed && (ratioHalfFund >= opt_.pHalfOverFundThresholdLow) && halfStableLoose && (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.20);
     bool psdLoHold = false;
     if (psdLoNow) { if (psdLoStart <= 0.0) psdLoStart = lastTs_; if ((lastTs_ - psdLoStart) >= 6.0) psdLoHold = true; }
     else { psdLoStart = 0.0; }
@@ -1341,7 +1353,7 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     } else {
         lastClearBadStart_ = 0.0;
     }
-    bool halfDominant = (ratioHalfFund >= 2.0) && halfStable;
+    bool halfDominant = (ratioHalfFund >= opt_.pHalfOverFundThresholdSoft) && halfStable;
     // Keep mapping to 1/2 f0 for 5s after last active to stabilize SNR/conf
     double lastActiveTs_map = 0.0;
     if (softLastTrueTs_ > 0.0) lastActiveTs_map = std::max(lastActiveTs_map, softLastTrueTs_);
@@ -1353,6 +1365,7 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     if (useHalfForSNR && f0 > 0.0) {
         double signalPowUsed = pHalf + pFund; // half fundamental + original f0
         double snrDbInst2 = (signalPowUsed > 0.0 && noiseBaseline > 0.0) ? (10.0 * std::log10(signalPowUsed / (noiseBaseline * (band * 2.0 / std::max(1e-6, df))))) : 0.0;
+        if (!std::isfinite(snrDbInst2)) snrDbInst2 = 0.0;
         if (!snrEmaValid_) { snrEmaDb_ = snrDbInst2; snrEmaValid_ = true; }
         else snrEmaDb_ = (1.0 - alpha) * snrEmaDb_ + alpha * snrDbInst2;
         f0Used = 0.5 * f0;
@@ -1377,7 +1390,9 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     bool activeConf3 = doublingHintActive_ || softDoublingActive_ || doublingActive_ || persistMap3;
     double x0 = activeConf3 ? 5.2 : 6.0; // center (dB)
     double k = activeConf3 ? (1.0/1.2) : 0.8;  // slope
+    if (!std::isfinite(snrEmaDb_)) snrEmaDb_ = 0.0;
     double conf_snr = 1.0 / (1.0 + std::exp(-k * (snrEmaDb_ - x0)));
+    if (!std::isfinite(conf_snr)) conf_snr = 0.0;
     // Multiply by (1 - rejection) and penalize high RR CV
     double conf = conf_snr * (1.0 - out.quality.rejectionRate);
     double cv = 0.0;
@@ -1398,6 +1413,7 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     // Warm-up gate: require >=15s or >=15 beats before trusting confidence
     bool warmed = ((lastTs_ - firstTsApprox_) >= 15.0) || (out.rrList.size() >= 15);
     if (!warmed) conf = 0.0;
+    if (!std::isfinite(conf)) conf = 0.0;
     out.quality.confidence = std::max(0.0, std::min(1.0, conf));
 }
 
