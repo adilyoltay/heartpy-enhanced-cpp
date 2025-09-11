@@ -137,11 +137,14 @@ RealtimeAnalyzer::RealtimeAnalyzer(double fs, const Options& opt)
 }
 
 void RealtimeAnalyzer::setWindowSeconds(double sec) {
-    windowSec_ = std::max(1.0, sec);
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    double clamped = std::max(1.0, std::min(600.0, sec));
+    windowSec_ = clamped;
     trimToWindow();
 }
 
 void RealtimeAnalyzer::setUpdateIntervalSeconds(double sec) {
+    std::lock_guard<std::mutex> lock(dataMutex_);
     updateSec_ = std::max(0.1, sec);
 }
 
@@ -368,18 +371,29 @@ void RealtimeAnalyzer::trimToWindow() {
 }
 
 void RealtimeAnalyzer::push(const float* samples, size_t n, double /*t0*/) {
+    if (!samples || n == 0) return;
+    size_t maxBatch = (size_t)std::ceil(std::max(1.0, 10.0) * fs_);
+    if (n > maxBatch) n = maxBatch;
+    std::lock_guard<std::mutex> lock(dataMutex_);
     append(samples, n);
 }
 
 void RealtimeAnalyzer::push(const std::vector<double>& samples, double /*t0*/) {
     if (samples.empty()) return;
-    std::vector<float> tmp(samples.size());
-    for (size_t i = 0; i < samples.size(); ++i) tmp[i] = static_cast<float>(samples[i]);
+    size_t n = samples.size();
+    size_t maxBatch = (size_t)std::ceil(std::max(1.0, 10.0) * fs_);
+    if (n > maxBatch) n = maxBatch;
+    std::vector<float> tmp(n);
+    for (size_t i = 0; i < n; ++i) tmp[i] = static_cast<float>(samples[i]);
+    std::lock_guard<std::mutex> lock(dataMutex_);
     append(tmp.data(), tmp.size());
 }
 
 void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size_t n) {
     if (!samples || !timestamps || n == 0) return;
+    size_t maxBatch = (size_t)std::ceil(std::max(1.0, 10.0) * fs_);
+    if (n > maxBatch) n = maxBatch;
+    std::lock_guard<std::mutex> lock(dataMutex_);
     // Update effective Fs using timestamps
     double t0 = timestamps[0];
     double t1 = timestamps[n - 1];
@@ -509,7 +523,9 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
                             double delta = 140.0;
                             double minCmp = 1e9;
                             for (int idx = start; idx < end; ++idx) {
-                                float yr2 = std::max(0.0f, filt_[idx - (int)firstAbs_]);
+                                int rel = idx - (int)firstAbs_;
+                                if (rel < 0 || rel >= (int)filt_.size()) continue;
+                                float yr2 = std::max(0.0f, filt_[rel]);
                                 double cmp = (yr2 - vmin2) / den2 * 1024.0;
                                 if (cmp < minCmp) minCmp = cmp;
                             }
@@ -574,6 +590,7 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
 }
 
 bool RealtimeAnalyzer::poll(HeartMetrics& out) {
+    std::lock_guard<std::mutex> lock(dataMutex_);
     // Only emit once per updateSec_ of newly received samples
     if ((lastTs_ - lastEmitTime_) < updateSec_) return false;
     lastEmitTime_ = lastTs_;

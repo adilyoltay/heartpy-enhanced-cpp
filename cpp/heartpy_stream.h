@@ -4,6 +4,7 @@
 #include <vector>
 #include <deque>
 #include <cstddef>
+#include <mutex>
 #include "heartpy_core.h"
 
 namespace heartpy {
@@ -51,6 +52,8 @@ private:
     void append(const float* x, size_t n);
     void trimToWindow();
     void updateSNR(HeartMetrics& out);
+    // Thread safety
+    mutable std::mutex dataMutex_;
 
     double fs_ {0.0};              // nominal fs from constructor
     Options opt_ {};
