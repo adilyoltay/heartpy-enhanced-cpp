@@ -1,0 +1,326 @@
+package com.heartpy;
+
+import androidx.annotation.NonNull;
+
+import com.facebook.react.bridge.ReactApplicationContext;
+import com.facebook.react.bridge.ReactContextBaseJavaModule;
+import com.facebook.react.bridge.ReactMethod;
+import com.facebook.react.bridge.UiThreadUtil;
+import com.facebook.react.bridge.Promise;
+import com.facebook.jni.HybridData;
+import com.facebook.react.bridge.ReactContext;
+
+public class HeartPyModule extends ReactContextBaseJavaModule {
+    static {
+        System.loadLibrary("heartpy_rn");
+    }
+    private static native String analyzeNativeJson(
+            double[] signal, double fs,
+            double lowHz, double highHz, int order,
+            int nfft, double overlap, double welchWsizeSec,
+            double refractoryMs, double thresholdScale, double bpmMin, double bpmMax,
+            boolean interpClipping, double clippingThreshold,
+            boolean hampelCorrect, int hampelWindow, double hampelThreshold,
+            boolean removeBaselineWander, boolean enhancePeaks,
+            boolean highPrecision, double highPrecisionFs,
+            boolean rejectSegmentwise, double segmentRejectThreshold, int segmentRejectMaxRejects, int segmentRejectWindowBeats, double segmentRejectOverlap,
+            boolean cleanRR, int cleanMethod,
+            double segmentWidth, double segmentOverlap, double segmentMinSize, boolean replaceOutliers,
+            double rrSplineS, double rrSplineTargetSse, double rrSplineSmooth,
+            boolean breathingAsBpm,
+            int sdsdMode,
+            int poincareMode,
+            boolean pnnAsPercent
+    );
+
+    private static native String analyzeRRNativeJson(
+            double[] rr,
+            boolean cleanRR, int cleanMethod,
+            boolean breathingAsBpm,
+            boolean thresholdRR,
+            int sdsdMode,
+            int poincareMode,
+            boolean pnnAsPercent
+    );
+
+    private static native String analyzeSegmentwiseNativeJson(
+            double[] signal, double fs,
+            double lowHz, double highHz, int order,
+            int nfft, double overlap, double welchWsizeSec,
+            double refractoryMs, double thresholdScale, double bpmMin, double bpmMax,
+            boolean interpClipping, double clippingThreshold,
+            boolean hampelCorrect, int hampelWindow, double hampelThreshold,
+            boolean removeBaselineWander, boolean enhancePeaks,
+            boolean highPrecision, double highPrecisionFs,
+            boolean rejectSegmentwise, double segmentRejectThreshold, int segmentRejectMaxRejects, int segmentRejectWindowBeats, double segmentRejectOverlap,
+            boolean cleanRR, int cleanMethod,
+            double segmentWidth, double segmentOverlap, double segmentMinSize, boolean replaceOutliers,
+            double rrSplineS, double rrSplineTargetSse, double rrSplineSmooth,
+            boolean breathingAsBpm,
+            int sdsdMode,
+            int poincareMode,
+            boolean pnnAsPercent
+    );
+
+    private static native double[] interpolateClippingNative(double[] signal, double fs, double threshold);
+    private static native double[] hampelFilterNative(double[] signal, int windowSize, double threshold);
+    private static native double[] scaleDataNative(double[] signal, double newMin, double newMax);
+
+    public HeartPyModule(@NonNull ReactApplicationContext reactContext) {
+        super(reactContext);
+    }
+
+    @NonNull
+    @Override
+    public String getName() {
+        return "HeartPyModule";
+    }
+
+    private static com.facebook.react.bridge.WritableMap jsonToWritableMap(String json) {
+        try {
+            org.json.JSONObject obj = new org.json.JSONObject(json);
+            return toWritableMap(obj);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static com.facebook.react.bridge.WritableMap toWritableMap(org.json.JSONObject obj) throws org.json.JSONException {
+        com.facebook.react.bridge.WritableMap map = com.facebook.react.bridge.Arguments.createMap();
+        java.util.Iterator<String> it = obj.keys();
+        while (it.hasNext()) {
+            String k = it.next();
+            Object v = obj.get(k);
+            if (v == org.json.JSONObject.NULL) {
+                map.putNull(k);
+            } else if (v instanceof org.json.JSONObject) {
+                map.putMap(k, toWritableMap((org.json.JSONObject) v));
+            } else if (v instanceof org.json.JSONArray) {
+                map.putArray(k, toWritableArray((org.json.JSONArray) v));
+            } else if (v instanceof Boolean) {
+                map.putBoolean(k, (Boolean) v);
+            } else if (v instanceof Integer) {
+                map.putInt(k, (Integer) v);
+            } else if (v instanceof Long) {
+                map.putDouble(k, ((Long) v).doubleValue());
+            } else if (v instanceof Double) {
+                map.putDouble(k, (Double) v);
+            } else if (v instanceof String) {
+                map.putString(k, (String) v);
+            } else {
+                map.putString(k, String.valueOf(v));
+            }
+        }
+        return map;
+    }
+
+    private static com.facebook.react.bridge.WritableArray toWritableArray(org.json.JSONArray arr) throws org.json.JSONException {
+        com.facebook.react.bridge.WritableArray out = com.facebook.react.bridge.Arguments.createArray();
+        for (int i = 0; i < arr.length(); i++) {
+            Object v = arr.get(i);
+            if (v == org.json.JSONObject.NULL) {
+                out.pushNull();
+            } else if (v instanceof org.json.JSONObject) {
+                out.pushMap(toWritableMap((org.json.JSONObject) v));
+            } else if (v instanceof org.json.JSONArray) {
+                out.pushArray(toWritableArray((org.json.JSONArray) v));
+            } else if (v instanceof Boolean) {
+                out.pushBoolean((Boolean) v);
+            } else if (v instanceof Integer) {
+                out.pushInt((Integer) v);
+            } else if (v instanceof Long) {
+                out.pushDouble(((Long) v).doubleValue());
+            } else if (v instanceof Double) {
+                out.pushDouble((Double) v);
+            } else if (v instanceof String) {
+                out.pushString((String) v);
+            } else {
+                out.pushString(String.valueOf(v));
+            }
+        }
+        return out;
+    }
+
+    private static class Opts {
+        double lowHz=0.5, highHz=5.0; int order=2; int nfft=256; double overlap=0.5; double wsizeSec=240.0;
+        double refractoryMs=250.0, thresholdScale=0.5, bpmMin=40.0, bpmMax=180.0;
+        boolean interpClipping=false; double clippingThreshold=1020.0; boolean hampelCorrect=false; int hampelWindow=6; double hampelThreshold=3.0;
+        boolean removeBaselineWander=false, enhancePeaks=false;
+        boolean highPrecision=false; double highPrecisionFs=1000.0;
+        boolean rejectSegmentwise=false; double segmentRejectThreshold=0.3; int segmentRejectMaxRejects=3; int segmentRejectWindowBeats=10; double segmentRejectOverlap=0.0; boolean cleanRR=false; int cleanMethod=0;
+        double segmentWidth=120.0, segmentOverlap=0.0, segmentMinSize=20.0; boolean replaceOutliers=false;
+        double rrSplineS=10.0, rrSplineTargetSse=0.0, rrSplineSmooth=0.1;
+        boolean breathingAsBpm=false;
+        boolean thresholdRR=false;
+        int sdsdMode=1; // 1=abs, 0=signed
+        int poincareMode=1; // 1=masked, 0=formula
+        boolean pnnAsPercent=true;
+    }
+
+    private static Opts parseOptions(com.facebook.react.bridge.ReadableMap options) {
+        Opts o = new Opts();
+        if (options == null) return o;
+        if (options.hasKey("bandpass")) {
+            com.facebook.react.bridge.ReadableMap bp = options.getMap("bandpass");
+            if (bp.hasKey("lowHz")) o.lowHz = bp.getDouble("lowHz");
+            if (bp.hasKey("highHz")) o.highHz = bp.getDouble("highHz");
+            if (bp.hasKey("order")) o.order = bp.getInt("order");
+        }
+        if (options.hasKey("welch")) {
+            com.facebook.react.bridge.ReadableMap w = options.getMap("welch");
+            if (w.hasKey("nfft")) o.nfft = w.getInt("nfft");
+            if (w.hasKey("overlap")) o.overlap = w.getDouble("overlap");
+            if (w.hasKey("wsizeSec")) o.wsizeSec = w.getDouble("wsizeSec");
+        }
+        if (options.hasKey("peak")) {
+            com.facebook.react.bridge.ReadableMap p = options.getMap("peak");
+            if (p.hasKey("refractoryMs")) o.refractoryMs = p.getDouble("refractoryMs");
+            if (p.hasKey("thresholdScale")) o.thresholdScale = p.getDouble("thresholdScale");
+            if (p.hasKey("bpmMin")) o.bpmMin = p.getDouble("bpmMin");
+            if (p.hasKey("bpmMax")) o.bpmMax = p.getDouble("bpmMax");
+        }
+        if (options.hasKey("preprocessing")) {
+            com.facebook.react.bridge.ReadableMap prep = options.getMap("preprocessing");
+            if (prep.hasKey("interpClipping")) o.interpClipping = prep.getBoolean("interpClipping");
+            if (prep.hasKey("clippingThreshold")) o.clippingThreshold = prep.getDouble("clippingThreshold");
+            if (prep.hasKey("hampelCorrect")) o.hampelCorrect = prep.getBoolean("hampelCorrect");
+            if (prep.hasKey("hampelWindow")) o.hampelWindow = prep.getInt("hampelWindow");
+            if (prep.hasKey("hampelThreshold")) o.hampelThreshold = prep.getDouble("hampelThreshold");
+            if (prep.hasKey("removeBaselineWander")) o.removeBaselineWander = prep.getBoolean("removeBaselineWander");
+            if (prep.hasKey("enhancePeaks")) o.enhancePeaks = prep.getBoolean("enhancePeaks");
+        }
+        if (options.hasKey("quality")) {
+            com.facebook.react.bridge.ReadableMap q = options.getMap("quality");
+            if (q.hasKey("rejectSegmentwise")) o.rejectSegmentwise = q.getBoolean("rejectSegmentwise");
+            if (q.hasKey("segmentRejectThreshold")) o.segmentRejectThreshold = q.getDouble("segmentRejectThreshold");
+            if (q.hasKey("segmentRejectMaxRejects")) o.segmentRejectMaxRejects = q.getInt("segmentRejectMaxRejects");
+            if (q.hasKey("cleanRR")) o.cleanRR = q.getBoolean("cleanRR");
+            if (q.hasKey("segmentRejectWindowBeats")) o.segmentRejectWindowBeats = q.getInt("segmentRejectWindowBeats");
+            if (q.hasKey("segmentRejectOverlap")) o.segmentRejectOverlap = q.getDouble("segmentRejectOverlap");
+            if (q.hasKey("cleanMethod")) {
+                String m = q.getString("cleanMethod");
+                if ("iqr".equals(m)) o.cleanMethod = 1;
+                else if ("z-score".equals(m)) o.cleanMethod = 2;
+                else o.cleanMethod = 0;
+            }
+            if (q.hasKey("thresholdRR")) o.thresholdRR = q.getBoolean("thresholdRR");
+        }
+        if (options.hasKey("timeDomain")) {
+            com.facebook.react.bridge.ReadableMap td = options.getMap("timeDomain");
+            if (td.hasKey("sdsdMode")) {
+                String m = td.getString("sdsdMode");
+                o.sdsdMode = ("signed".equals(m) ? 0 : 1);
+            }
+            if (td.hasKey("pnnAsPercent")) o.pnnAsPercent = td.getBoolean("pnnAsPercent");
+        }
+        if (options.hasKey("poincare")) {
+            com.facebook.react.bridge.ReadableMap pc = options.getMap("poincare");
+            if (pc.hasKey("mode")) {
+                String m = pc.getString("mode");
+                o.poincareMode = ("masked".equals(m) ? 1 : 0);
+            }
+        }
+        if (options.hasKey("highPrecision")) {
+            com.facebook.react.bridge.ReadableMap hp = options.getMap("highPrecision");
+            if (hp.hasKey("enabled")) o.highPrecision = hp.getBoolean("enabled");
+            if (hp.hasKey("targetFs")) o.highPrecisionFs = hp.getDouble("targetFs");
+        }
+        if (options.hasKey("segmentwise")) {
+            com.facebook.react.bridge.ReadableMap seg = options.getMap("segmentwise");
+            if (seg.hasKey("width")) o.segmentWidth = seg.getDouble("width");
+            if (seg.hasKey("overlap")) o.segmentOverlap = seg.getDouble("overlap");
+            if (seg.hasKey("minSize")) o.segmentMinSize = seg.getDouble("minSize");
+            if (seg.hasKey("replaceOutliers")) o.replaceOutliers = seg.getBoolean("replaceOutliers");
+        }
+        if (options.hasKey("rrSpline")) {
+            com.facebook.react.bridge.ReadableMap rr = options.getMap("rrSpline");
+            if (rr.hasKey("s")) o.rrSplineS = rr.getDouble("s");
+            if (rr.hasKey("targetSse")) o.rrSplineTargetSse = rr.getDouble("targetSse");
+            if (rr.hasKey("smooth")) o.rrSplineSmooth = rr.getDouble("smooth");
+        }
+        if (options.hasKey("breathingAsBpm")) o.breathingAsBpm = options.getBoolean("breathingAsBpm");
+        return o;
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableMap analyze(double[] signal, double fs,
+                                                         com.facebook.react.bridge.ReadableMap options) {
+        Opts o = parseOptions(options);
+        String json = analyzeNativeJson(signal, fs,
+                o.lowHz, o.highHz, o.order,
+                o.nfft, o.overlap, o.wsizeSec,
+                o.refractoryMs, o.thresholdScale, o.bpmMin, o.bpmMax,
+                o.interpClipping, o.clippingThreshold,
+                o.hampelCorrect, o.hampelWindow, o.hampelThreshold,
+                o.removeBaselineWander, o.enhancePeaks,
+                o.highPrecision, o.highPrecisionFs,
+                o.rejectSegmentwise, o.segmentRejectThreshold, o.segmentRejectMaxRejects, o.segmentRejectWindowBeats, o.segmentRejectOverlap,
+                o.cleanRR, o.cleanMethod,
+                o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
+                o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
+                o.breathingAsBpm,
+                o.sdsdMode,
+                o.poincareMode,
+                o.pnnAsPercent
+        );
+        return jsonToWritableMap(json);
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableMap analyzeRR(double[] rr,
+                                                           com.facebook.react.bridge.ReadableMap options) {
+        Opts o = parseOptions(options);
+        String json = analyzeRRNativeJson(rr, o.cleanRR, o.cleanMethod, o.breathingAsBpm, o.thresholdRR, o.sdsdMode, o.poincareMode, o.pnnAsPercent);
+        return jsonToWritableMap(json);
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableMap analyzeSegmentwise(double[] signal, double fs,
+                                                                    com.facebook.react.bridge.ReadableMap options) {
+        Opts o = parseOptions(options);
+        String json = analyzeSegmentwiseNativeJson(signal, fs,
+                o.lowHz, o.highHz, o.order,
+                o.nfft, o.overlap, o.wsizeSec,
+                o.refractoryMs, o.thresholdScale, o.bpmMin, o.bpmMax,
+                o.interpClipping, o.clippingThreshold,
+                o.hampelCorrect, o.hampelWindow, o.hampelThreshold,
+                o.removeBaselineWander, o.enhancePeaks,
+                o.highPrecision, o.highPrecisionFs,
+                o.rejectSegmentwise, o.segmentRejectThreshold, o.segmentRejectMaxRejects, o.segmentRejectWindowBeats,
+                o.cleanRR, o.cleanMethod,
+                o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
+                o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
+                o.breathingAsBpm,
+                o.sdsdMode,
+                o.poincareMode,
+                o.pnnAsPercent
+        );
+        return jsonToWritableMap(json);
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableArray interpolateClipping(double[] signal, double fs, double threshold) {
+        double[] y = interpolateClippingNative(signal, fs, threshold);
+        com.facebook.react.bridge.WritableArray arr = com.facebook.react.bridge.Arguments.createArray();
+        for (double v : y) arr.pushDouble(v);
+        return arr;
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableArray hampelFilter(double[] signal, int windowSize, double threshold) {
+        double[] y = hampelFilterNative(signal, windowSize, threshold);
+        com.facebook.react.bridge.WritableArray arr = com.facebook.react.bridge.Arguments.createArray();
+        for (double v : y) arr.pushDouble(v);
+        return arr;
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableArray scaleData(double[] signal, double newMin, double newMax) {
+        double[] y = scaleDataNative(signal, newMin, newMax);
+        com.facebook.react.bridge.WritableArray arr = com.facebook.react.bridge.Arguments.createArray();
+        for (double v : y) arr.pushDouble(v);
+        return arr;
+    }
+}
+
+

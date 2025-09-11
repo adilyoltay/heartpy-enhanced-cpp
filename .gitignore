@@ -1,0 +1,96 @@
+# Build directories
+build*/
+cmake-build-*/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+ENV/
+env/
+
+# Node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# iOS
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Android
+.gradle/
+local.properties
+*.iml
+.externalNativeBuild
+.cxx/
+
+# React Native
+metro.config.js
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.csv
+test_*.csv
+debug_*.py
+validate_mitbih_rr_fixed.py
+test_cpp_output.py
+
+# MIT-BIH Database (large files)
+examples/mit-bih-arrhythmia-database-1.0.0/
+
+# HeartPy source (temporary)
+heartpy_source/
+
+# Validation outputs
+MIT_BIH_*.md
+MIT_BIH_*.txt
+HeartPy_*_Summary.md
+*_report.md
+HeartPy_Issues_Summary.md

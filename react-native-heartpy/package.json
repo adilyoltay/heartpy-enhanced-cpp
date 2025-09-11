@@ -1,0 +1,20 @@
+{
+  "name": "react-native-heartpy",
+  "version": "0.1.0",
+  "description": "React Native bindings for a HeartPy-like C++ core (HR/HRV analysis)",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "src",
+    "android",
+    "ios",
+    "react-native.config.js"
+  ],
+  "keywords": ["react-native", "heart", "hrv", "ppg", "ecg", "jsi"],
+  "license": "MIT",
+  "peerDependencies": {
+    "react-native": ">=0.71.0"
+  }
+}
+
+
