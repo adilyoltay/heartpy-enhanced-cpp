@@ -94,3 +94,6 @@ MIT_BIH_*.txt
 HeartPy_*_Summary.md
 *_report.md
 HeartPy_Issues_Summary.md
+
+# Local Python venv
+.venv_val/
