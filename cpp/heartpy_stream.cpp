@@ -235,9 +235,7 @@ void RealtimeAnalyzer::append(const float* x, size_t n) {
                             double longEst = 0.0;
                             if (doublingLongRRms_ > 0.0) longEst = std::max(longEst, doublingLongRRms_);
                             if (!lastRR_.empty()) {
-                                std::vector<double> tmpRR = lastRR_;
-                                std::nth_element(tmpRR.begin(), tmpRR.begin() + tmpRR.size()/2, tmpRR.end());
-                                double med = tmpRR[tmpRR.size()/2];
+                                double med = medianOfRR(lastRR_);
                                 longEst = std::max(longEst, 2.0 * med);
                             }
                             if (lastF0Hz_ > 1e-9) longEst = std::max(longEst, 1000.0 / lastF0Hz_);
@@ -821,9 +819,7 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
             double longMs = 0.0;
             if (out.quality.rrLongMs > 0.0) longMs = out.quality.rrLongMs;
             if (longMs <= 0.0 && !lastRR_.empty()) {
-                std::vector<double> tmpRR = lastRR_;
-                std::nth_element(tmpRR.begin(), tmpRR.begin() + tmpRR.size()/2, tmpRR.end());
-                double med = tmpRR[tmpRR.size()/2];
+                double med = medianOfRR(lastRR_);
                 longMs = 2.0 * med;
             }
             if (longMs <= 0.0 && lastF0Hz_ > 1e-9) longMs = 1000.0 / lastF0Hz_;
@@ -891,10 +887,8 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
         std::vector<int> peaks_before = lastPeaks_;
         std::vector<double> rr_before = lastRR_;
         if (lastRR_.size() >= 3 && lastPeaks_.size() == lastRR_.size() + 1) {
-            std::vector<double> rr_copy = lastRR_;
-            std::vector<double> rr_sorted = rr_copy; std::nth_element(rr_sorted.begin(), rr_sorted.begin() + rr_sorted.size()/2, rr_sorted.end());
-            double m = rr_sorted[rr_sorted.size()/2];
-            std::vector<char> keep(lastPeaks_.size(), 1);
+            double m = medianOfRR(lastRR_);
+            keepScratch_.assign(lastPeaks_.size(), 1);
             for (size_t i = 0; i + 1 < lastRR_.size(); ++i) {
                 double r1 = lastRR_[i];
                 double r2 = lastRR_[i + 1];
@@ -929,16 +923,16 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                         double aR = (pR >= 0 && pR < (int)win.size()) ? win[pR] : 0.0;
                         // remove middle if it is not stronger than both neighbors
                         if (aM <= std::max(aL, aR)) {
-                            keep[i + 1] = 0;
+                            keepScratch_[i + 1] = 0;
                             ++i; // skip next as it merges with this short
                         }
                 }
             }
             // rebuild peaks if any removal
-            bool any = false; for (char c : keep) if (!c) { any = true; break; }
+            bool any = false; for (char c : keepScratch_) if (!c) { any = true; break; }
             if (any) {
                 std::vector<int> newPeaks;
-                for (size_t k = 0; k < keep.size(); ++k) if (keep[k]) newPeaks.push_back(lastPeaks_[k]);
+                for (size_t k = 0; k < keepScratch_.size(); ++k) if (keepScratch_[k]) newPeaks.push_back(lastPeaks_[k]);
                 lastPeaks_.swap(newPeaks);
                 lastRR_.clear();
                 for (size_t j = 1; j < lastPeaks_.size(); ++j) {
@@ -954,11 +948,10 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                     changed = false;
                     ++iteration;
                     if (lastRR_.size() >= 3) {
-                        std::vector<double> rrs = lastRR_;
-                        std::vector<double> tmp2 = rrs; std::nth_element(tmp2.begin(), tmp2.begin() + tmp2.size()/2, tmp2.end());
-                        double m2 = tmp2[tmp2.size()/2];
+                        const std::vector<double>& rrs = lastRR_;
+                        double m2 = medianOfRR(rrs);
                         double two = 2.0 * m2;
-                        std::vector<char> keep2(lastPeaks_.size(), 1);
+                        keepScratch_.assign(lastPeaks_.size(), 1);
                         for (size_t i = 0; i + 1 < rrs.size(); ++i) {
                             double r1 = rrs[i];
                             double r2 = rrs[i + 1];
@@ -976,12 +969,12 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                                 double aL = (pL >= 0 && pL < (int)win.size()) ? win[pL] : 0.0;
                                 double aM = (pM >= 0 && pM < (int)win.size()) ? win[pM] : 0.0;
                                 double aR = (pR >= 0 && pR < (int)win.size()) ? win[pR] : 0.0;
-                                if (aM <= std::max(aL, aR)) { keep2[i + 1] = 0; changed = true; ++i; ++removedTotal; }
+                                if (aM <= std::max(aL, aR)) { keepScratch_[i + 1] = 0; changed = true; ++i; ++removedTotal; }
                             }
                         }
                         if (changed) {
                             std::vector<int> newPeaks2;
-                            for (size_t k = 0; k < keep2.size(); ++k) if (keep2[k]) newPeaks2.push_back(lastPeaks_[k]);
+                            for (size_t k = 0; k < keepScratch_.size(); ++k) if (keepScratch_[k]) newPeaks2.push_back(lastPeaks_[k]);
                             lastPeaks_.swap(newPeaks2);
                             lastRR_.clear();
                             for (size_t j = 1; j < lastPeaks_.size(); ++j) {
@@ -995,14 +988,12 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
             } else if (rrFallbackDrivingHint_) {
                 // RR-fallback path: enable a very-limited merge with tight bands and hard caps; suppression stays OFF
                 if (lastRR_.size() >= 3) {
-                    std::vector<double> tmp2 = lastRR_;
-                    std::nth_element(tmp2.begin(), tmp2.begin() + tmp2.size()/2, tmp2.end());
-                    double m2 = tmp2[tmp2.size()/2];
+                    double m2 = medianOfRR(lastRR_);
                     double two = 2.0 * m2;
                     const size_t nInit = lastPeaks_.size();
                     size_t cap = std::min<size_t>(10, (size_t)std::floor(0.10 * nInit));
                     size_t removed = 0;
-                    std::vector<char> keepF(lastPeaks_.size(), 1);
+                    keepScratch_.assign(lastPeaks_.size(), 1);
                     for (size_t i = 0; i + 1 < lastRR_.size(); ++i) {
                         if (removed >= cap) break;
                         double r1 = lastRR_[i];
@@ -1017,12 +1008,12 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                             double aL = (pL >= 0 && pL < (int)win.size()) ? win[pL] : 0.0;
                             double aM = (pM >= 0 && pM < (int)win.size()) ? win[pM] : 0.0;
                             double aR = (pR >= 0 && pR < (int)win.size()) ? win[pR] : 0.0;
-                            if (aM <= std::max(aL, aR)) { keepF[i + 1] = 0; ++removed; ++i; }
+                            if (aM <= std::max(aL, aR)) { keepScratch_[i + 1] = 0; ++removed; ++i; }
                         }
                     }
                     if (removed > 0) {
                         std::vector<int> newPeaksF;
-                        for (size_t k = 0; k < keepF.size(); ++k) if (keepF[k]) newPeaksF.push_back(lastPeaks_[k]);
+                        for (size_t k = 0; k < keepScratch_.size(); ++k) if (keepScratch_[k]) newPeaksF.push_back(lastPeaks_[k]);
                         lastPeaks_.swap(newPeaksF);
                         lastRR_.clear();
                         for (size_t j = 1; j < lastPeaks_.size(); ++j) {
@@ -1035,14 +1026,14 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
         }
         // Safety brake: prevent excessive downshift
         double bpmEstNow = 0.0;
-        if (!lastRR_.empty()) { std::vector<double> tmp = lastRR_; std::nth_element(tmp.begin(), tmp.begin()+tmp.size()/2, tmp.end()); double med = tmp[tmp.size()/2]; if (med>1e-6) bpmEstNow = 60000.0/med; }
+        if (!lastRR_.empty()) { double med = medianOfRR(lastRR_); if (med>1e-6) bpmEstNow = 60000.0/med; }
         if (rrFallbackActive_ && lastPollBpmEst_ > 100.0 && bpmEstNow > 0.0 && bpmEstNow < 50.0) {
             // revert this poll's changes
             lastPeaks_ = peaks_before;
             lastRR_ = rr_before;
         }
         // update last poll bpm estimate
-        if (!lastRR_.empty()) { std::vector<double> tmp2 = lastRR_; std::nth_element(tmp2.begin(), tmp2.begin()+tmp2.size()/2, tmp2.end()); double med2 = tmp2[tmp2.size()/2]; if (med2>1e-6) lastPollBpmEst_ = 60000.0/med2; }
+        if (!lastRR_.empty()) { double med2 = medianOfRR(lastRR_); if (med2>1e-6) lastPollBpmEst_ = 60000.0/med2; }
 
         // Produce a coarse binaryPeakMask aligned to current peakList (streaming)
         out.binaryPeakMask.clear();
@@ -1134,6 +1125,14 @@ void  hp_rt_destroy(void* h) {
 
 namespace heartpy {
 
+double RealtimeAnalyzer::medianOfRR(const std::vector<double>& rr) {
+    if (rr.empty()) return 0.0;
+    scratchRR_.assign(rr.begin(), rr.end());
+    auto mid = scratchRR_.begin() + scratchRR_.size() / 2;
+    std::nth_element(scratchRR_.begin(), mid, scratchRR_.end());
+    return *mid;
+}
+
 void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     if ((lastTs_ - lastPsdTime_) < psdUpdateSec_) return;
     lastPsdTime_ = lastTs_;
@@ -1154,13 +1153,13 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     if (f0 <= 0.0) return;
     lastF0Hz_ = f0;
 
-    // Build analysis vector (copy of filt_)
-    std::vector<double> y; y.reserve(filt_.size());
-    for (float v : filt_) y.push_back((double)v);
+    // Build analysis vector (copy of filt_) — reuse buffer to reduce reallocations
+    yBufferD_.resize(filt_.size());
+    for (size_t i = 0; i < filt_.size(); ++i) yBufferD_[i] = (double)filt_[i];
 
     // Welch PSD on the full-rate filtered signal
     int nfft = opt_.nfft > 0 ? opt_.nfft : 256;
-    auto ps = welchPowerSpectrum(y, effFs, nfft, opt_.overlap);
+    auto ps = welchPowerSpectrum(yBufferD_, effFs, nfft, opt_.overlap);
     const auto &frq = ps.first; const auto &P = ps.second;
     if (frq.size() < 4 || frq.size() != P.size()) return;
 
@@ -1181,8 +1180,8 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     double guard = 0.03; // extra exclusion around signal bands
     double peakPow = 0.0; // integrated signal power
     double peakPow2 = 0.0;
-    std::vector<double> noiseVals;
-    noiseVals.reserve(frq.size());
+    noiseScratch_.clear();
+    noiseScratch_.reserve(frq.size());
     for (size_t i = 0; i < frq.size(); ++i) {
         double f = frq[i];
         double pv = std::abs(P[i]);
@@ -1191,14 +1190,14 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
         if (sig1) peakPow += pv;
         if (sig2) peakPow2 += pv;
         bool nearSig = inBand(f, f0, band + guard) || ((2.0 * f0 < nyq) && inBand(f, 2.0 * f0, band + guard));
-        if (!nearSig && f >= 0.4 && f <= 5.0) noiseVals.push_back(pv);
+        if (!nearSig && f >= 0.4 && f <= 5.0) noiseScratch_.push_back(pv);
     }
     double signalPow = peakPow + peakPow2;
     double noiseBaseline = 0.0;
-    if (!noiseVals.empty()) {
+    if (!noiseScratch_.empty()) {
         // median of noise band
-        std::nth_element(noiseVals.begin(), noiseVals.begin() + noiseVals.size()/2, noiseVals.end());
-        noiseBaseline = noiseVals[noiseVals.size()/2];
+        std::nth_element(noiseScratch_.begin(), noiseScratch_.begin() + noiseScratch_.size()/2, noiseScratch_.end());
+        noiseBaseline = noiseScratch_[noiseScratch_.size()/2];
     }
     double snrDbInst = (signalPow > 0.0 && noiseBaseline > 0.0) ? (10.0 * std::log10(signalPow / (noiseBaseline * (band * 2.0 / std::max(1e-6, df))))) : 0.0;
     if (!std::isfinite(snrDbInst)) snrDbInst = 0.0;

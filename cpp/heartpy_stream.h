@@ -55,6 +55,13 @@ private:
     // Thread safety
     mutable std::mutex dataMutex_;
 
+    // Performance scratch buffers (reused to avoid frequent reallocations)
+    double medianOfRR(const std::vector<double>& rr);
+    std::vector<double> scratchRR_;
+    std::vector<double> yBufferD_;
+    std::vector<double> noiseScratch_;
+    std::vector<char> keepScratch_;
+
     double fs_ {0.0};              // nominal fs from constructor
     Options opt_ {};
     double windowSec_ {60.0};
