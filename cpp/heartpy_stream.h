@@ -96,6 +96,9 @@ private:
     std::deque<float> rollWinRect_;
     double rollRectSum_ {0.0};
     double rollRectSumSq_ {0.0};
+    // Monotonic deques for O(1) min/max over rectified window
+    std::deque<float> rectMinQ_;
+    std::deque<float> rectMaxQ_;
     int winSamples_ {0};
     int refractorySamples_ {0};
     size_t firstAbs_ {0};
@@ -178,6 +181,7 @@ private:
     bool   rrFallbackActive_ {false};
     bool   rrFallbackDrivingHint_ {false};
     double lastPollBpmEst_ {0.0};
+    bool   rrFallbackModeActive_ {false};
 };
 
 } // namespace heartpy

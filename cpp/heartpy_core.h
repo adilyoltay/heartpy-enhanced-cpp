@@ -134,6 +134,7 @@ struct QualityInfo {
     double softSecs = 0.0;           // seconds since soft flag became active
     int    hardFallbackActive = 0;   // 1 when hard fallback elevated refractory is active
     int    doublingHintFlag = 0;     // 1 when PSD-only doubling hint is active
+    int    rrFallbackModeActive = 0; // 1 when RR-only fallback mode gating is active (debug)
 };
 
 // Enhanced metrics structure matching Python HeartPy

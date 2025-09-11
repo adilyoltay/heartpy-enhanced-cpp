@@ -175,6 +175,10 @@ void RealtimeAnalyzer::append(const float* x, size_t n) {
             rollWinRect_.push_back(yr);
             rollRectSum_ += yr;
             rollRectSumSq_ += static_cast<double>(yr) * static_cast<double>(yr);
+            while (!rectMinQ_.empty() && rectMinQ_.back() > yr) rectMinQ_.pop_back();
+            rectMinQ_.push_back(yr);
+            while (!rectMaxQ_.empty() && rectMaxQ_.back() < yr) rectMaxQ_.pop_back();
+            rectMaxQ_.push_back(yr);
         }
         while ((int)rollWin_.size() > winSamples_) {
             float u = rollWin_.front(); rollWin_.pop_front();
@@ -183,6 +187,8 @@ void RealtimeAnalyzer::append(const float* x, size_t n) {
         while ((int)rollWinRect_.size() > winSamples_) {
             float u = rollWinRect_.front(); rollWinRect_.pop_front();
             rollRectSum_ -= u; rollRectSumSq_ -= static_cast<double>(u) * static_cast<double>(u);
+            if (!rectMinQ_.empty() && rectMinQ_.front() == u) rectMinQ_.pop_front();
+            if (!rectMaxQ_.empty() && rectMaxQ_.front() == u) rectMaxQ_.pop_front();
         }
         // incremental local-max detection using 1-sample look-ahead
         size_t k = i;
@@ -448,7 +454,8 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
                 double thr;
                 double y1Cmp = y1;
                 if (hpThreshold_) {
-                    double vmin = y1, vmax = y1; for (float vv : rollWinRect_) { if (vv < vmin) vmin = vv; if (vv > vmax) vmax = vv; }
+                    double vmin = rectMinQ_.empty() ? y1 : rectMinQ_.front();
+                    double vmax = rectMaxQ_.empty() ? y1 : rectMaxQ_.front();
                     double den = std::max(1e-6, vmax - vmin);
                     double scaledMean = (mean - vmin) / den * 1024.0;
                     const double effFsLocThr = (effectiveFs_ > 1e-6 ? effectiveFs_ : fs_);
@@ -516,7 +523,8 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
                         if (allowPeak) {
                             int start = (int)std::max((size_t)firstAbs_, lastAbs);
                             int end = (int)(absIdx);
-                            double vmin2 = y1, vmax2 = y1; for (float vv : rollWinRect_) { if (vv < vmin2) vmin2 = vv; if (vv > vmax2) vmax2 = vv; }
+                            double vmin2 = rectMinQ_.empty() ? y1 : rectMinQ_.front();
+                            double vmax2 = rectMaxQ_.empty() ? y1 : rectMaxQ_.front();
                             double den2 = std::max(1e-6, vmax2 - vmin2);
                             double delta = 140.0;
                             double minCmp = 1e9;
@@ -825,8 +833,8 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
             if (longMs <= 0.0 && lastF0Hz_ > 1e-9) longMs = 1000.0 / lastF0Hz_;
             double T = (longMs > 0.0 ? (longMs / 1000.0) : 0.0);
             if (T > 0.0) {
-                // If hint is driven by RR-fallback only, skip periodic suppression for this poll
-                if (rrFallbackDrivingHint_) {
+                // If RR-fallback mode is active, skip periodic suppression for this poll
+                if (rrFallbackModeActive_) {
                     // no suppression; rely on min-RR gate + refractory
                 } else {
                 double tol = opt_.periodicSuppressionTol * T; // conservative (active only)
@@ -985,7 +993,7 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                         }
                     }
                 }
-            } else if (rrFallbackDrivingHint_) {
+            } else if (rrFallbackModeActive_) {
                 // RR-fallback path: enable a very-limited merge with tight bands and hard caps; suppression stays OFF
                 if (lastRR_.size() >= 3) {
                     double m2 = medianOfRR(lastRR_);
@@ -1027,7 +1035,7 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
         // Safety brake: prevent excessive downshift
         double bpmEstNow = 0.0;
         if (!lastRR_.empty()) { double med = medianOfRR(lastRR_); if (med>1e-6) bpmEstNow = 60000.0/med; }
-        if (rrFallbackActive_ && lastPollBpmEst_ > 100.0 && bpmEstNow > 0.0 && bpmEstNow < 50.0) {
+        if (rrFallbackModeActive_ && lastPollBpmEst_ > 100.0 && bpmEstNow > 0.0 && bpmEstNow < 50.0) {
             // revert this poll's changes
             lastPeaks_ = peaks_before;
             lastRR_ = rr_before;
@@ -1368,6 +1376,8 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
         }
     }
     if (!doublingHintActive_) rrFallbackDrivingHint_ = false;
+    // Consolidated RR-fallback mode gate: active only when hint is driven purely by RR
+    rrFallbackModeActive_ = rrFallbackDrivingHint_;
 
     // Choose f0 used for SNR/conf
     // Auto-clear: if violation persists ≥5s, drop both flags
@@ -1400,6 +1410,7 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     out.quality.doublingFlag = doublingActive_ ? 1 : 0;
     out.quality.hardFallbackActive = (doublingActive_ && (lastTs_ <= hardFallbackUntil_)) ? 1 : 0;
     out.quality.doublingHintFlag = doublingHintActive_ ? 1 : 0;
+    out.quality.rrFallbackModeActive = rrFallbackModeActive_ ? 1 : 0;
     out.quality.pHalfOverFund = ratioHalfFund;
     out.quality.pairFrac = pairFrac;
     out.quality.rrShortFrac = shortFrac;
