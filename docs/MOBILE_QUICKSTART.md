@@ -40,7 +40,7 @@ yarn add react-native-heartpy
 cd ios && pod install && cd ..
 ```
 
-No additional Android linking steps are required for modern RN (autolinking).
+No additional Android linking steps are required for modern RN (autolinking). The native module builds its C++ core and vendored KissFFT automatically.
 
 ---
 
@@ -175,4 +175,3 @@ Success criteria (DoD):
 ## 11) Licensing & Attribution
 
 - MIT‑compatible; credit the original HeartPy and this enhanced implementation.
-

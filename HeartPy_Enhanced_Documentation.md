@@ -529,6 +529,8 @@ export function scaleData(signal: number[], newMin?: number, newMax?: number): n
 - Keep `nfft` as power of two for faster FFT; otherwise DFT fallback is used.
 - Avoid FD on < 1 min data; metrics are unstable by design (HeartPy also warns).
 
+Note: The React Native package vendors the enhanced C++ core and KissFFT; Android CMake and the iOS podspec build these sources automatically.
+
 ---
 
 ## 🧪 Tools & Validation (CLI)
