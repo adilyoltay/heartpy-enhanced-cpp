@@ -20,8 +20,8 @@ installJSI();
 
 const res = await analyzeAsync(ppgArray, 50, {
   bandpass: { lowHz: 0.5, highHz: 5, order: 2 },
-  welch: { nfft: 256, overlap: 0.5 },
-  peak: { refractoryMs: 250, thresholdScale: 0.5 },
+  welch: { nfft: 1024, overlap: 0.5 },
+  peak: { refractoryMs: 320, thresholdScale: 0.5 },
   quality: { rejectSegmentwise: true, segmentRejectWindowBeats: 10, segmentRejectMaxRejects: 3 },
 });
 
@@ -36,6 +36,7 @@ const res = await analyzeAsync(ppgArray, 50, {
 ### Android
 
 - Requires NDK r26+, CMake 3.22+, and React Native New Architecture (Hermes preferred).
+- Ensure AGP 8.x and Gradle match RN template. Build types should not strip the native lib.
 
 ### iOS
 
@@ -54,6 +55,12 @@ See `react-native-heartpy/examples/AppUsage.tsx` for a minimal component that:
 - Generates synthetic PPG (60s or 300s) and runs `analyzeAsync()`
 - Renders time domain metrics and FD metrics, with a short-window warning when `< 240s`.
 - Copy it into your app for quick testing.
+
+### Streaming (concepts)
+
+- The C++ library ships a realtime streaming analyzer with a plain C bridge (`hp_rt_*`). The RN package currently focuses on batch; for streaming you can:
+  1) Create a TurboModule/JSI glue to `hp_rt_create/push/poll/destroy`, or
+  2) Use overlapped short windows (2–3s) as an approximation.
 
 ### License
 

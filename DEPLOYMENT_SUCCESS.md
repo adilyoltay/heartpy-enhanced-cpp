@@ -14,7 +14,7 @@
 ### 📱 **Mobile Deployment Ready**
 - **iOS Build**: ✅ Successful compilation
 - **Metro Bundler**: ✅ Running on port 8081
-- **React Native Bridge**: ✅ JSI integration complete
+- **React Native Bridge**: ✅ JSI integration complete; batch APIs stable; streaming C bridge available for TurboModule/JSI glue
 - **C++ Core**: ✅ Production ready
 
 ---
@@ -73,7 +73,7 @@
 - [x] C++ core compilation
 - [x] JSI bridge implementation
 - [x] iOS Xcode project setup
-- [x] React Native configuration
+- [x] React Native configuration (Hermes/New Architecture)
 - [x] Build system (CMake)
 
 ### ✅ **Code Quality**
@@ -93,7 +93,7 @@
    - Submit for review
 
 2. **Android Support** (Optional):
-   - Add JNI bridge implementation
+   - Add JNI bridge implementation (streaming TurboModule)
    - Android Studio project setup
    - Google Play deployment
 
