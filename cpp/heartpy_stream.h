@@ -5,6 +5,7 @@
 #include <deque>
 #include <cstddef>
 #include <mutex>
+#include <algorithm>
 #include "heartpy_core.h"
 
 namespace heartpy {

@@ -2,8 +2,18 @@
 #include <algorithm>
 #include <deque>
 #include <cmath>
+#include <cassert>
 
 namespace heartpy {
+
+// Defensive helpers
+static inline int clampIndexInt(int i, int n) {
+    if (i < 0) return 0; if (i >= n) return (n > 0 ? n - 1 : 0); return i;
+}
+static inline bool inRangeIdx(int i, int n) { return (i >= 0) && (i < n); }
+static inline bool absToRel(size_t abs, size_t firstAbs, size_t n, size_t& rel) {
+    if (abs < firstAbs) return false; size_t v = abs - firstAbs; if (v >= n) return false; rel = v; return true;
+}
 
 // Local HP-style helpers (mirrors core behavior, kept local to avoid linkage deps)
 static std::vector<double> rollingMeanHP_local(const std::vector<double>& data, double fs, double windowSeconds) {
@@ -858,9 +868,11 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                     // Window indices [wstart, j)
                     if (j > wstart) {
                         size_t best = wstart;
-                        double bestA = (lastPeaks_[best] >= 0 && lastPeaks_[best] < (int)win.size()) ? win[lastPeaks_[best]] : 0.0;
+                        int relBest = clampIndexInt(lastPeaks_[best], (int)win.size());
+                        double bestA = (inRangeIdx(lastPeaks_[best], (int)win.size()) ? win[relBest] : 0.0);
                         for (size_t s = wstart + 1; s < j; ++s) {
-                            double a = (lastPeaks_[s] >= 0 && lastPeaks_[s] < (int)win.size()) ? win[lastPeaks_[s]] : 0.0;
+                            int relS = clampIndexInt(lastPeaks_[s], (int)win.size());
+                            double a = (inRangeIdx(lastPeaks_[s], (int)win.size()) ? win[relS] : 0.0);
                             if (a > bestA) { best = s; bestA = a; }
                         }
                         // Mark all others in window for removal
@@ -926,9 +938,12 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                         int pL = lastPeaks_[i];
                         int pM = lastPeaks_[i + 1];
                         int pR = lastPeaks_[i + 2];
-                        double aL = (pL >= 0 && pL < (int)win.size()) ? win[pL] : 0.0;
-                        double aM = (pM >= 0 && pM < (int)win.size()) ? win[pM] : 0.0;
-                        double aR = (pR >= 0 && pR < (int)win.size()) ? win[pR] : 0.0;
+                        int rL = clampIndexInt(pL, (int)win.size());
+                        int rM = clampIndexInt(pM, (int)win.size());
+                        int rR = clampIndexInt(pR, (int)win.size());
+                        double aL = (inRangeIdx(pL, (int)win.size()) ? win[rL] : 0.0);
+                        double aM = (inRangeIdx(pM, (int)win.size()) ? win[rM] : 0.0);
+                        double aR = (inRangeIdx(pR, (int)win.size()) ? win[rR] : 0.0);
                         // remove middle if it is not stronger than both neighbors
                         if (aM <= std::max(aL, aR)) {
                             keepScratch_[i + 1] = 0;
@@ -1286,9 +1301,10 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     int acceptedRR = std::max(0, (int)acceptedPeaksTotal_ - 1);
     bool warmupPassed = ((lastTs_ - firstTsApprox_) >= 15.0) && (acceptedRR >= 10);
     // Track half-f0 stability over recent PSD updates (longer history, adaptive drift)
-    if (f0Half > 0.0) { halfF0Hist_.push_back(f0Half); if (halfF0Hist_.size() > 5) halfF0Hist_.pop_front(); }
+    int halfLen = std::max(2, opt_.halfF0HistLen);
+    if (f0Half > 0.0) { halfF0Hist_.push_back(f0Half); if ((int)halfF0Hist_.size() > halfLen) halfF0Hist_.pop_front(); }
     else halfF0Hist_.clear();
-    double driftTol = warmupPassed ? 0.06 : 0.10;
+    double driftTol = warmupPassed ? opt_.halfF0TolHzWarm : opt_.halfF0TolHzCold;
     bool halfStable = false; if (halfF0Hist_.size() >= 2) { double fmin = *std::min_element(halfF0Hist_.begin(), halfF0Hist_.end()); double fmax = *std::max_element(halfF0Hist_.begin(), halfF0Hist_.end()); halfStable = ((fmax - fmin) <= driftTol); }
     // Warm-up for soft flag: time ≥15s AND ≥10 accepted RR (decouple from bpmEma)
     bool softGuards = (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.30) && warmupPassed;
@@ -1330,10 +1346,10 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
             double med = tmp[tmp.size()/2]; if (med > 1e-6) bpmEst = 60000.0 / med;
         }
         bool dblActive = (doublingHintActive_ || softDoublingActive_ || doublingActive_);
-        if (dblActive && (lastTs_ >= 20.0) && (bpmEst > 0.0 && bpmEst < 40.0)) {
+        if (dblActive && (lastTs_ >= 20.0) && (bpmEst > 0.0 && bpmEst < opt_.chokeBpmThreshold)) {
             if (chokeStartTs_ <= 0.0) chokeStartTs_ = lastTs_;
             if ((lastTs_ - chokeStartTs_) >= 3.0) {
-                double recoveryTime = (bpmEst < 35.0) ? 7.0 : 5.0;
+                double recoveryTime = (bpmEst < opt_.chokeBpmThreshold) ? opt_.chokeRelaxLowBpmSec : opt_.chokeRelaxBaseSec;
                 chokeRelaxUntil_ = lastTs_ + recoveryTime; // adaptive relax
             }
         } else {

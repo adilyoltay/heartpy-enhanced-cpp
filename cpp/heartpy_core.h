@@ -58,11 +58,21 @@ struct Options {
 	double pHalfOverFundThresholdSoft = 2.0; // soft activation
 	double pHalfOverFundThresholdLow = 1.6;  // looser hint hold
 
-	// SNR band and EMA behavior
-	double snrBandPassive = 0.12;      // Hz half-width in passive mode
-	double snrBandActive = 0.18;       // Hz half-width in active mode
-	double snrActiveTauSec = 7.0;      // EMA tau when active
-	double snrBandBlendFactor = 0.30;  // blend toward instant when band changes
+    // SNR band and EMA behavior
+    double snrBandPassive = 0.12;      // Hz half-width in passive mode
+    double snrBandActive = 0.18;       // Hz half-width in active mode
+    double snrActiveTauSec = 7.0;      // EMA tau when active
+    double snrBandBlendFactor = 0.30;  // blend toward instant when band changes
+
+    // PSD stability options (defaults keep current behavior)
+    int    halfF0HistLen = 5;          // history length for half-f0 stability
+    double halfF0TolHzWarm = 0.06;     // drift tol after warm-up
+    double halfF0TolHzCold = 0.10;     // drift tol before warm-up
+
+    // Choke recovery options
+    double chokeRelaxBaseSec = 5.0;    // recovery when bpm >= threshold
+    double chokeRelaxLowBpmSec = 7.0;  // recovery when bpm < threshold
+    double chokeBpmThreshold = 35.0;   // bpm threshold for low-BPM recovery
 
 	// Preprocessing options
 	bool interpClipping = false;
