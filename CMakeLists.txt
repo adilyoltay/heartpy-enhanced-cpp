@@ -105,3 +105,17 @@ add_test(NAME acceptance_ambient
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset ambient --fs 50 --duration 60 --fast
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+add_test(NAME acceptance_torch_180
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset torch --fs 50 --duration 180 --fast
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME acceptance_ambient_180
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset ambient --fs 50 --duration 180 --fast
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+add_test(NAME concurrency_smoke
+  COMMAND ${CMAKE_BINARY_DIR}/concurrency_smoke
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)

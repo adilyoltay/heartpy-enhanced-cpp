@@ -989,9 +989,12 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                                 int pL = lastPeaks_[i];
                                 int pM = lastPeaks_[i + 1];
                                 int pR = lastPeaks_[i + 2];
-                                double aL = (pL >= 0 && pL < (int)win.size()) ? win[pL] : 0.0;
-                                double aM = (pM >= 0 && pM < (int)win.size()) ? win[pM] : 0.0;
-                                double aR = (pR >= 0 && pR < (int)win.size()) ? win[pR] : 0.0;
+                                int rL = clampIndexInt(pL, (int)win.size());
+                                int rM = clampIndexInt(pM, (int)win.size());
+                                int rR = clampIndexInt(pR, (int)win.size());
+                                double aL = (inRangeIdx(pL, (int)win.size()) ? win[rL] : 0.0);
+                                double aM = (inRangeIdx(pM, (int)win.size()) ? win[rM] : 0.0);
+                                double aR = (inRangeIdx(pR, (int)win.size()) ? win[rR] : 0.0);
                                 if (aM <= std::max(aL, aR)) { keepScratch_[i + 1] = 0; changed = true; ++i; ++removedTotal; }
                             }
                         }
@@ -1028,9 +1031,12 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                             int pL = lastPeaks_[i];
                             int pM = lastPeaks_[i + 1];
                             int pR = lastPeaks_[i + 2];
-                            double aL = (pL >= 0 && pL < (int)win.size()) ? win[pL] : 0.0;
-                            double aM = (pM >= 0 && pM < (int)win.size()) ? win[pM] : 0.0;
-                            double aR = (pR >= 0 && pR < (int)win.size()) ? win[pR] : 0.0;
+                            int rL2 = clampIndexInt(pL, (int)win.size());
+                            int rM2 = clampIndexInt(pM, (int)win.size());
+                            int rR2 = clampIndexInt(pR, (int)win.size());
+                            double aL = (inRangeIdx(pL, (int)win.size()) ? win[rL2] : 0.0);
+                            double aM = (inRangeIdx(pM, (int)win.size()) ? win[rM2] : 0.0);
+                            double aR = (inRangeIdx(pR, (int)win.size()) ? win[rR2] : 0.0);
                             if (aM <= std::max(aL, aR)) { keepScratch_[i + 1] = 0; ++removed; ++i; }
                         }
                     }

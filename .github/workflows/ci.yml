@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-acceptance:
+    name: Acceptance (${{ matrix.os }} • ${{ matrix.preset }} • ${{ matrix.duration }}s)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        preset: [torch, ambient]
+        duration: [60, 180]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build -j
+      - name: Run Acceptance
+        run: |
+          python3 scripts/check_acceptance.py --build-dir build --preset ${{ matrix.preset }} --duration ${{ matrix.duration }}
+      - name: Upload JSONL artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: jsonl-${{ matrix.os }}-${{ matrix.preset }}-${{ matrix.duration }}
+          path: build/acceptance_*.jsonl
+
+  sanitizers-asan-ubsan:
+    name: ASAN/UBSAN (${{ matrix.os }} • ${{ matrix.preset }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        preset: [torch, ambient]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Configure (ASAN/UBSAN)
+        env:
+          SAN: "-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g"
+        run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS="$SAN" -DCMAKE_CXX_FLAGS="$SAN"
+      - name: Build (ASAN/UBSAN)
+        run: cmake --build build-asan -j
+      - name: Acceptance 60s (ASAN/UBSAN)
+        env:
+          ASAN_OPTIONS: "allocator_may_return_null=1:detect_leaks=1"
+          UBSAN_OPTIONS: "print_stacktrace=1"
+        run: python3 scripts/check_acceptance.py --build-dir build-asan --preset ${{ matrix.preset }} --duration 60
+
+  sanitizers-tsan:
+    name: TSAN (${{ matrix.preset }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [torch, ambient]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Configure (TSAN)
+        env:
+          TSAN: "-fsanitize=thread -fno-omit-frame-pointer -O1 -g"
+        run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS="$TSAN" -DCMAKE_CXX_FLAGS="$TSAN"
+      - name: Build (TSAN)
+        run: cmake --build build-tsan -j
+      - name: Acceptance 60s (TSAN)
+        env:
+          TSAN_OPTIONS: "halt_on_error=1"
+        run: python3 scripts/check_acceptance.py --build-dir build-tsan --preset ${{ matrix.preset }} --duration 60
+
