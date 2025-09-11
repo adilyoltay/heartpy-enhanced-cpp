@@ -1,0 +1,28 @@
+name: RN Package Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-rn:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - name: Install deps
+        run: |
+          cd react-native-heartpy
+          npm install
+      - name: Build TypeScript
+        run: |
+          cd react-native-heartpy
+          npm run build
+      - name: Verify artifacts
+        run: |
+          test -f react-native-heartpy/dist/index.js
+          test -f react-native-heartpy/dist/index.d.ts
