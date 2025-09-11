@@ -33,6 +33,11 @@ struct Options {
 	double bpmMin = 40.0;
 	double bpmMax = 180.0;
 
+	// HP-style thresholding (rolling_mean + ma_perc lift)
+	bool   useHPThreshold = false;   // if true, prefer HP-style threshold in streaming
+	double maPerc = 30.0;            // HeartPy-like ma_perc (10..60 typical)
+	bool   adaptiveMaPerc = true;    // enable light grid search per poll
+
 	// Preprocessing options
 	bool interpClipping = false;
 	double clippingThreshold = 1020.0;
@@ -87,6 +92,22 @@ struct QualityInfo {
     // Streaming additions (optional fields)
     double snrDb = 0.0;        // estimated SNR in dB (0 if unavailable)
     double confidence = 0.0;   // 0..1 confidence score (0 if unavailable)
+    double f0Hz = 0.0;         // estimated HR fundamental frequency used for SNR (may be harmonically adjusted)
+    double maPercActive = 0.0; // active ma_perc (HP threshold) if applicable
+    // Harmonic suppression diagnostics
+    int    doublingFlag = 0;   // 1 if harmonic suppression active, else 0
+    int    softDoublingFlag = 0; // 1 if PSD-only soft flag active
+    double rrShortFrac = 0.0;  // fraction of short RR cluster
+    double rrLongMs = 0.0;     // long RR (ms) used when suppression active
+    double pHalfOverFund = 0.0; // PSD ratio P(1/2 f0)/P(f0)
+    double pairFrac = 0.0;      // fraction of adjacent pairs summing to ~longRR
+    // Acceptance diagnostics
+    double refractoryMsActive = 0.0; // current refractory applied (ms)
+    double minRRBoundMs = 0.0;       // current min RR bound applied (ms)
+    int    softStreak = 0;           // consecutive PSD updates passing soft criteria
+    double softSecs = 0.0;           // seconds since soft flag became active
+    int    hardFallbackActive = 0;   // 1 when hard fallback elevated refractory is active
+    int    doublingHintFlag = 0;     // 1 when PSD-only doubling hint is active
 };
 
 // Enhanced metrics structure matching Python HeartPy

@@ -73,3 +73,21 @@ add_executable(heartpy_compare_rr_json examples/compare_rr_json.cpp)
 target_link_libraries(heartpy_compare_rr_json PRIVATE heartpy_core)
 add_executable(realtime_demo examples/realtime_demo.cpp)
 target_link_libraries(realtime_demo PRIVATE heartpy_core)
+
+# Acceptance check helper target (requires python3)
+add_custom_target(acceptance
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset both --fs 50 --duration 180 --fast
+  DEPENDS realtime_demo
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  COMMENT "Running acceptance checks (torch + ambient)"
+)
+
+enable_testing()
+add_test(NAME acceptance_torch
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset torch --fs 50 --duration 60 --fast
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME acceptance_ambient
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset ambient --fs 50 --duration 60 --fast
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)

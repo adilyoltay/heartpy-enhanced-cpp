@@ -31,8 +31,8 @@ public:
     void setPsdUpdateSeconds(double sec) { psdUpdateSec_ = std::max(0.5, sec); }
     void setDisplayHz(double hz) { displayHz_ = std::max(10.0, hz); }
     // Convenience presets (may adjust filter/threshold defaults)
-    void applyPresetTorch() { opt_.lowHz = 0.7; opt_.highHz = 3.0; }
-    void applyPresetAmbient() { opt_.lowHz = 0.5; opt_.highHz = 4.0; opt_.thresholdScale = std::max(0.5, opt_.thresholdScale); }
+    void applyPresetTorch() { opt_.lowHz = 0.7; opt_.highHz = 3.0; opt_.refractoryMs = std::max(300.0, opt_.refractoryMs); opt_.useHPThreshold = true; opt_.maPerc = std::max(10.0, std::min(60.0, opt_.maPerc)); }
+    void applyPresetAmbient() { opt_.lowHz = 0.5; opt_.highHz = 3.5; opt_.thresholdScale = std::max(0.5, opt_.thresholdScale); opt_.refractoryMs = std::max(320.0, opt_.refractoryMs); opt_.useHPThreshold = true; opt_.maPerc = std::max(10.0, std::min(60.0, opt_.maPerc)); }
 
     void push(const float* samples, size_t n, double t0 = 0.0);
     void push(const std::vector<double>& samples, double t0 = 0.0);
@@ -82,11 +82,90 @@ private:
     std::deque<float> rollWin_;
     double rollSum_ {0.0};
     double rollSumSq_ {0.0};
+    // Rectified window (for thresholding only)
+    std::deque<float> rollWinRect_;
+    double rollRectSum_ {0.0};
+    double rollRectSumSq_ {0.0};
     int winSamples_ {0};
     int refractorySamples_ {0};
     size_t firstAbs_ {0};
     size_t totalAbs_ {0};
     std::vector<size_t> peaksAbs_;
+    size_t acceptedPeaksTotal_ {0};
+
+    // HP-style thresholding state
+    double baseLift_ {0.0};         // mn = mean(rolling_mean)/100 * maPerc_
+    double maPerc_ {30.0};          // current ma_perc selection
+    bool   hpThreshold_ {false};    // whether streaming uses HP-style threshold
+
+    // Adaptive ma_perc tuning cadence and hysteresis
+    double lastMaUpdateTime_ {0.0};
+    double lastMaChangeTime_ {0.0};
+    double maUpdateSec_ {3.0};
+    double maPercScore_ {1e300}; // lower RR SD score is better
+
+    // SNR smoothing (EMA)
+    double snrEmaDb_ {0.0};
+    bool   snrEmaValid_ {false};
+    double snrTauSec_ {10.0};
+    double lastSnrUpdateTime_ {0.0};
+
+    // Streaming BPM prior (for ma_perc bias)
+    double bpmEma_ {0.0};
+    bool   bpmEmaValid_ {false};
+    double bpmTauSec_ {8.0};
+    double lastBpmUpdateTime_ {0.0};
+
+    // Last valid HR frequency used for SNR
+    double lastF0Hz_ {0.0};
+    double lastRefMsActive_ {0.0};
+    double lastMinRRBoundMs_ {0.0};
+    bool   warmupWasPassed_ {false};
+    double hardFallbackUntil_ {0.0};
+
+    // RR-gating state
+    int    shortRejectCount_ {0};
+    double shortRejectWindowStart_ {0.0};
+    double tempLiftBoost_ {0.0};          // temporary extra lift in 0..1024 units
+    double tempLiftUntil_ {0.0};          // time until which temp lift applies
+    int    dynRefExtraSamples_ {0};       // temporary extra refractory samples
+    double dynRefUntil_ {0.0};
+    double lastAcceptedAmpCmp_ {0.0};     // last accepted peak amplitude in comparison scale
+
+    // Persistent high-HR & CV tracking for ma_perc floors
+    double cvHighStartTs_ {0.0};
+    bool   cvHighActive_ {false};
+
+    // Persistent high-HR tracking for grid bias
+    double bpmHighStartTs_ {0.0};
+    bool   bpmHighActive_ {false};
+
+    // Harmonic suppression state
+    bool   softDoublingActive_ {false};
+    int    softConsecPass_ {0};
+    double softStartTs_ {0.0};
+    double softLastTrueTs_ {0.0};
+    std::deque<double> halfF0Hist_;
+    bool   doublingActive_ {false};
+    double doublingLastTrueTs_ {0.0};
+    double doublingHoldUntil_ {0.0};
+    double doublingLongRRms_ {0.0};
+    // Violation persistence tracking for auto-clear of soft/hard
+    double lastClearBadStart_ {0.0};
+    // PSD-only doubling hint (post warm-up) to unlock doubles conservatively
+    bool   doublingHintActive_ {false};
+    double hintLastTrueTs_ {0.0};
+    double hintStartTs_ {0.0};
+    double hintHoldUntil_ {0.0};
+    double lastHintBadStart_ {0.0};
+    // Temporary relaxation when oversuppression detected
+    double chokeRelaxUntil_ {0.0};
+    double chokeStartTs_ {0.0};
+    // RR-based fallback tracking
+    int    rrFallbackConsec_ {0};
+    bool   rrFallbackActive_ {false};
+    bool   rrFallbackDrivingHint_ {false};
+    double lastPollBpmEst_ {0.0};
 };
 
 } // namespace heartpy
