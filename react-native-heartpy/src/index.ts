@@ -160,3 +160,44 @@ export function scaleData(signal: number[], newMin: number = 0, newMax: number =
 }
 
 
+// Async variants: avoid blocking the JS thread
+export async function analyzeAsync(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): Promise<HeartPyResult> {
+	const { NativeModules } = require('react-native');
+	const Native: any = NativeModules?.HeartPyModule;
+	if (!Native?.analyzeAsync) throw new Error('HeartPyModule.analyzeAsync not available');
+	const arr = (signal instanceof Float64Array ? Array.from(signal) : signal) as number[];
+	return Native.analyzeAsync(arr, fs, options ?? {});
+}
+
+export async function analyzeSegmentwiseAsync(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): Promise<HeartPyResult> {
+	const { NativeModules } = require('react-native');
+	const Native: any = NativeModules?.HeartPyModule;
+	if (!Native?.analyzeSegmentwiseAsync) throw new Error('HeartPyModule.analyzeSegmentwiseAsync not available');
+	const arr = (signal instanceof Float64Array ? Array.from(signal) : signal) as number[];
+	return Native.analyzeSegmentwiseAsync(arr, fs, options ?? {});
+}
+
+export async function analyzeRRAsync(rrIntervals: number[], options?: HeartPyOptions): Promise<HeartPyResult> {
+	const { NativeModules } = require('react-native');
+	const Native: any = NativeModules?.HeartPyModule;
+	if (!Native?.analyzeRRAsync) throw new Error('HeartPyModule.analyzeRRAsync not available');
+	return Native.analyzeRRAsync(rrIntervals, options ?? {});
+}
+
+// Optional JSI path (iOS installed via installJSI)
+export function installJSI(): boolean {
+	const { NativeModules } = require('react-native');
+	const Native: any = NativeModules?.HeartPyModule;
+	if (!Native?.installJSI) return false;
+	try { return !!Native.installJSI(); } catch { return false; }
+}
+
+export function analyzeJSI(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): HeartPyResult {
+	const g: any = global as any;
+	if (g && typeof g.__HeartPyAnalyze === 'function') {
+		return g.__HeartPyAnalyze(signal, fs, options ?? {});
+	}
+	throw new Error('JSI analyze not installed. Call installJSI() on iOS, or use NativeModules/async methods.');
+}
+
+

@@ -266,12 +266,58 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         return jsonToWritableMap(json);
     }
 
+    @ReactMethod
+    public void analyzeAsync(double[] signal, double fs,
+                             com.facebook.react.bridge.ReadableMap options,
+                             com.facebook.react.bridge.Promise promise) {
+        new Thread(() -> {
+            try {
+                Opts o = parseOptions(options);
+                String json = analyzeNativeJson(signal, fs,
+                        o.lowHz, o.highHz, o.order,
+                        o.nfft, o.overlap, o.wsizeSec,
+                        o.refractoryMs, o.thresholdScale, o.bpmMin, o.bpmMax,
+                        o.interpClipping, o.clippingThreshold,
+                        o.hampelCorrect, o.hampelWindow, o.hampelThreshold,
+                        o.removeBaselineWander, o.enhancePeaks,
+                        o.highPrecision, o.highPrecisionFs,
+                        o.rejectSegmentwise, o.segmentRejectThreshold, o.segmentRejectMaxRejects, o.segmentRejectWindowBeats, o.segmentRejectOverlap,
+                        o.cleanRR, o.cleanMethod,
+                        o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
+                        o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
+                        o.breathingAsBpm,
+                        o.sdsdMode,
+                        o.poincareMode,
+                        o.pnnAsPercent
+                );
+                promise.resolve(jsonToWritableMap(json));
+            } catch (Exception e) {
+                promise.reject("analyze_error", e);
+            }
+        }).start();
+    }
+
     @ReactMethod(isBlockingSynchronousMethod = true)
     public com.facebook.react.bridge.WritableMap analyzeRR(double[] rr,
                                                            com.facebook.react.bridge.ReadableMap options) {
         Opts o = parseOptions(options);
         String json = analyzeRRNativeJson(rr, o.cleanRR, o.cleanMethod, o.breathingAsBpm, o.thresholdRR, o.sdsdMode, o.poincareMode, o.pnnAsPercent);
         return jsonToWritableMap(json);
+    }
+
+    @ReactMethod
+    public void analyzeRRAsync(double[] rr,
+                               com.facebook.react.bridge.ReadableMap options,
+                               com.facebook.react.bridge.Promise promise) {
+        new Thread(() -> {
+            try {
+                Opts o = parseOptions(options);
+                String json = analyzeRRNativeJson(rr, o.cleanRR, o.cleanMethod, o.breathingAsBpm, o.thresholdRR, o.sdsdMode, o.poincareMode, o.pnnAsPercent);
+                promise.resolve(jsonToWritableMap(json));
+            } catch (Exception e) {
+                promise.reject("analyzeRR_error", e);
+            }
+        }).start();
     }
 
     @ReactMethod(isBlockingSynchronousMethod = true)
@@ -296,6 +342,37 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                 o.pnnAsPercent
         );
         return jsonToWritableMap(json);
+    }
+
+    @ReactMethod
+    public void analyzeSegmentwiseAsync(double[] signal, double fs,
+                                        com.facebook.react.bridge.ReadableMap options,
+                                        com.facebook.react.bridge.Promise promise) {
+        new Thread(() -> {
+            try {
+                Opts o = parseOptions(options);
+                String json = analyzeSegmentwiseNativeJson(signal, fs,
+                        o.lowHz, o.highHz, o.order,
+                        o.nfft, o.overlap, o.wsizeSec,
+                        o.refractoryMs, o.thresholdScale, o.bpmMin, o.bpmMax,
+                        o.interpClipping, o.clippingThreshold,
+                        o.hampelCorrect, o.hampelWindow, o.hampelThreshold,
+                        o.removeBaselineWander, o.enhancePeaks,
+                        o.highPrecision, o.highPrecisionFs,
+                        o.rejectSegmentwise, o.segmentRejectThreshold, o.segmentRejectMaxRejects, o.segmentRejectWindowBeats,
+                        o.cleanRR, o.cleanMethod,
+                        o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
+                        o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
+                        o.breathingAsBpm,
+                        o.sdsdMode,
+                        o.poincareMode,
+                        o.pnnAsPercent
+                );
+                promise.resolve(jsonToWritableMap(json));
+            } catch (Exception e) {
+                promise.reject("analyzeSegmentwise_error", e);
+            }
+        }).start();
     }
 
     @ReactMethod(isBlockingSynchronousMethod = true)

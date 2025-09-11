@@ -334,8 +334,25 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(analyze:(NSArray<NSNumber*>*)signal
     return out;
 }
 
+// Async Promise-based variants to avoid blocking the JS thread
+RCT_EXPORT_METHOD(analyzeAsync:(NSArray<NSNumber*>*)signal
+                  fs:(nonnull NSNumber*)fs
+                  options:(NSDictionary*)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @try {
+            id res = [self analyze:signal fs:fs options:options];
+            resolve(res);
+        } @catch (NSException* e) {
+            reject(@"analyze_error", e.reason, nil);
+        }
+    });
+}
+
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(analyzeRR:(NSArray<NSNumber*>*)rr
-                                      options:(NSDictionary*)options)
+                                    options:(NSDictionary*)options)
 {
     std::vector<double> rrms; rrms.reserve(rr.count);
     for (NSNumber* n in rr) rrms.push_back([n doubleValue]);
@@ -364,6 +381,21 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(analyzeRR:(NSArray<NSNumber*>*)rr
     return out;
 }
 
+RCT_EXPORT_METHOD(analyzeRRAsync:(NSArray<NSNumber*>*)rr
+                  options:(NSDictionary*)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @try {
+            id res = [self analyzeRR:rr options:options];
+            resolve(res);
+        } @catch (NSException* e) {
+            reject(@"analyzeRR_error", e.reason, nil);
+        }
+    });
+}
+
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(analyzeSegmentwise:(NSArray<NSNumber*>*)signal
                                       fs:(nonnull NSNumber*)fs
                                       options:(NSDictionary*)options)
@@ -386,6 +418,22 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(analyzeSegmentwise:(NSArray<NSNumber*>*)s
     }
     out[@"segments"] = segs;
     return out;
+}
+
+RCT_EXPORT_METHOD(analyzeSegmentwiseAsync:(NSArray<NSNumber*>*)signal
+                  fs:(nonnull NSNumber*)fs
+                  options:(NSDictionary*)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @try {
+            id res = [self analyzeSegmentwise:signal fs:fs options:options];
+            resolve(res);
+        } @catch (NSException* e) {
+            reject(@"analyzeSegmentwise_error", e.reason, nil);
+        }
+    });
 }
 
 // Preprocessing exports
