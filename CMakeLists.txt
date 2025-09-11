@@ -71,3 +71,5 @@ target_link_libraries(heartpy_compare_file_json PRIVATE heartpy_core)
 
 add_executable(heartpy_compare_rr_json examples/compare_rr_json.cpp)
 target_link_libraries(heartpy_compare_rr_json PRIVATE heartpy_core)
+add_executable(realtime_demo examples/realtime_demo.cpp)
+target_link_libraries(realtime_demo PRIVATE heartpy_core)

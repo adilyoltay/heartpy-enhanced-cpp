@@ -84,6 +84,9 @@ struct QualityInfo {
 	std::vector<int> rejectedIndices;
 	bool goodQuality = true;
 	std::string qualityWarning;
+    // Streaming additions (optional fields)
+    double snrDb = 0.0;        // estimated SNR in dB (0 if unavailable)
+    double confidence = 0.0;   // 0..1 confidence score (0 if unavailable)
 };
 
 // Enhanced metrics structure matching Python HeartPy

@@ -538,7 +538,7 @@ export function analyzeJSI(signal: number[] | Float64Array, fs: number, options?
 
 Note: The React Native package vendors the enhanced C++ core and KissFFT; Android CMake and the iOS podspec build these sources automatically.
 
-### Realtime Streaming (Beta — Phase S1)
+### Realtime Streaming (Beta — Phase S1–S4)
 - New C++ streaming skeleton enables 1 Hz low‑latency updates without breaking the existing API.
 - Class `heartpy::RealtimeAnalyzer` (cpp/heartpy_stream.h):
   - `RealtimeAnalyzer(double fs, const Options& opt)`
@@ -549,7 +549,11 @@ Note: The React Native package vendors the enhanced C++ core and KissFFT; Androi
   - Snapshots & buffers: `getQuality()`, `latestPeaks()`, `latestRR()`, `displayBuffer()`
 - Plain C bridge (optional):
   - `hp_rt_create()`, `hp_rt_set_window()`, `hp_rt_set_update_interval()`, `hp_rt_push()`, `hp_rt_poll()`, `hp_rt_destroy()`
-- Current behavior: internally uses a sliding‑window batch fallback (calls `analyzeSignal()` on the window). Later phases will switch to fully incremental (stateful filter/peaks/RR/SNR) while keeping this API stable.
+- Current behavior (S1–S4):
+  - S1–S2: sliding‑window batch fallback with timebase control and effective fs smoothing. Push can use nominal fs or per‑batch timestamps; windowing respects configured seconds.
+  - S3: stateful causal filtering (IIR) and incremental peak detection with refractory and dynamic thresholding.
+  - S4: incremental masked metrics from streaming RR (threshold_rr semantics → masked RMSSD/SDSD and pNN20/50).
+  - Full incremental SNR/Confidence and binary quality windows arrive in later phases while keeping this API stable.
 
 ---
 
