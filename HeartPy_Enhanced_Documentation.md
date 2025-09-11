@@ -475,16 +475,20 @@ export type HeartPyResult = {
 #### 1. Primary Analysis
 ```typescript
 export function analyze(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): HeartPyResult;
+// Async variant (recommended for long windows)
+export function analyzeAsync(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): Promise<HeartPyResult>;
 ```
 
 #### 2. Segmentwise Analysis
 ```typescript
 export function analyzeSegmentwise(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): HeartPyResult;
+export function analyzeSegmentwiseAsync(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): Promise<HeartPyResult>;
 ```
 
 #### 3. RR Interval Analysis
 ```typescript
 export function analyzeRR(rrIntervals: number[], options?: HeartPyOptions): HeartPyResult;
+export function analyzeRRAsync(rrIntervals: number[], options?: HeartPyOptions): Promise<HeartPyResult>;
 ```
 
 #### 4. Preprocessing Utilities
@@ -492,6 +496,9 @@ export function analyzeRR(rrIntervals: number[], options?: HeartPyOptions): Hear
 export function interpolateClipping(signal: number[], fs: number, threshold?: number): number[];
 export function hampelFilter(signal: number[], windowSize?: number, threshold?: number): number[];
 export function scaleData(signal: number[], newMin?: number, newMax?: number): number[];
+// Optional JSI (iOS)
+export function installJSI(): boolean;
+export function analyzeJSI(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): HeartPyResult;
 ```
 
 ---
@@ -530,6 +537,19 @@ export function scaleData(signal: number[], newMin?: number, newMax?: number): n
 - Avoid FD on < 1 min data; metrics are unstable by design (HeartPy also warns).
 
 Note: The React Native package vendors the enhanced C++ core and KissFFT; Android CMake and the iOS podspec build these sources automatically.
+
+### Realtime Streaming (Beta — Phase S1)
+- New C++ streaming skeleton enables 1 Hz low‑latency updates without breaking the existing API.
+- Class `heartpy::RealtimeAnalyzer` (cpp/heartpy_stream.h):
+  - `RealtimeAnalyzer(double fs, const Options& opt)`
+  - `void setWindowSeconds(double sec)` (e.g., 10–60)
+  - `void setUpdateIntervalSeconds(double sec)` (default 1.0)
+  - `void push(const float* samples, size_t n, double t0=0)` / `void push(const std::vector<double>& s)`
+  - `bool poll(HeartMetrics& out)` — returns a new metrics snapshot once per update interval
+  - Snapshots & buffers: `getQuality()`, `latestPeaks()`, `latestRR()`, `displayBuffer()`
+- Plain C bridge (optional):
+  - `hp_rt_create()`, `hp_rt_set_window()`, `hp_rt_set_update_interval()`, `hp_rt_push()`, `hp_rt_poll()`, `hp_rt_destroy()`
+- Current behavior: internally uses a sliding‑window batch fallback (calls `analyzeSignal()` on the window). Later phases will switch to fully incremental (stateful filter/peaks/RR/SNR) while keeping this API stable.
 
 ---
 

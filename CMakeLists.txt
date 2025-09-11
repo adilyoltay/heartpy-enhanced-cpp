@@ -7,6 +7,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_library(heartpy_core STATIC
     cpp/heartpy_core.cpp
+    cpp/heartpy_stream.cpp
 )
 
 target_include_directories(heartpy_core PUBLIC
@@ -70,4 +71,3 @@ target_link_libraries(heartpy_compare_file_json PRIVATE heartpy_core)
 
 add_executable(heartpy_compare_rr_json examples/compare_rr_json.cpp)
 target_link_libraries(heartpy_compare_rr_json PRIVATE heartpy_core)
-

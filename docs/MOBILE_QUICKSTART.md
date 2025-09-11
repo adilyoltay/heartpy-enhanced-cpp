@@ -1,6 +1,6 @@
 # 📱 HeartPy Enhanced — Mobile Quickstart
 
-This guide shows how to integrate and use HeartPy Enhanced on mobile devices (iOS/Android), with React Native as the primary interface. It also includes performance tips, validation steps, and troubleshooting.
+This guide shows how to integrate and use HeartPy Enhanced on mobile devices (iOS/Android), with React Native as the primary interface. It also includes performance tips, validation steps, and troubleshooting. The RN package compiles TypeScript to `dist/` on install and builds the vendored C++ core automatically for iOS/Android.
 
 ---
 
@@ -49,7 +49,7 @@ No additional Android linking steps are required for modern RN (autolinking). Th
 The TypeScript interface is exposed from `react-native-heartpy/src/index.ts`.
 
 ```ts
-import { analyze, analyzeRR, analyzeSegmentwise, type HeartPyOptions } from 'react-native-heartpy';
+import { analyze, analyzeAsync, analyzeRR, analyzeRRAsync, analyzeSegmentwise, analyzeSegmentwiseAsync, type HeartPyOptions } from 'react-native-heartpy';
 
 // Example: basic signal analysis
 const fs = 50; // Hz
@@ -61,7 +61,8 @@ const options: HeartPyOptions = {
   // Keep frequency-domain stable: use ≥ 4 min windows
 };
 
-const res = analyze(signal, fs, options);
+// Prefer async for long windows
+const res = await analyzeAsync(signal, fs, options);
 console.log('BPM', res.bpm, 'RMSSD', res.rmssd, 'LF/HF', res.lfhf);
 ```
 
@@ -79,7 +80,7 @@ function onNewRR(rrMs: number) {
   if (rrBuffer.length > 600) rrBuffer.splice(0, rrBuffer.length - 600);
 
   if (rrBuffer.length >= 30) {
-    const res = analyzeRR(rrBuffer, {
+    const res = await analyzeRRAsync(rrBuffer, {
       quality: { cleanRR: false },
       breathingAsBpm: false, // Hz to match HeartPy; convert in UI if needed
     });
@@ -92,7 +93,7 @@ function onNewRR(rrMs: number) {
 ### Segmentwise analysis (long recordings)
 
 ```ts
-const resSeg = analyzeSegmentwise(longSignal, 50, {
+const resSeg = await analyzeSegmentwiseAsync(longSignal, 50, {
   segmentwise: { width: 120, overlap: 0.5, minSize: 30, replaceOutliers: true },
   quality: { rejectSegmentwise: true }
 });
