@@ -51,7 +51,13 @@ int main(int argc, char** argv) {
         std::string key = argv[i]; std::string val = argv[i + 1];
         auto to_d = [&](const std::string& s){ return std::atof(s.c_str()); };
         auto to_i = [&](const std::string& s){ return std::atoi(s.c_str()); };
-        if (key == "--nfft") opt.nfft = to_i(val);
+        if (key == "--nfft") {
+            int raw = to_i(val);
+            int cand[3] = {256,512,1024};
+            int best = cand[0]; int bestd = std::abs(raw - cand[0]);
+            for (int i = 1; i < 3; ++i) { int d = std::abs(raw - cand[i]); if (d < bestd) { bestd = d; best = cand[i]; } }
+            opt.nfft = best;
+        }
         if (key == "--ref-ms") opt.refractoryMs = to_d(val);
         if (key == "--minrr-coeff") opt.minRRGateFactor = to_d(val);
         if (key == "--minrr-floor-relaxed") opt.minRRFloorRelaxed = to_d(val);

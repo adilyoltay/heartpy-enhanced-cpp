@@ -29,8 +29,8 @@ public:
 
     void setWindowSeconds(double sec);              // 10–60 seconds typical
     void setUpdateIntervalSeconds(double sec);      // default 1.0 second
-    void setPsdUpdateSeconds(double sec) { psdUpdateSec_ = std::max(0.5, sec); }
-    void setDisplayHz(double hz) { displayHz_ = std::max(10.0, hz); }
+    void setPsdUpdateSeconds(double sec) { std::lock_guard<std::mutex> lock(dataMutex_); psdUpdateSec_ = std::clamp(sec, 0.5, 5.0); }
+    void setDisplayHz(double hz) { std::lock_guard<std::mutex> lock(dataMutex_); displayHz_ = std::clamp(hz, 10.0, 120.0); }
     // Convenience presets (may adjust filter/threshold defaults)
     void applyPresetTorch() { opt_.lowHz = 0.7; opt_.highHz = 3.0; opt_.refractoryMs = std::max(300.0, opt_.refractoryMs); opt_.useHPThreshold = true; opt_.maPerc = std::max(10.0, std::min(60.0, opt_.maPerc)); }
     void applyPresetAmbient() { opt_.lowHz = 0.5; opt_.highHz = 3.5; opt_.thresholdScale = std::max(0.5, opt_.thresholdScale); opt_.refractoryMs = std::max(320.0, opt_.refractoryMs); opt_.useHPThreshold = true; opt_.maPerc = std::max(10.0, std::min(60.0, opt_.maPerc)); }
@@ -43,10 +43,10 @@ public:
     // If a new update is ready (>= update interval), fills out and returns true
     bool poll(HeartMetrics& out);
 
-    QualityInfo getQuality() const { return lastQuality_; }
-    const std::vector<int>& latestPeaks() const { return lastPeaks_; }
-    const std::vector<double>& latestRR() const { return lastRR_; }
-    const std::vector<float>& displayBuffer() const { return displayBuf_; }
+    QualityInfo getQuality() const { std::lock_guard<std::mutex> lock(dataMutex_); return lastQuality_; }
+    std::vector<int> latestPeaks() const { std::lock_guard<std::mutex> lock(dataMutex_); return lastPeaks_; }
+    std::vector<double> latestRR() const { std::lock_guard<std::mutex> lock(dataMutex_); return lastRR_; }
+    std::vector<float> displayBuffer() const { std::lock_guard<std::mutex> lock(dataMutex_); return displayBuf_; }
 
 private:
     void append(const float* x, size_t n);

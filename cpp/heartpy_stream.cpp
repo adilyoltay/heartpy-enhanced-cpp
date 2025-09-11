@@ -1158,7 +1158,16 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     for (size_t i = 0; i < filt_.size(); ++i) yBufferD_[i] = (double)filt_[i];
 
     // Welch PSD on the full-rate filtered signal
-    int nfft = opt_.nfft > 0 ? opt_.nfft : 256;
+    auto coerceNfft = [](int n)->int {
+        if (n <= 0) return 256;
+        // Coerce to nearest of {256,512,1024}
+        int cand[3] = {256,512,1024};
+        int best = cand[0];
+        int bestd = std::abs(n - cand[0]);
+        for (int i = 1; i < 3; ++i) { int d = std::abs(n - cand[i]); if (d < bestd) { bestd = d; best = cand[i]; } }
+        return best;
+    };
+    int nfft = coerceNfft(opt_.nfft);
     auto ps = welchPowerSpectrum(yBufferD_, effFs, nfft, opt_.overlap);
     const auto &frq = ps.first; const auto &P = ps.second;
     if (frq.size() < 4 || frq.size() != P.size()) return;
