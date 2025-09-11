@@ -15,8 +15,16 @@ target_include_directories(heartpy_core PUBLIC
 )
 
 if(APPLE)
+    # Always link Accelerate because FFT path uses vDSP when available
     target_link_libraries(heartpy_core PRIVATE "-framework Accelerate")
     target_compile_definitions(heartpy_core PRIVATE USE_ACCELERATE_FFT=1)
+    if(HEARTPY_ENABLE_ACCELERATE)
+        target_compile_definitions(heartpy_core PRIVATE HEARTPY_ENABLE_ACCELERATE=1)
+    endif()
+endif()
+
+if(HEARTPY_ENABLE_NEON)
+    target_compile_definitions(heartpy_core PRIVATE HEARTPY_ENABLE_NEON=1)
 endif()
 option(USE_KISSFFT "Use KissFFT if available" ON)
 if(USE_KISSFFT)
@@ -87,6 +95,8 @@ add_custom_target(acceptance
 )
 
 enable_testing()
+option(HEARTPY_ENABLE_ACCELERATE "Use Apple Accelerate/vDSP where available" ON)
+option(HEARTPY_ENABLE_NEON "Enable ARM NEON intrinsics" OFF)
 add_test(NAME acceptance_torch
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset torch --fs 50 --duration 60 --fast
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
