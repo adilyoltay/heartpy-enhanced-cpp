@@ -32,7 +32,7 @@ HeartPy Enhanced is a complete C++ port of the Python HeartPy library with exten
 
 ## 🔧 Core Data Structures
 
-### Options Configuration
+### Options Configuration (Essentials)
 ```cpp
 struct Options {
     // Filtering Parameters
@@ -73,6 +73,25 @@ struct Options {
 };
 ```
 
+### Full Options Reference (C++ `heartpy::Options`)
+- Bandpass: `lowHz`, `highHz`, `iirOrder` — enable/disable by setting both cutoffs to 0.
+- Welch PSD: `nfft`, `overlap` (0..1), `welchWsizeSec` (default 240s).
+- RR Spline Smoothing: `rrSplineS` (smoothing factor), `rrSplineSmooth` (0..1 blend), `rrSplineSTargetSse` (target SSE mode).
+- Peak Detection: `refractoryMs`, `thresholdScale`, `bpmMin`, `bpmMax`.
+- Preprocessing: `interpClipping`, `clippingThreshold`, `hampelCorrect`, `hampelWindow`, `hampelThreshold`, `removeBaselineWander`, `enhancePeaks`.
+- High Precision Peaks: `highPrecision`, `highPrecisionFs`.
+- RR Cleaning: `cleanRR`, `cleanMethod` (QUOTIENT_FILTER, IQR, Z_SCORE), `cleanIterations`.
+- RR Thresholding: `thresholdRR` (HeartPy `threshold_rr` semantics).
+- Time‑domain modes: `sdsdMode` (SIGNED/ABS), `pnnAsPercent` (true=0..100, false=0..1).
+- Poincaré mode: `poincareMode` (FORMULA/MASKED).
+- Segmentwise: `segmentWidth`, `segmentOverlap`, `segmentMinSize`, `replaceOutliers`.
+- Quality assessment: `rejectSegmentwise`, `segmentRejectThreshold`, `segmentRejectWindowBeats`, `segmentRejectOverlap`, `segmentRejectMaxRejects`.
+- Breathing output: `breathingAsBpm` (false=Hz; true=breaths/min).
+
+Notes:
+- pNN thresholds use strict `>` on rounded diffs (`round6`) for HeartPy parity.
+- RR masking uses HeartPy’s binary semantics: 0=accepted, 1=rejected; successive pairs are included only if both ends are accepted.
+
 ### Quality Assessment
 ```cpp
 struct QualityInfo {
@@ -93,6 +112,8 @@ struct HeartMetrics {
     std::vector<double> ibiMs;             // Inter-beat intervals (ms)
     std::vector<double> rrList;            // Cleaned RR intervals
     std::vector<int> peakList;             // Peak sample indices
+    std::vector<int> peakListRaw;          // Peaks before cleaning
+    std::vector<int> binaryPeakMask;       // 1=accepted, 0=rejected (aligned to peakListRaw)
     
     // Time Domain HRV Metrics
     double sdnn = 0.0;                     // Standard deviation of NN intervals
@@ -127,6 +148,8 @@ struct HeartMetrics {
     
     // Segmentwise Results
     std::vector<HeartMetrics> segments;    // Results for each segment
+    // Binary quality windows (10-beat default)
+    struct BinarySegment { int index, startBeat, endBeat, totalBeats, rejectedBeats; bool accepted; };
 };
 ```
 
@@ -347,7 +370,7 @@ double calculateBreathingRate(const std::vector<double>& rrIntervals, const std:
 **Algorithm**:
 - Resamples RR intervals to uniform time grid (4 Hz)
 - Applies spectral analysis to detect respiratory modulation
-- Searches for peak in breathing frequency range (0.15-0.4 Hz)
+- Searches for peak in breathing frequency range (0.10–0.40 Hz)
 - Returns breathing rate in Hz by default; set `Options.breathingAsBpm=true` to receive BPM
 
 Performance note: Welch PSD now uses an FFT backend when `nfft` is a power of two (fallback to DFT otherwise). This significantly speeds up frequency-domain processing on device.
@@ -470,6 +493,74 @@ export function interpolateClipping(signal: number[], fs: number, threshold?: nu
 export function hampelFilter(signal: number[], windowSize?: number, threshold?: number): number[];
 export function scaleData(signal: number[], newMin?: number, newMax?: number): number[];
 ```
+
+---
+
+## 📱 Mobile On‑Device Guide
+
+### Design Goals
+- On‑device, offline HRV analysis with predictable latency and minimal battery impact.
+- Works in foreground and background tasks; resilient to intermittent sensor gaps.
+
+### iOS
+- Bridge: JSI/Obj‑C++ (`ios/HeartPyModule.mm`) exposes the C++ core.
+- Background: use BackgroundTasks for periodic analysis; avoid long‑running FFT on foreground thread.
+- Performance: build with `-O3`, arm64; Accelerate may be used for FFT when available.
+
+### Android
+- Bridge: JNI (`android/src/main/cpp/native_analyze.cpp`) → C++ core.
+- Threads: run analysis on a worker thread; keep JNI allocations minimal.
+- ProGuard/R8: keep native symbols per provided `proguard-rules.pro`.
+
+### React Native (JS/TS)
+- Batch mode: pass Float64Array signals for 1–5 min windows for stable FD metrics.
+- Streaming: accumulate peaks or RR and call `analyzeRR()` in rolling windows.
+- Memory: prefer reusing typed arrays; avoid copying large arrays across the bridge.
+
+### On‑Device Best Practices
+- Time‑domain live; frequency‑domain when window ≥ 4 min (per HeartPy guidance).
+- Enable `thresholdRR` + masked metrics for robust RMSSD/SDSD on noisy wearables.
+- Prefer Hz for breathing (`breathingAsBpm=false`) to match HeartPy’s default; convert at UI if needed.
+- Save only summary metrics and small QC arrays (avoid persisting raw PSD by default).
+
+### Performance Tips
+- Disable bandpass in C++ when you already prefilter in app (set `lowHz=highHz=0`).
+- Use `rrSplineS ∈ [5,15]` on short windows to stabilize FD/breathing.
+- Keep `nfft` as power of two for faster FFT; otherwise DFT fallback is used.
+- Avoid FD on < 1 min data; metrics are unstable by design (HeartPy also warns).
+
+---
+
+## 🧪 Tools & Validation (CLI)
+
+Included examples/tools:
+- `examples/compare_bidmc.py`: Python HeartPy vs C++ on BIDMC sample.
+- `examples/compare_file_json.cpp`: Run C++ on a CSV signal and emit JSON metrics.
+- `examples/compare_rr_json.cpp`: RR‑only comparison path (JSON output).
+- `examples/validate_rr_intervals.cpp`: RR‑only C++ CLI validator.
+- `examples/run_mitbih_validation.py`: Batch validator for MIT‑BIH (requires dataset).
+- `examples/validate_mitbih_rr.py`: RR extraction from annotations and parity report.
+
+Quick usage:
+- Build: `cmake -S . -B build-mac && cmake --build build-mac -j`
+- Python env: `PYTHONPATH=heartpy_source python3 examples/compare_bidmc.py`
+
+Parity notes:
+- pNN uses strict `>` with `round6` on abs diffs; output as ratio (0..1) or percent (0..100) via `pnnAsPercent`.
+- RR‑only pipeline: `threshold_rr` → cleaning → masked pairs for RMSSD/SDSD.
+- Welch PSD: Hann window, one‑sided density, constant detrend per segment.
+
+---
+
+## ✅ Parity & Definition of Done
+
+- Time domain: BPM/SDNN/RMSSD/SD1/SD2 parity within ≤ 2% on MIT‑BIH subset.
+- pNN20/pNN50: strict `>` parity; average diff ≤ 2%, max ≤ 5%.
+- RR‑only masked metrics: SDSD/RMSSD aligned; pair validity rule enforced (both ends accepted).
+- Frequency domain: comparable on ≥ 4 min data; short windows flagged as low‑reliability.
+- Breathing: 0.10–0.40 Hz peak; Hz by default, BPM via option.
+
+Tag: `v0.1.0-parity` — time‑domain parity, pNN fix, Welch/breathing alignment, repo cleanup.
 
 ---
 
@@ -783,7 +874,7 @@ C++ port with advanced preprocessing and mobile optimization.
 
 ## 🔗 Quick Start Links
 
-- **GitHub Repository**: `/Users/adilyoltay/Desktop/heartpy/`
+- **GitHub Repository**: `https://github.com/adilyoltay/heartpy-enhanced-cpp`
 - **Example Implementation**: `examples/example_main.cpp`
 - **React Native Package**: `react-native-heartpy/`
 - **Test Application**: `HeartPyApp/`
