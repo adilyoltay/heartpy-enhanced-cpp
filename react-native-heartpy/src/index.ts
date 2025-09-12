@@ -318,27 +318,93 @@ export async function rtDestroy(handle: number): Promise<void> {
 
 export class RealtimeAnalyzer {
     private handle: number = 0;
+    private mode: 'nm' | 'jsi' = 'nm';
+    private jsiId: number = 0; // 32-bit id when JSI is used
     private constructor(h: number) { this.handle = h; }
 
     static async create(fs: number, options?: HeartPyOptions): Promise<RealtimeAnalyzer> {
+        const { Platform, NativeModules } = require('react-native');
+        // Prefer JSI only on Android when enabled and successfully installed
+        let useJSI = false;
+        if (Platform.OS === 'android' && cfg.jsiEnabled && !sessionJSIDisabled) {
+            try {
+                const ok = !!NativeModules?.HeartPyModule?.installJSI?.();
+                const g: any = global as any;
+                if (ok && typeof g.__hpRtCreate === 'function' && typeof g.__hpRtPush === 'function' && typeof g.__hpRtPoll === 'function' && typeof g.__hpRtDestroy === 'function') {
+                    useJSI = true;
+                }
+            } catch { /* ignore */ }
+        }
+
+        if (useJSI) {
+            try {
+                const g: any = global as any;
+                // JSI path does native validation; TS still guards fs bounds early
+                if (!(fs >= 1 && fs <= 10000)) {
+                    const err: any = new Error(`Invalid sample rate: ${fs}. Must be 1-10000 Hz.`);
+                    err.code = 'HEARTPY_E001';
+                    throw err;
+                }
+                const id = g.__hpRtCreate(fs, options ?? {});
+                const inst = new RealtimeAnalyzer(0);
+                inst.mode = 'jsi';
+                inst.jsiId = id | 0;
+                if (cfg.debug) console.log('HeartPy: using JSI path');
+                return inst;
+            } catch (e) {
+                // fallthrough to NM path on any error
+                if (cfg.debug) console.warn('HeartPy: JSI path failed, falling back to NativeModules', e);
+                sessionJSIDisabled = true;
+            }
+        }
+
         const h = await rtCreate(fs, options);
+        if (cfg.debug) console.log('HeartPy: using NativeModules path');
         return new RealtimeAnalyzer(h);
     }
 
     async push(samples: Float32Array | number[], t0?: number): Promise<void> {
-        if (!this.handle) throw new Error('RealtimeAnalyzer destroyed');
-        return rtPush(this.handle, samples, t0);
+        if (this.mode === 'jsi') {
+            if (!this.jsiId) throw new Error('RealtimeAnalyzer destroyed');
+            const g: any = global as any;
+            jsiCalls++;
+            // Prefer Float32Array for zero-copy later
+            const buf = (samples instanceof Float32Array ? samples : new Float32Array(samples as number[]));
+            const t1 = Date.now();
+            g.__hpRtPush(this.jsiId, buf, t0 ?? 0);
+            recordDuration(pushDurationsMs, Date.now() - t1);
+            return;
+        } else {
+            if (!this.handle) throw new Error('RealtimeAnalyzer destroyed');
+            return rtPush(this.handle, samples, t0);
+        }
     }
 
     async poll(): Promise<HeartPyMetrics | null> {
-        if (!this.handle) throw new Error('RealtimeAnalyzer destroyed');
-        return rtPoll(this.handle);
+        if (this.mode === 'jsi') {
+            if (!this.jsiId) throw new Error('RealtimeAnalyzer destroyed');
+            const g: any = global as any;
+            jsiCalls++;
+            const t1 = Date.now();
+            const res = g.__hpRtPoll(this.jsiId);
+            recordDuration(pollDurationsMs, Date.now() - t1);
+            return res ?? null;
+        } else {
+            if (!this.handle) throw new Error('RealtimeAnalyzer destroyed');
+            return rtPoll(this.handle);
+        }
     }
 
     async destroy(): Promise<void> {
-        if (!this.handle) return; // idempotent
-        const h = this.handle; this.handle = 0;
-        try { await rtDestroy(h); } catch {}
+        if (this.mode === 'jsi') {
+            if (!this.jsiId) return;
+            const id = this.jsiId; this.jsiId = 0;
+            try { (global as any).__hpRtDestroy(id); } catch {}
+        } else {
+            if (!this.handle) return; // idempotent
+            const h = this.handle; this.handle = 0;
+            try { await rtDestroy(h); } catch {}
+        }
     }
 
     // Allow dev-time override of flags
