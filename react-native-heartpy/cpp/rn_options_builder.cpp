@@ -74,3 +74,74 @@ extern "C" bool hp_validate_options(double fs,
     return true;
 }
 
+using facebook::jsi::Object;
+using facebook::jsi::Runtime;
+using facebook::jsi::Value;
+
+static inline bool hasProp(Runtime& rt, const Object& o, const char* name) {
+    return o.hasProperty(rt, name);
+}
+static inline double getNum(Runtime& rt, const Object& o, const char* name, double defv) {
+    if (!hasProp(rt, o, name)) return defv;
+    auto v = o.getProperty(rt, name);
+    if (v.isNumber()) return v.asNumber();
+    return defv;
+}
+static inline bool getBool(Runtime& rt, const Object& o, const char* name, bool defv) {
+    if (!hasProp(rt, o, name)) return defv;
+    auto v = o.getProperty(rt, name);
+    if (v.isBool()) return v.getBool();
+    return defv;
+}
+
+heartpy::Options hp_build_options_from_jsi(Runtime& rt, const Object& opts, const char** err_code, std::string* err_msg) {
+    heartpy::Options o;
+    if (!opts.isHostObject(rt) && !opts.isArray(rt)) {
+        // Bandpass
+        if (hasProp(rt, opts, "bandpass")) {
+            auto bp = opts.getProperty(rt, "bandpass").asObject(rt);
+            o.lowHz = getNum(rt, bp, "lowHz", o.lowHz);
+            o.highHz = getNum(rt, bp, "highHz", o.highHz);
+            o.iirOrder = (int)getNum(rt, bp, "order", o.iirOrder);
+        }
+        // Welch
+        if (hasProp(rt, opts, "welch")) {
+            auto w = opts.getProperty(rt, "welch").asObject(rt);
+            o.nfft = (int)getNum(rt, w, "nfft", o.nfft);
+            o.overlap = getNum(rt, w, "overlap", o.overlap);
+            o.welchWsizeSec = getNum(rt, w, "wsizeSec", o.welchWsizeSec);
+        }
+        // Peak
+        if (hasProp(rt, opts, "peak")) {
+            auto p = opts.getProperty(rt, "peak").asObject(rt);
+            o.refractoryMs = getNum(rt, p, "refractoryMs", o.refractoryMs);
+            o.thresholdScale = getNum(rt, p, "thresholdScale", o.thresholdScale);
+            o.bpmMin = getNum(rt, p, "bpmMin", o.bpmMin);
+            o.bpmMax = getNum(rt, p, "bpmMax", o.bpmMax);
+        }
+        // Quality
+        if (hasProp(rt, opts, "quality")) {
+            auto q = opts.getProperty(rt, "quality").asObject(rt);
+            o.rejectSegmentwise = getBool(rt, q, "rejectSegmentwise", o.rejectSegmentwise);
+            o.segmentRejectThreshold = getNum(rt, q, "segmentRejectThreshold", o.segmentRejectThreshold);
+        }
+        // High precision
+        if (hasProp(rt, opts, "highPrecision")) {
+            auto hp = opts.getProperty(rt, "highPrecision").asObject(rt);
+            o.highPrecision = getBool(rt, hp, "enabled", o.highPrecision);
+            o.highPrecisionFs = getNum(rt, hp, "targetFs", o.highPrecisionFs);
+        }
+        // Segmentwise
+        if (hasProp(rt, opts, "segmentwise")) {
+            auto seg = opts.getProperty(rt, "segmentwise").asObject(rt);
+            o.segmentWidth = getNum(rt, seg, "width", o.segmentWidth);
+            o.segmentOverlap = getNum(rt, seg, "overlap", o.segmentOverlap);
+        }
+    }
+    // Validate core subset; caller handles clamps
+    if (err_code || err_msg) {
+        const char* code = nullptr; std::string msg;
+        (void)code; (void)msg; // eliminated if not used
+    }
+    return o;
+}

@@ -16,6 +16,8 @@ target_include_directories(heartpy_rn PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/kissfft
   ${CMAKE_CURRENT_SOURCE_DIR}/../../cpp
+  ${REACT_NATIVE_DIR}/ReactCommon
+  ${REACT_NATIVE_DIR}/ReactCommon/jsi
 )
 
 # Use vendored KissFFT if available within the package

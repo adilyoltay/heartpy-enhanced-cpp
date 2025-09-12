@@ -99,6 +99,7 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                                                          double refractoryMs,
                                                          double bpmMin, double bpmMax,
                                                          double highPrecisionFs);
+    private static native void installJSIHybrid(long runtimePtr);
 
     // ---------- Step 0: Risk mitigation flags & profiling ----------
     private static volatile boolean CFG_JSI_ENABLED = true;
@@ -142,6 +143,24 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
     @Override
     public String getName() {
         return "HeartPyModule";
+    }
+
+    // Install Android JSI bindings (blocking, sync)
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public boolean installJSI() {
+        try {
+            long ptr = getReactApplicationContext().getJavaScriptContextHolder().get();
+            if (ptr == 0) {
+                Log.w("HeartPyJSI", "HEARTPY_E901: JS runtime ptr is 0");
+                return false;
+            }
+            installJSIHybrid(ptr);
+            Log.d("HeartPyJSI", "installJSIHybrid: success");
+            return true;
+        } catch (Throwable t) {
+            Log.e("HeartPyJSI", "HEARTPY_E900: installJSI failed: " + t.getMessage());
+            return false;
+        }
     }
 
     // Single-thread executors per realtime analyzer handle

@@ -404,4 +404,147 @@ Java_com_heartpy_HeartPyModule_rtValidateOptionsNative(
     return nullptr;
 }
 
+// ------------------------------
+// Android JSI install + host functions
+// ------------------------------
+
+// Forward declare installer
+static void installBinding(facebook::jsi::Runtime& rt);
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_heartpy_HeartPyModule_installJSIHybrid(JNIEnv*, jclass, jlong runtimePtr) {
+    if (runtimePtr == 0) return;
+    auto* runtime = reinterpret_cast<facebook::jsi::Runtime*>(runtimePtr);
+    installBinding(*runtime);
+}
+
+// Handle registry for JSI path (32-bit IDs)
+static std::unordered_map<uint32_t, void*> g_handles;
+static std::mutex g_handles_m;
+static std::atomic<uint32_t> g_next_id{1};
+
+static uint32_t hp_handle_register(void* p) {
+    std::lock_guard<std::mutex> lock(g_handles_m);
+    uint32_t id = g_next_id.fetch_add(1);
+    g_handles[id] = p;
+    return id;
+}
+static void* hp_handle_get(uint32_t id) {
+    std::lock_guard<std::mutex> lock(g_handles_m);
+    auto it = g_handles.find(id);
+    return (it == g_handles.end() ? nullptr : it->second);
+}
+static void hp_handle_remove(uint32_t id) {
+    std::lock_guard<std::mutex> lock(g_handles_m);
+    auto it = g_handles.find(id);
+    if (it != g_handles.end()) {
+        void* p = it->second;
+        g_handles.erase(it);
+        hp_rt_destroy(p);
+    }
+}
+
+static void installBinding(facebook::jsi::Runtime& rt) {
+    using namespace facebook::jsi;
+    // __hpRtCreate(fs:number, options?:object) -> number (id)
+    auto fnCreate = Function::createFromHostFunction(
+        rt,
+        PropNameID::forAscii(rt, "__hpRtCreate"),
+        2,
+        [](Runtime& rt, const Value&, const Value* args, size_t count) -> Value {
+            if (count < 1 || !args[0].isNumber()) {
+                throw JSError(rt, "HEARTPY_E001: invalid fs");
+            }
+            double fs = args[0].asNumber();
+            heartpy::Options opt;
+            if (count > 1 && args[1].isObject()) {
+                opt = hp_build_options_from_jsi(rt, args[1].asObject(rt), nullptr, nullptr);
+            }
+            const char* code = nullptr; std::string msg;
+            if (!hp_validate_options(fs, opt, &code, &msg)) {
+                std::string m = (code ? code : "HEARTPY_E015"); m += ": "; m += msg;
+                throw JSError(rt, m.c_str());
+            }
+            void* p = hp_rt_create(fs, &opt);
+            if (!p) throw JSError(rt, "HEARTPY_E004: create failed");
+            uint32_t id = hp_handle_register(p);
+            return Value((double)id);
+        }
+    );
+    rt.global().setProperty(rt, "__hpRtCreate", fnCreate);
+
+    // __hpRtPush(handle:number, data:Float32Array, t0?:number) -> void
+    auto fnPush = Function::createFromHostFunction(
+        rt,
+        PropNameID::forAscii(rt, "__hpRtPush"),
+        3,
+        [](Runtime& rt, const Value&, const Value* args, size_t count) -> Value {
+            if (count < 2) throw JSError(rt, "HEARTPY_E102: missing data");
+            if (!args[0].isNumber()) throw JSError(rt, "HEARTPY_E101: invalid handle");
+            uint32_t id = (uint32_t)args[0].asNumber();
+            void* p = hp_handle_get(id);
+            if (!p) throw JSError(rt, "HEARTPY_E101: invalid handle");
+            auto arr = args[1];
+            if (!arr.isObject()) throw JSError(rt, "HEARTPY_E102: invalid buffer");
+            auto o = arr.asObject(rt);
+            size_t len = (size_t)o.getProperty(rt, "length").asNumber();
+            if (len == 0) throw JSError(rt, "HEARTPY_E102: empty buffer");
+            double t0 = (count > 2 && args[2].isNumber()) ? args[2].asNumber() : 0.0;
+            // Fallback copy (portable). Zero-copy will be attempted in future via ArrayBuffer pointer extraction.
+            __android_log_print(ANDROID_LOG_DEBUG, "HeartPyJSI", "rtPush: fallback copy path (len=%zu)", len);
+            std::vector<float> tmp; tmp.reserve(len);
+            for (size_t i = 0; i < len; ++i) tmp.push_back((float)o.getPropertyAtIndex(rt, (uint32_t)i).asNumber());
+            hp_rt_push(p, tmp.data(), tmp.size(), t0);
+            return Value::undefined();
+        }
+    );
+    rt.global().setProperty(rt, "__hpRtPush", fnPush);
+
+    // __hpRtPoll(handle:number) -> object | null
+    auto fnPoll = Function::createFromHostFunction(
+        rt,
+        PropNameID::forAscii(rt, "__hpRtPoll"),
+        1,
+        [](Runtime& rt, const Value&, const Value* args, size_t count) -> Value {
+            if (count < 1 || !args[0].isNumber()) throw JSError(rt, "HEARTPY_E111: invalid handle");
+            uint32_t id = (uint32_t)args[0].asNumber();
+            void* p = hp_handle_get(id);
+            if (!p) throw JSError(rt, "HEARTPY_E111: invalid handle");
+            heartpy::HeartMetrics out;
+            if (!hp_rt_poll(p, &out)) return Value::null();
+            Object obj(rt);
+            obj.setProperty(rt, "bpm", out.bpm);
+            // rrList
+            {
+                Array rr(rt, out.rrList.size());
+                for (size_t i=0;i<out.rrList.size();++i) rr.setValueAtIndex(rt, i, out.rrList[i]);
+                obj.setProperty(rt, "rrList", rr);
+            }
+            // quality
+            {
+                Object q(rt);
+                q.setProperty(rt, "snrDb", out.quality.snrDb);
+                q.setProperty(rt, "confidence", out.quality.confidence);
+                obj.setProperty(rt, "quality", q);
+            }
+            return obj;
+        }
+    );
+    rt.global().setProperty(rt, "__hpRtPoll", fnPoll);
+
+    // __hpRtDestroy(handle:number)
+    auto fnDestroy = Function::createFromHostFunction(
+        rt,
+        PropNameID::forAscii(rt, "__hpRtDestroy"),
+        1,
+        [](Runtime& rt, const Value&, const Value* args, size_t count) -> Value {
+            if (count < 1 || !args[0].isNumber()) throw JSError(rt, "HEARTPY_E121: invalid handle");
+            uint32_t id = (uint32_t)args[0].asNumber();
+            hp_handle_remove(id);
+            return Value::undefined();
+        }
+    );
+    rt.global().setProperty(rt, "__hpRtDestroy", fnDestroy);
+}
+
 
