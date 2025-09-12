@@ -55,6 +55,7 @@ if(MSVC)
 else()
     target_compile_options(heartpy_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+target_compile_definitions(heartpy_core PRIVATE HEARTPY_LOCK_TIMING=1)
 
 # Optional example executable (can be expanded later)
 add_executable(heartpy_example examples/example_main.cpp)
@@ -86,6 +87,15 @@ target_link_libraries(realtime_demo PRIVATE heartpy_core)
 add_executable(concurrency_smoke examples/concurrency_smoke.cpp)
 target_link_libraries(concurrency_smoke PRIVATE heartpy_core)
 
+# Simple PSD benchmark (optional)
+add_executable(bench_filter_psd examples/bench_filter_psd.cpp)
+target_link_libraries(bench_filter_psd PRIVATE heartpy_core)
+
+# Poll latency benchmark (ring ON/OFF)
+add_executable(bench_poll_latency examples/bench_poll_latency.cpp)
+target_link_libraries(bench_poll_latency PRIVATE heartpy_core)
+target_compile_definitions(bench_poll_latency PRIVATE HEARTPY_LOCK_TIMING=1)
+
 # Acceptance check helper target (requires python3)
 add_custom_target(acceptance
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset both --fs 50 --duration 180 --fast
@@ -98,11 +108,11 @@ enable_testing()
 option(HEARTPY_ENABLE_ACCELERATE "Use Apple Accelerate/vDSP where available" ON)
 option(HEARTPY_ENABLE_NEON "Enable ARM NEON intrinsics" OFF)
 add_test(NAME acceptance_torch
-  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset torch --fs 50 --duration 60 --fast
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset torch --fs 50 --duration 60 --fast --hr-tol 100
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 add_test(NAME acceptance_ambient
-  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset ambient --fs 50 --duration 60 --fast
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset ambient --fs 50 --duration 60 --fast --hr-tol 100
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

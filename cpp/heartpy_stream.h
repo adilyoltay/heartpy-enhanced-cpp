@@ -10,6 +10,65 @@
 
 namespace heartpy {
 
+// Simple fixed-capacity ring buffer for POD types
+template <typename T>
+class RingBuffer {
+public:
+    RingBuffer() = default;
+    explicit RingBuffer(size_t cap) { reconfigure(cap); }
+    void reconfigure(size_t cap) {
+        if (cap == 0) cap = 1;
+        std::vector<T> nb(cap);
+        // copy last min(size, cap) elements into new buffer
+        size_t keep = std::min(size_, cap);
+        for (size_t i = 0; i < keep; ++i) {
+            nb[keep - 1 - i] = at(size_ - 1 - i);
+        }
+        buf_.swap(nb);
+        cap_ = cap;
+        head_ = 0;
+        size_ = keep;
+    }
+    size_t capacity() const { return cap_; }
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    // Push single value
+    inline void push_back(const T& v) {
+        if (cap_ == 0) reconfigure(1);
+        if (size_ < cap_) {
+            buf_[(head_ + size_) % cap_] = v;
+            ++size_;
+        } else {
+            // overwrite oldest
+            buf_[head_] = v;
+            head_ = (head_ + 1) % cap_;
+        }
+    }
+    // Push many values
+    void push_back_many(const T* data, size_t n) {
+        if (!data || n == 0) return;
+        for (size_t i = 0; i < n; ++i) push_back(data[i]);
+    }
+    // Access i-th element from oldest (0..size-1)
+    inline const T& at(size_t i) const {
+        return buf_[(head_ + i) % cap_];
+    }
+    // Snapshot into contiguous vector (oldest..newest)
+    void snapshot(std::vector<T>& out) const {
+        out.resize(size_);
+        if (size_ == 0) return;
+        size_t first = head_;
+        size_t n1 = std::min(size_, cap_ - first);
+        for (size_t i = 0; i < n1; ++i) out[i] = buf_[first + i];
+        for (size_t i = n1; i < size_; ++i) out[i] = buf_[i - n1];
+    }
+private:
+    std::vector<T> buf_;
+    size_t cap_{0};
+    size_t head_{0};
+    size_t size_{0};
+};
+
 struct SBiquad {
     double b0{0}, b1{0}, b2{0}, a1{0}, a2{0};
     double z1{0}, z2{0};
@@ -18,6 +77,18 @@ struct SBiquad {
         z1 = in * b1 + z2 - a1 * out;
         z2 = in * b2 - a2 * out;
         return static_cast<float>(out);
+    }
+};
+
+// Double-precision biquad for high-precision/deterministic mode
+struct SBiquadD {
+    double b0{0}, b1{0}, b2{0}, a1{0}, a2{0};
+    double z1{0}, z2{0};
+    inline double process(double in) {
+        double out = in * b0 + z1;
+        z1 = in * b1 + z2 - a1 * out;
+        z2 = in * b2 - a2 * out;
+        return out;
     }
 };
 
@@ -83,6 +154,12 @@ private:
     std::vector<float> filt_;
     std::vector<float> displayBuf_; // downsampled view for UI
     std::vector<SBiquad> bq_;
+    std::vector<SBiquadD> bqD_;
+    // Optional ring storage (when opt_.useRingBuffer == true)
+    bool useRing_ {false};
+    RingBuffer<float> ringSignal_;
+    RingBuffer<float> ringFilt_;
+    size_t ringCapacity_ {0};
 
     // Cached outputs from last poll
     QualityInfo lastQuality_ {};
@@ -106,6 +183,27 @@ private:
     size_t totalAbs_ {0};
     std::vector<size_t> peaksAbs_;
     size_t acceptedPeaksTotal_ {0};
+
+    // Audit/telemetry counters
+    unsigned long long droppedSamplesTotal_ {0};
+    unsigned long long clampedBatchesTotal_ {0};
+    unsigned long long oomPreventedTotal_ {0};
+    unsigned long long paramChangeEventsTotal_ {0};
+    int lastMergeBudgetExhausted_ {0};
+    unsigned long long mergeBudgetExhaustedTotal_ {0};
+    unsigned long long droppedSamplesLast_ {0};
+    unsigned long long clampedBatchesLast_ {0};
+    int dropConsecPolls_ {0};
+    unsigned long long timestampBacktrackEventsTotal_ {0};
+    unsigned long long timestampsSkippedTotal_ {0};
+    unsigned long long timeJumpEventsTotal_ {0};
+
+#ifdef HEARTPY_LOCK_TIMING
+public:
+    // which: 1 = snapshot lock, 2 = commit lock
+    static void lockStatsGet(int which, double& avg_us, double& p95_us, bool reset);
+    static void recordLockHold(int which, double us);
+#endif
 
     // HP-style thresholding state
     double baseLift_ {0.0};         // mn = mean(rolling_mean)/100 * maPerc_

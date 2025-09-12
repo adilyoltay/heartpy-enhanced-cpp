@@ -31,9 +31,21 @@ int main(int argc, char** argv) {
     if (argc >= 5) { std::string f = argv[4]; fast = (f == "fast" || f == "1" || f == "true"); }
     // Optional: named flag --json-out <path>
     std::string jsonOutPath;
+    bool compactJson = false;
+    bool deterministic = false;
+    bool highPrecision = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--json-out" && (i + 1) < argc) {
             jsonOutPath = argv[i + 1];
+        }
+        if (std::string(argv[i]) == "--compact-json") {
+            compactJson = true;
+        }
+        if (std::string(argv[i]) == "--deterministic") {
+            deterministic = true;
+        }
+        if (std::string(argv[i]) == "--high-precision") {
+            highPrecision = true;
         }
     }
     double refMsOverride = -1.0;
@@ -45,6 +57,8 @@ int main(int argc, char** argv) {
     opt.refractoryMs = 320.0; opt.thresholdScale = 0.5;
     opt.useHPThreshold = true; opt.maPerc = 30.0; opt.adaptiveMaPerc = true;
     opt.breathingAsBpm = false;
+    opt.deterministic = deterministic;
+    opt.highPrecision = opt.highPrecision || highPrecision;
 
     // Named CLI overrides for streaming Options
     for (int i = 1; i + 1 < argc; ++i) {
@@ -72,6 +86,10 @@ int main(int argc, char** argv) {
         if (key == "--snr-active-tau") opt.snrActiveTauSec = to_d(val);
         if (key == "--snr-band-blend") opt.snrBandBlendFactor = to_d(val);
         if (key == "--threshold-scale") opt.thresholdScale = to_d(val);
+        if (key == "--use-ring") {
+            std::string v = val; for (auto &c : v) c = (char)std::tolower(c);
+            opt.useRingBuffer = (v == "1" || v == "true" || v == "on");
+        }
     }
 
     if (refMsOverride > 0) opt.refractoryMs = refMsOverride;
@@ -114,16 +132,56 @@ int main(int argc, char** argv) {
                 bpm_stream = 60.0 * out.quality.f0Hz;
             }
             if (jsonEnabled) {
-                // Emit JSON line (only acceptance-relevant fields)
-                jsonFile << "{"
-                         << "\"t\":" << tsec
-                         << ",\"stream_bpm\":" << bpm_stream
-                         << ",\"conf\":" << out.quality.confidence
-                         << ",\"snr_db\":" << out.quality.snrDb
-                         << ",\"ma_perc\":" << out.quality.maPercActive
-                         << ",\"rejection\":" << out.quality.rejectionRate
-                         << ",\"hard_dbl\":" << (out.quality.doublingFlag ? 1 : 0)
-                         << "}" << '\n';
+                // Emit JSON line (acceptance + diagnostics fields)
+                if (compactJson) {
+                    // Compact: only fields needed by acceptance
+                    jsonFile << "{"
+                             << "\"t\":" << tsec
+                             << ",\"stream_bpm\":" << bpm_stream
+                             << ",\"snr_db\":" << out.quality.snrDb
+                             << ",\"conf\":" << out.quality.confidence
+                             << ",\"f0_used_hz\":" << out.quality.f0Hz
+                             << ",\"ma_perc\":" << out.quality.maPercActive
+                             << ",\"rejection\":" << out.quality.rejectionRate
+                             << ",\"hard_dbl\":" << (out.quality.doublingFlag ? 1 : 0)
+                             << "}" << '\n';
+                } else {
+                    jsonFile << "{"
+                             << "\"t\":" << tsec
+                             << ",\"stream_bpm\":" << bpm_stream
+                             << ",\"conf\":" << out.quality.confidence
+                             << ",\"snr_db\":" << out.quality.snrDb
+                             << ",\"f0_used_hz\":" << out.quality.f0Hz
+                             << ",\"ma_perc\":" << out.quality.maPercActive
+                             << ",\"rejection\":" << out.quality.rejectionRate
+                             << ",\"hard_dbl\":" << (out.quality.doublingFlag ? 1 : 0)
+                             << ",\"soft_dbl\":" << (out.quality.softDoublingFlag ? 1 : 0)
+                             << ",\"doubling_hint\":" << (out.quality.doublingHintFlag ? 1 : 0)
+                             << ",\"hard_fallback\":" << (out.quality.hardFallbackActive ? 1 : 0)
+                             << ",\"rr_fallback_mode\":" << (out.quality.rrFallbackModeActive ? 1 : 0)
+                             << ",\"p_half_over_fund\":" << out.quality.pHalfOverFund
+                             << ",\"pair_frac\":" << out.quality.pairFrac
+                             << ",\"short_frac\":" << out.quality.rrShortFrac
+                             << ",\"long_rr_ms\":" << out.quality.rrLongMs
+                             << ",\"ref_ms\":" << out.quality.refractoryMsActive
+                             << ",\"min_rr_ms\":" << out.quality.minRRBoundMs
+                             << ",\"soft_secs\":" << out.quality.softSecs
+                             << ",\"soft_streak\":" << out.quality.softStreak
+                             // Audit/telemetry (non-blocking)
+                             << ",\"dropped_samples_total\":" << out.quality.droppedSamplesTotal
+                             << ",\"clamped_batches_total\":" << out.quality.clampedBatchesTotal
+                             << ",\"oom_prevented_total\":" << out.quality.oomPreventedTotal
+                             << ",\"param_change_events_total\":" << out.quality.paramChangeEventsTotal
+                             << ",\"merge_budget_exhausted\":" << out.quality.mergeBudgetExhausted
+                             << ",\"merge_budget_exhausted_total\":" << out.quality.mergeBudgetExhaustedTotal
+                             << ",\"dropped_samples_last\":" << out.quality.droppedSamplesLast
+                             << ",\"clamped_batches_last\":" << out.quality.clampedBatchesLast
+                             << ",\"timestamp_backtrack_events_total\":" << out.quality.timestampBacktrackEventsTotal
+                             << ",\"timestamps_skipped_total\":" << out.quality.timestampsSkippedTotal
+                             << ",\"time_jump_events_total\":" << out.quality.timeJumpEventsTotal
+                             << ",\"dropping_active\":" << out.quality.droppingActive
+                             << "}" << '\n';
+                }
                 jsonFile.flush();
             } else {
                 // Human-readable line

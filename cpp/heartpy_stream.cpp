@@ -15,6 +15,38 @@ static inline bool absToRel(size_t abs, size_t firstAbs, size_t n, size_t& rel) 
     if (abs < firstAbs) return false; size_t v = abs - firstAbs; if (v >= n) return false; rel = v; return true;
 }
 
+// Size safety helpers
+static inline size_t safeSizeMul(double a, double b, size_t cap) {
+    if (!(std::isfinite(a) && std::isfinite(b))) return 0;
+    if (a <= 0.0 || b <= 0.0) return 0;
+    long double prod = (long double)a * (long double)b;
+    if (prod < 0.0L) prod = 0.0L;
+    long double capld = static_cast<long double>(cap);
+    if (prod > capld) return cap;
+    size_t v = static_cast<size_t>(prod);
+    return (v > cap) ? cap : v;
+}
+static constexpr double MAX_WINDOW_SEC = 300.0; // acceptance memory limit
+
+#ifdef HEARTPY_LOCK_TIMING
+static std::vector<double> g_lock1_times_us; // snapshot lock
+static std::vector<double> g_lock2_times_us; // commit lock
+static inline void push_lock_time(int which, double us) {
+    (which == 2 ? g_lock2_times_us : g_lock1_times_us).push_back(us);
+}
+void RealtimeAnalyzer::lockStatsGet(int which, double& avg_us, double& p95_us, bool reset) {
+    avg_us = 0.0; p95_us = 0.0;
+    auto& v = (which == 2 ? g_lock2_times_us : g_lock1_times_us);
+    if (!v.empty()) {
+        double sum = 0.0; for (double x : v) sum += x; avg_us = sum / v.size();
+        auto tmp = v; std::sort(tmp.begin(), tmp.end());
+        size_t idx = (size_t)std::min(tmp.size() - 1, (size_t)std::floor(0.95 * (tmp.size() - 1)));
+        p95_us = tmp[idx];
+        if (reset) v.clear();
+    }
+}
+void RealtimeAnalyzer::recordLockHold(int which, double us) { push_lock_time(which, us); }
+#endif
 // Local HP-style helpers (mirrors core behavior, kept local to avoid linkage deps)
 static std::vector<double> rollingMeanHP_local(const std::vector<double>& data, double fs, double windowSeconds) {
     const int N = static_cast<int>(windowSeconds * fs);
@@ -112,6 +144,34 @@ static std::vector<SBiquad> designBandpassStream(double fs, double lowHz, double
     return chain;
 }
 
+static std::vector<SBiquadD> designBandpassStreamD(double fs, double lowHz, double highHz, int sections) {
+    std::vector<SBiquadD> chain;
+    if (lowHz <= 0.0 && highHz <= 0.0) return chain;
+    if (fs <= 0.0) return chain;
+    sections = std::max(1, sections);
+    double f0 = (lowHz > 0.0 && highHz > 0.0) ? 0.5 * (lowHz + highHz)
+                                              : std::max(0.001, (lowHz > 0.0 ? lowHz : highHz));
+    double bw = (lowHz > 0.0 && highHz > 0.0) ? (highHz - lowHz) : std::max(0.25, f0 * 0.5);
+    double Q = std::max(0.2, f0 / std::max(1e-9, bw));
+    const double w0 = 2.0 * 3.141592653589793 * f0 / fs;
+    const double alpha = std::sin(w0) / (2.0 * Q);
+    const double cosw0 = std::cos(w0);
+    double b0 =   alpha;
+    double b1 =   0.0;
+    double b2 =  -alpha;
+    double a0 =   1.0 + alpha;
+    double a1 =  -2.0 * cosw0;
+    double a2 =   1.0 - alpha;
+    SBiquadD bi;
+    bi.b0 = b0 / a0;
+    bi.b1 = b1 / a0;
+    bi.b2 = b2 / a0;
+    bi.a1 = a1 / a0;
+    bi.a2 = a2 / a0;
+    for (int i = 0; i < sections; ++i) chain.push_back(bi);
+    return chain;
+}
+
 // helpers (local)
 static inline double meanVec(const std::vector<double>& v) {
     if (v.empty()) return 0.0; double s = 0.0; for (double x : v) s += x; return s / static_cast<double>(v.size());
@@ -125,14 +185,22 @@ RealtimeAnalyzer::RealtimeAnalyzer(double fs, const Options& opt)
     : fs_(fs), opt_(opt) {
     if (fs_ <= 0.0) fs_ = 50.0;
     if (windowSec_ < 1.0) windowSec_ = 10.0;
+    if (windowSec_ > MAX_WINDOW_SEC) windowSec_ = MAX_WINDOW_SEC;
     if (updateSec_ <= 0.0) updateSec_ = 1.0;
-    signal_.reserve(static_cast<size_t>(windowSec_ * fs_) + 8 * static_cast<size_t>(fs_));
+    // Reserve with safe size arithmetic
+    size_t margin = 8 * static_cast<size_t>(std::ceil(fs_));
+    size_t cap = safeSizeMul(windowSec_, fs_, SIZE_MAX / 4);
+    cap = (cap > SIZE_MAX - margin) ? (SIZE_MAX - margin) : (cap + margin);
+    signal_.reserve(cap);
+    filt_.reserve(cap);
     effectiveFs_ = fs_;
     firstTsApprox_ = 0.0;
     lastTs_ = 0.0;
     // Streaming filter design
     if (opt_.lowHz > 0.0 || opt_.highHz > 0.0) {
-        bq_ = designBandpassStream(fs_, opt_.lowHz, opt_.highHz, std::max(1, opt_.iirOrder));
+        bool useD = opt_.highPrecision || opt_.deterministic;
+        if (useD) bqD_ = designBandpassStreamD(fs_, opt_.lowHz, opt_.highHz, std::max(1, opt_.iirOrder));
+        else bq_ = designBandpassStream(fs_, opt_.lowHz, opt_.highHz, std::max(1, opt_.iirOrder));
     }
     // Rolling stats window ~0.75s
     winSamples_ = std::max(5, static_cast<int>(std::lround(0.75 * fs_)));
@@ -148,7 +216,7 @@ RealtimeAnalyzer::RealtimeAnalyzer(double fs, const Options& opt)
 
 void RealtimeAnalyzer::setWindowSeconds(double sec) {
     std::lock_guard<std::mutex> lock(dataMutex_);
-    double clamped = std::max(1.0, std::min(600.0, sec));
+    double clamped = std::max(1.0, std::min(MAX_WINDOW_SEC, sec));
     windowSec_ = clamped;
     trimToWindow();
 }
@@ -156,6 +224,7 @@ void RealtimeAnalyzer::setWindowSeconds(double sec) {
 void RealtimeAnalyzer::setUpdateIntervalSeconds(double sec) {
     std::lock_guard<std::mutex> lock(dataMutex_);
     updateSec_ = std::max(0.1, sec);
+    ++paramChangeEventsTotal_;
 }
 
 void RealtimeAnalyzer::append(const float* x, size_t n) {
@@ -172,16 +241,25 @@ void RealtimeAnalyzer::append(const float* x, size_t n) {
     // Process new portion
     for (size_t i = prevLen; i < newLen; ++i) {
         float s = signal_[i];
-        float y = s;
-        for (auto &bi : bq_) y = bi.process(y);
-        filt_[i] = y;
+        bool useD = opt_.highPrecision || opt_.deterministic;
+        float yout;
+        if (useD && !bqD_.empty()) {
+            double yd = static_cast<double>(s);
+            for (auto &bi : bqD_) yd = bi.process(yd);
+            yout = static_cast<float>(yd);
+        } else {
+            float y = s;
+            for (auto &bi : bq_) y = bi.process(y);
+            yout = y;
+        }
+        filt_[i] = yout;
         // rolling window update
-        rollWin_.push_back(y);
-        rollSum_ += y;
-        rollSumSq_ += static_cast<double>(y) * static_cast<double>(y);
+        rollWin_.push_back(yout);
+        rollSum_ += yout;
+        rollSumSq_ += static_cast<double>(yout) * static_cast<double>(yout);
         // rectified update for thresholding
         {
-            float yr = std::max(0.0f, y);
+            float yr = std::max(0.0f, yout);
             rollWinRect_.push_back(yr);
             rollRectSum_ += yr;
             rollRectSumSq_ += static_cast<double>(yr) * static_cast<double>(yr);
@@ -349,18 +427,40 @@ void RealtimeAnalyzer::append(const float* x, size_t n) {
     // Rebuild downsampled display buffer (simple decimation)
     const double effFs = (effectiveFs_ > 1e-6 ? effectiveFs_ : fs_);
     int stride = std::max(1, (int)std::lround(effFs / std::max(10.0, displayHz_)));
-    displayBuf_.clear(); displayBuf_.reserve(filt_.size() / stride + 1);
-    for (size_t idx = 0; idx < filt_.size(); idx += (size_t)stride) displayBuf_.push_back(filt_[idx]);
+    displayBuf_.clear();
+    if (useRing_) {
+        std::vector<float> tmp; ringFilt_.snapshot(tmp);
+        displayBuf_.reserve(tmp.size() / stride + 1);
+        for (size_t idx = 0; idx < tmp.size(); idx += (size_t)stride) displayBuf_.push_back(tmp[idx]);
+    } else {
+        displayBuf_.reserve(filt_.size() / stride + 1);
+        for (size_t idx = 0; idx < filt_.size(); idx += (size_t)stride) displayBuf_.push_back(filt_[idx]);
+    }
     trimToWindow();
 }
 
 void RealtimeAnalyzer::trimToWindow() {
     const double effFs = (effectiveFs_ > 1e-6 ? effectiveFs_ : fs_);
-    const size_t maxSamples = static_cast<size_t>(windowSec_ * effFs);
-    if (signal_.size() > maxSamples) {
+    const size_t maxSamples = safeSizeMul(std::min(windowSec_, MAX_WINDOW_SEC), effFs, SIZE_MAX / 4);
+    if (useRing_) {
+        size_t cur = ringFilt_.size();
+        firstAbs_ = (totalAbs_ > cur) ? (totalAbs_ - cur) : 0;
+        firstTsApprox_ = lastTs_ - static_cast<double>(cur) / effFs;
+        while (!peaksAbs_.empty() && peaksAbs_.front() < firstAbs_) peaksAbs_.erase(peaksAbs_.begin());
+        lastPeaks_.clear(); lastRR_.clear();
+        for (size_t j = 0; j < peaksAbs_.size(); ++j) {
+            size_t rel = peaksAbs_[j] - firstAbs_;
+            lastPeaks_.push_back(static_cast<int>(rel));
+            if (j > 0) {
+                double dt = static_cast<double>(peaksAbs_[j] - peaksAbs_[j - 1]) / effFs;
+                lastRR_.push_back(dt * 1000.0);
+            }
+        }
+    } else if (signal_.size() > maxSamples) {
         const size_t drop = signal_.size() - maxSamples;
         signal_.erase(signal_.begin(), signal_.begin() + drop);
         if (filt_.size() >= drop) filt_.erase(filt_.begin(), filt_.begin() + drop);
+        droppedSamplesLast_ += drop; droppedSamplesTotal_ += drop; ++dropConsecPolls_;
         // Approximate firstTs by backing off from lastTs
         firstTsApprox_ = lastTs_ - static_cast<double>(signal_.size()) / effFs;
         firstAbs_ += drop;
@@ -375,9 +475,9 @@ void RealtimeAnalyzer::trimToWindow() {
                 lastRR_.push_back(dt * 1000.0);
             }
         }
-    }
+    } else { dropConsecPolls_ = 0; }
     // Trim display buffer to the same time window length in seconds
-    const size_t maxDisp = static_cast<size_t>(windowSec_ * std::max(10.0, displayHz_));
+    const size_t maxDisp = safeSizeMul(std::min(windowSec_, MAX_WINDOW_SEC), std::max(10.0, displayHz_), SIZE_MAX / 8);
     if (displayBuf_.size() > maxDisp) {
         const size_t drop = displayBuf_.size() - maxDisp;
         displayBuf_.erase(displayBuf_.begin(), displayBuf_.begin() + drop);
@@ -387,7 +487,12 @@ void RealtimeAnalyzer::trimToWindow() {
 void RealtimeAnalyzer::push(const float* samples, size_t n, double /*t0*/) {
     if (!samples || n == 0) return;
     size_t maxBatch = (size_t)std::ceil(std::max(1.0, 10.0) * fs_);
-    if (n > maxBatch) n = maxBatch;
+    if (n > maxBatch) {
+        n = maxBatch; // clamp oversized batch
+        ++clampedBatchesTotal_;
+        // optional: debug log (non-fatal)
+        // fprintf(stderr, "[heartpy] push(): batch clamped to %zu samples\n", n);
+    }
     std::lock_guard<std::mutex> lock(dataMutex_);
     append(samples, n);
 }
@@ -396,7 +501,7 @@ void RealtimeAnalyzer::push(const std::vector<double>& samples, double /*t0*/) {
     if (samples.empty()) return;
     size_t n = samples.size();
     size_t maxBatch = (size_t)std::ceil(std::max(1.0, 10.0) * fs_);
-    if (n > maxBatch) n = maxBatch;
+    if (n > maxBatch) { n = maxBatch; ++clampedBatchesTotal_; } // clamp
     std::vector<float> tmp(n);
     for (size_t i = 0; i < n; ++i) tmp[i] = static_cast<float>(samples[i]);
     std::lock_guard<std::mutex> lock(dataMutex_);
@@ -406,7 +511,7 @@ void RealtimeAnalyzer::push(const std::vector<double>& samples, double /*t0*/) {
 void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size_t n) {
     if (!samples || !timestamps || n == 0) return;
     size_t maxBatch = (size_t)std::ceil(std::max(1.0, 10.0) * fs_);
-    if (n > maxBatch) n = maxBatch;
+    if (n > maxBatch) { n = maxBatch; ++clampedBatchesTotal_; } // clamp
     std::lock_guard<std::mutex> lock(dataMutex_);
     // Update effective Fs using timestamps
     double t0 = timestamps[0];
@@ -419,6 +524,34 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
             else effectiveFs_ = (1.0 - emaAlpha_) * effectiveFs_ + emaAlpha_ * fsBatch;
         }
     }
+    if (useRing_) {
+        if (ringFilt_.size() == 0) firstTsApprox_ = t0;
+        double lastSeenTs = lastTs_;
+        for (size_t i = 0; i < n; ++i) {
+            double ts = timestamps[i];
+            if (ts < lastSeenTs) { ++timestampBacktrackEventsTotal_;
+                ++timestampsSkippedTotal_; continue; }
+            if ((ts - lastSeenTs) > 2.0) { ++timeJumpEventsTotal_; }
+            float s = samples[i];
+            bool useD = opt_.highPrecision || opt_.deterministic;
+            if (useD && !bqD_.empty()) {
+                double yd = static_cast<double>(s);
+                for (auto &bi : bqD_) yd = bi.process(yd);
+                ringSignal_.push_back(s);
+                ringFilt_.push_back(static_cast<float>(yd));
+            } else {
+                float y = s;
+                for (auto &bi : bq_) y = bi.process(y);
+                ringSignal_.push_back(s);
+                ringFilt_.push_back(y);
+            }
+            ++totalAbs_;
+            lastSeenTs = ts;
+        }
+        lastTs_ = lastSeenTs;
+        firstAbs_ = (totalAbs_ > ringFilt_.size()) ? (totalAbs_ - ringFilt_.size()) : 0;
+        return;
+    }
     if (signal_.empty()) firstTsApprox_ = t0;
     lastTs_ = t1;
     // Process each incoming sample through the same path as append()
@@ -429,16 +562,25 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
     for (size_t i = 0; i < n; ++i) {
         size_t dst = prevLen + i;
         float s = samples[i];
-        float y = s;
-        for (auto &bi : bq_) y = bi.process(y);
-        filt_[dst] = y;
+        bool useD = opt_.highPrecision || opt_.deterministic;
+        float yout;
+        if (useD && !bqD_.empty()) {
+            double yd = static_cast<double>(s);
+            for (auto &bi : bqD_) yd = bi.process(yd);
+            yout = static_cast<float>(yd);
+        } else {
+            float y = s;
+            for (auto &bi : bq_) y = bi.process(y);
+            yout = y;
+        }
+        filt_[dst] = yout;
         // rolling window update
-        rollWin_.push_back(y);
-        rollSum_ += y;
-        rollSumSq_ += static_cast<double>(y) * static_cast<double>(y);
+        rollWin_.push_back(yout);
+        rollSum_ += yout;
+        rollSumSq_ += static_cast<double>(yout) * static_cast<double>(yout);
         // rectified window update for HP-style thresholding
         {
-            float yr = std::max(0.0f, y);
+            float yr = std::max(0.0f, yout);
             rollWinRect_.push_back(yr);
             rollRectSum_ += yr;
             rollRectSumSq_ += static_cast<double>(yr) * static_cast<double>(yr);
@@ -606,19 +748,37 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
 }
 
 bool RealtimeAnalyzer::poll(HeartMetrics& out) {
-    std::lock_guard<std::mutex> lock(dataMutex_);
+    std::unique_lock<std::mutex> lock(dataMutex_);
+#if defined(HEARTPY_LOCK_TIMING) && defined(HEARTPY_LOCK_TIMING_ENABLE)
+    auto l1_start = std::chrono::steady_clock::now();
+#endif
     // Only emit once per updateSec_ of newly received samples
     if ((lastTs_ - lastEmitTime_) < updateSec_) return false;
     lastEmitTime_ = lastTs_;
 
-    // Batch fallback: analyze the current sliding window via analyzeSignal()
-    if (signal_.empty()) return false;
-    std::vector<double> win; win.reserve(signal_.size());
-    // Use full‑rate filtered signal for analysis (not decimated display buffer)
-    for (float v : filt_) win.push_back(static_cast<double>(v));
+    // Snapshot minimal state + window
+    std::vector<double> win;
+    double fsEff = (effectiveFs_ > 1e-6 ? effectiveFs_ : fs_);
+    size_t firstAbsSnap = firstAbs_;
+    double firstTsSnap = firstTsApprox_;
+    if ((!useRing_ && signal_.empty()) || (useRing_ && ringFilt_.empty())) return false;
+    if (useRing_) {
+        std::vector<float> tmp; ringFilt_.snapshot(tmp);
+        win.reserve(tmp.size());
+        for (float v : tmp) win.push_back(static_cast<double>(v));
+        firstAbsSnap = (totalAbs_ > ringFilt_.size()) ? (totalAbs_ - ringFilt_.size()) : 0;
+        firstTsSnap = lastTs_ - static_cast<double>(ringFilt_.size()) / fsEff;
+    } else {
+        win.reserve(signal_.size());
+        for (float v : filt_) win.push_back(static_cast<double>(v));
+    }
+    lock.unlock();
+#if defined(HEARTPY_LOCK_TIMING) && defined(HEARTPY_LOCK_TIMING_ENABLE)
+    auto l1_end = std::chrono::steady_clock::now();
+    heartpy::RealtimeAnalyzer::recordLockHold(1, std::chrono::duration_cast<std::chrono::microseconds>(l1_end - l1_start).count());
+#endif
     Options o = opt_;
     // Keep user-configured bandpass; callers may set lowHz=highHz=0 to skip
-    const double fsEff = (effectiveFs_ > 1e-6 ? effectiveFs_ : fs_);
     out = analyzeSignal(win, fsEff, o);
 
     // If HP-style thresholding requested, calibrate ma_perc on the current window
@@ -680,18 +840,25 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                     maPercScore_ = best_score;
                     // Replace window peaks with calibrated HP result
                     peaksAbs_.clear(); peaksAbs_.reserve(best_peaks_rel.size());
-                    for (int rel : best_peaks_rel) peaksAbs_.push_back(firstAbs_ + (size_t)rel);
-                    // Recompute streaming lastPeaks_/lastRR_
-                    lastPeaks_.clear(); lastRR_.clear();
-                    for (size_t j = 0; j < peaksAbs_.size(); ++j) {
-                        size_t rel = peaksAbs_[j] - firstAbs_;
-                        lastPeaks_.push_back((int)rel);
+                    // Stage peaks into local vectors using snapshot bases; commit later
+                    std::vector<int> candPeaksAbs; candPeaksAbs.reserve(best_peaks_rel.size());
+                    for (int rel : best_peaks_rel) candPeaksAbs.push_back((int)(firstAbsSnap + (size_t)rel));
+                    std::vector<int> candPeaksRel; std::vector<double> candRR;
+                    for (size_t j = 0; j < candPeaksAbs.size(); ++j) {
+                        size_t rel = candPeaksAbs[j] - firstAbsSnap;
+                        candPeaksRel.push_back((int)rel);
                         if (j > 0) {
-                            double dts = (double)(peaksAbs_[j] - peaksAbs_[j - 1]) / fsEff;
-                            lastRR_.push_back(dts * 1000.0);
+                            double dts = (double)(candPeaksAbs[j] - candPeaksAbs[j - 1]) / fsEff;
+                            candRR.push_back(dts * 1000.0);
                         }
                     }
+                    // Commit minimal state under short lock
+                    lock.lock();
+                    peaksAbs_.assign(candPeaksAbs.begin(), candPeaksAbs.end());
+                    lastPeaks_.assign(candPeaksRel.begin(), candPeaksRel.end());
+                    lastRR_.assign(candRR.begin(), candRR.end());
                     lastMaChangeTime_ = lastTs_;
+                    lock.unlock();
                 }
             }
             lastMaUpdateTime_ = lastTs_;
@@ -711,10 +878,32 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
     }
 
     // Cache a few items for convenience (updated again after SNR)
+    // Commit cached quality and audit counters under short lock
+    lock.lock();
+    out.quality.droppedSamplesTotal = droppedSamplesTotal_;
+    out.quality.clampedBatchesTotal = clampedBatchesTotal_;
+    out.quality.oomPreventedTotal = oomPreventedTotal_;
+    out.quality.paramChangeEventsTotal = paramChangeEventsTotal_;
+    out.quality.mergeBudgetExhausted = lastMergeBudgetExhausted_ ? 1 : 0;
+    out.quality.mergeBudgetExhaustedTotal = mergeBudgetExhaustedTotal_;
+    out.quality.droppedSamplesLast = droppedSamplesLast_;
+    out.quality.clampedBatchesLast = clampedBatchesLast_;
+    out.quality.timestampBacktrackEventsTotal = timestampBacktrackEventsTotal_;
+    out.quality.timestampsSkippedTotal = timestampsSkippedTotal_;
+    out.quality.timeJumpEventsTotal = timeJumpEventsTotal_;
+    out.quality.droppingActive = (dropConsecPolls_ >= 2) ? 1 : 0;
     lastQuality_ = out.quality;
+    lastMergeBudgetExhausted_ = 0; // reset per-poll flag
+    droppedSamplesLast_ = 0; clampedBatchesLast_ = 0; // reset per-poll last counters
+    lock.unlock();
+#if defined(HEARTPY_LOCK_TIMING) && defined(HEARTPY_LOCK_TIMING_ENABLE)
+    // This scope is small; measure approximately around the lock/unlock block
+    // For precision, we could wrap individual lock sections separately.
+    heartpy::RealtimeAnalyzer::recordLockHold(2, 0.0);
+#endif
     // Prefer streaming peaks/RR; if empty, fall back to batch results
-    if (lastPeaks_.empty()) lastPeaks_ = out.peakList;
-    if (lastRR_.empty()) lastRR_ = out.rrList;
+    if (lastPeaks_.empty()) { lock.lock(); lastPeaks_ = out.peakList; lock.unlock(); }
+    if (lastRR_.empty())    { lock.lock(); lastRR_   = out.rrList;  lock.unlock(); }
 
     // Phase S4: compute masked metrics incrementally from streaming RR list
     if (!lastRR_.empty()) {
@@ -966,8 +1155,10 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
             // Aggressive pass when soft/hard/hint doubling is active; iterate until no changes
             if ((softDoublingActive_ || doublingActive_ || doublingHintActive_) && !rrFallbackDrivingHint_) {
                 bool changed = true; size_t removedTotal = 0; const size_t nInit = lastPeaks_.size();
-                int iteration = 0; const int maxIterations = 10;
-                while (changed && iteration < maxIterations) {
+                int iteration = 0; const int maxIterations = 8; // tighter deterministic cap
+                size_t removeBudget = std::min<size_t>(12, (size_t)std::floor(0.10 * nInit));
+                bool budgetExhausted = false;
+                while (changed && iteration < maxIterations && removedTotal < removeBudget) {
                     changed = false;
                     ++iteration;
                     if (lastRR_.size() >= 3) {
@@ -995,7 +1186,7 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                                 double aL = (inRangeIdx(pL, (int)win.size()) ? win[rL] : 0.0);
                                 double aM = (inRangeIdx(pM, (int)win.size()) ? win[rM] : 0.0);
                                 double aR = (inRangeIdx(pR, (int)win.size()) ? win[rR] : 0.0);
-                                if (aM <= std::max(aL, aR)) { keepScratch_[i + 1] = 0; changed = true; ++i; ++removedTotal; }
+                                if (aM <= std::max(aL, aR) && removedTotal < removeBudget) { keepScratch_[i + 1] = 0; changed = true; ++i; ++removedTotal; }
                             }
                         }
                         if (changed) {
@@ -1008,16 +1199,19 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                                 lastRR_.push_back(dts * 1000.0);
                             }
                             if (removedTotal > (size_t)(0.4 * nInit)) break;
+                            if (removedTotal >= removeBudget) break;
                         }
                     }
                 }
+                budgetExhausted = (removedTotal >= removeBudget) || (iteration >= maxIterations);
+                if (budgetExhausted) { lastMergeBudgetExhausted_ = 1; ++mergeBudgetExhaustedTotal_; }
             } else if (rrFallbackModeActive_) {
                 // RR-fallback path: enable a very-limited merge with tight bands and hard caps; suppression stays OFF
                 if (lastRR_.size() >= 3) {
                     double m2 = medianOfRR(lastRR_);
                     double two = 2.0 * m2;
                     const size_t nInit = lastPeaks_.size();
-                    size_t cap = std::min<size_t>(10, (size_t)std::floor(0.10 * nInit));
+                    size_t cap = std::min<size_t>(12, (size_t)std::floor(0.10 * nInit)); // align budgets
                     size_t removed = 0;
                     keepScratch_.assign(lastPeaks_.size(), 1);
                     for (size_t i = 0; i + 1 < lastRR_.size(); ++i) {
@@ -1050,6 +1244,7 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
                             lastRR_.push_back(dts * 1000.0);
                         }
                     }
+                    if (removed >= cap) { lastMergeBudgetExhausted_ = 1; ++mergeBudgetExhaustedTotal_; }
                 }
             }
         }
@@ -1141,7 +1336,9 @@ void  hp_rt_set_update_interval(void* h, double sec) {
 }
 
 void  hp_rt_push(void* h, const float* x, size_t n, double t0) {
-    if (!h) return; auto* S = reinterpret_cast<_hp_rt_handle*>(h); S->p->push(x, n, t0);
+    if (!h || !x || n == 0) return;
+    auto* S = reinterpret_cast<_hp_rt_handle*>(h);
+    S->p->push(x, n, t0); // push() clamps batch size internally
 }
 
 int   hp_rt_poll(void* h, heartpy::HeartMetrics* out) {
@@ -1197,6 +1394,8 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
         return best;
     };
     int nfft = coerceNfft(opt_.nfft);
+    // Deterministic mode: force scalar DFT in core
+    heartpy::setDeterministic(opt_.deterministic);
     auto ps = welchPowerSpectrum(yBufferD_, effFs, nfft, opt_.overlap);
     const auto &frq = ps.first; const auto &P = ps.second;
     if (frq.size() < 4 || frq.size() != P.size()) return;
@@ -1242,6 +1441,7 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     // EMA smoothing over time (tau = 8s when active)
     double now = lastTs_;
     double dt = (lastSnrUpdateTime_ > 0.0) ? (now - lastSnrUpdateTime_) : psdUpdateSec_;
+    if (opt_.deterministic) dt = psdUpdateSec_;
     double tau = activeSnr ? opt_.snrActiveTauSec : snrTauSec_;
     double alpha = 1.0 - std::exp(-dt / std::max(1e-3, tau));
     if (!snrEmaValid_) { snrEmaDb_ = snrDbInst; snrEmaValid_ = true; }
@@ -1250,7 +1450,7 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     }
     // Blend toward instant value when band mode or width changes to avoid step bias
     bool bandWidthChanged = (std::fabs(baseBw - lastSnrBaseBw_) > 1e-9) || (activeSnr != lastSnrActiveMode_);
-    if (bandWidthChanged) {
+    if (bandWidthChanged && !opt_.deterministic) {
         double bf = std::clamp(opt_.snrBandBlendFactor, 0.0, 1.0);
         snrEmaDb_ = (1.0 - bf) * snrEmaDb_ + bf * snrDbInst;
     }

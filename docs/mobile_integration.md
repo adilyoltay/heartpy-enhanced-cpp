@@ -35,6 +35,13 @@ cd ios && pod install && cd ..
 - Hermes enabled in `Podfile` is recommended; JSI path available on iOS.
 - The package vendors the C++ core and KissFFT and builds them automatically via CocoaPods.
 
+#### Acceleration Flags (optional)
+
+- iOS (Apple Accelerate/vDSP): enable with `-DHEARTPY_ENABLE_ACCELERATE=ON` to use vDSP for PSD precompute steps. FFT already routes through Accelerate when available.
+- Android (ARM NEON): enable with `-DHEARTPY_ENABLE_NEON=ON` to use NEON for PSD precompute (mean reduction and windowed multiply). Falls back cleanly on non‑ARM or simulators.
+
+These guards do not alter algorithmic behavior; they only accelerate inner loops. Default settings keep behavior identical.
+
 ### Usage (Batch)
 
 ```ts
@@ -82,4 +89,3 @@ Key streaming guards to preserve:
 ### Demo App
 
 See `HeartPyApp/` for a RN app template. It shows how to call the module, renders HR/confidence, and includes an example component. Attach it to camera PPG for end‑to‑end testing.
-

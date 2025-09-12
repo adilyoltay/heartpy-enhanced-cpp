@@ -110,11 +110,17 @@ struct Options {
 	// pNN output as percent (0..100) or ratio (0..1)
 	bool pnnAsPercent = true;
 
-	// Segmentwise analysis
-	double segmentWidth = 120.0; // seconds
-	double segmentOverlap = 0.0; // 0..1
-	double segmentMinSize = 20.0; // seconds
-	bool replaceOutliers = false;
+    // Segmentwise analysis
+    double segmentWidth = 120.0; // seconds
+    double segmentOverlap = 0.0; // 0..1
+    double segmentMinSize = 20.0; // seconds
+    bool replaceOutliers = false;
+
+    // Streaming storage (optional)
+    bool useRingBuffer = false; // if true, use fixed-capacity ring buffers in streaming (default OFF)
+    
+    // Deterministic mode (runtime): prefer scalar/DFT paths, snap EMA cadence
+    bool deterministic = false; // default OFF
 };
 
 // Quality information structure
@@ -145,6 +151,21 @@ struct QualityInfo {
     int    hardFallbackActive = 0;   // 1 when hard fallback elevated refractory is active
     int    doublingHintFlag = 0;     // 1 when PSD-only doubling hint is active
     int    rrFallbackModeActive = 0; // 1 when RR-only fallback mode gating is active (debug)
+
+    // Audit/telemetry (non-blocking; full JSON only)
+    unsigned long long droppedSamplesTotal = 0;      // cumulative samples dropped (vector path trimming)
+    unsigned long long clampedBatchesTotal = 0;      // times input batches were clamped
+    unsigned long long oomPreventedTotal = 0;        // times capacity was saturated via safe sizing
+    unsigned long long paramChangeEventsTotal = 0;   // parameter change events (window/preset/update interval)
+    int mergeBudgetExhausted = 0;                    // 1 if this poll hit merge budget cap
+    unsigned long long mergeBudgetExhaustedTotal = 0;// cumulative polls hitting merge cap
+    // Per-poll deltas and timestamp events
+    unsigned long long droppedSamplesLast = 0;       // samples dropped in this poll's trimming
+    unsigned long long clampedBatchesLast = 0;       // batches clamped in this poll
+    unsigned long long timestampBacktrackEventsTotal = 0; // non-monotonic timestamp events (cumulative)
+    unsigned long long timestampsSkippedTotal = 0;   // timestamps skipped due to backtrack (cumulative)
+    unsigned long long timeJumpEventsTotal = 0;      // dt > threshold events (cumulative)
+    int droppingActive = 0;                          // 1 if consecutive drops observed recently
 };
 
 // Enhanced metrics structure matching Python HeartPy
@@ -242,6 +263,10 @@ double calculateMAD(const std::vector<double>& data); // Median Absolute Deviati
 std::vector<double> calculatePoincare(const std::vector<double>& rrIntervals);
 std::pair<std::vector<double>, std::vector<double>> welchPowerSpectrum(const std::vector<double>& signal, 
                                                                         double fs, int nfft = 256, double overlap = 0.5);
+
+// Global deterministic toggle for core spectral routines (runtime)
+void setDeterministic(bool on);
+bool isDeterministic();
 
 }
 

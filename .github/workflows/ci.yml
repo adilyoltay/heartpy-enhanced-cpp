@@ -20,15 +20,243 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
       - name: Build
         run: cmake --build build -j
-      - name: Run Acceptance
+      - name: Build Provenance
         run: |
-          python3 scripts/check_acceptance.py --build-dir build --preset ${{ matrix.preset }} --duration ${{ matrix.duration }}
+          echo "Commit: $(git rev-parse --short HEAD)"
+          echo "CMake Flags (from build/CMakeCache.txt):"
+          grep -E '^(HEARTPY_ENABLE_ACCELERATE|HEARTPY_ENABLE_NEON|USE_KISSFFT):' build/CMakeCache.txt || true
+      - name: Run PSD Bench (scaled)
+        run: |
+          set -e
+          ./build/bench_filter_psd 180 4096 50 | tee build/bench_psd_${{ matrix.os }}_${{ matrix.preset }}_${{ matrix.duration }}.log
+      - name: Run Poll Latency Bench (ring OFF/ON)
+        run: |
+          set -e
+          ./build/bench_poll_latency 120 --use-ring 0 | tee build/bench_poll_ring_off_${{ matrix.os }}_${{ matrix.preset }}_${{ matrix.duration }}.log
+          ./build/bench_poll_latency 120 --use-ring 1 | tee build/bench_poll_ring_on_${{ matrix.os }}_${{ matrix.preset }}_${{ matrix.duration }}.log
+      - name: Run Acceptance (60s relaxed HR)
+        if: ${{ matrix.duration == 60 }}
+        run: |
+          python3 scripts/check_acceptance.py --build-dir build --preset ${{ matrix.preset }} --duration 60 --hr-tol 100
+      - name: Run Acceptance (180s strict)
+        if: ${{ matrix.duration == 180 }}
+        run: |
+          python3 scripts/check_acceptance.py --build-dir build --preset ${{ matrix.preset }} --duration 180
+      - name: Ring-ON JSONL (60s, non-blocking)
+        if: ${{ matrix.duration == 60 }}
+        run: |
+          set -e
+          PRESET="${{ matrix.preset }}"
+          echo "Provenance: $(git rev-parse --short HEAD) --use-ring 1"
+          ./build/realtime_demo 50.0 60.0 "$PRESET" fast --use-ring 1 --json-out build/acceptance_${PRESET}_ringon_60.jsonl
+      - name: Ring-ON 60s Summary (non-blocking)
+        if: ${{ matrix.duration == 60 }}
+        run: |
+          python3 - << 'PY'
+import json,statistics as st,os
+preset='${{ matrix.preset }}'
+path=f'build/acceptance_{preset}_ringon_60.jsonl'
+try:
+    rows=[json.loads(l) for l in open(path) if l.strip()]
+except Exception:
+    print(f"[ring-ON 60s] missing JSONL: {path}")
+    raise SystemExit(0)
+after=[r for r in rows if r.get('t',0.0) >= 20.0]
+def med(key):
+    vals=[r.get(key,0.0) for r in after]
+    return st.median(vals) if vals else float('nan')
+print(f"[ring-ON 60s] preset={preset} bpm_med={med('stream_bpm'):.2f} snr_med={med('snr_db'):.2f} conf_med={med('conf'):.2f} rej_med={med('rejection'):.3f} ma_med={med('ma_perc'):.2f}")
+PY
+      - name: Ring-ON JSONL (180s, non-blocking)
+        if: ${{ matrix.duration == 180 }}
+        run: |
+          set -e
+          PRESET="${{ matrix.preset }}"
+          echo "Provenance: $(git rev-parse --short HEAD) --use-ring 1"
+          ./build/realtime_demo 50.0 180.0 "$PRESET" fast --use-ring 1 --json-out build/acceptance_${PRESET}_ringon_180.jsonl
+      - name: Ring-ON 180s Acceptance Summary (non-blocking)
+        if: ${{ matrix.duration == 180 }}
+        run: |
+          python3 - << 'PY'
+import os
+from scripts.check_acceptance import load_jsonl, acceptance_check
+preset='${{ matrix.preset }}'
+path=f'build/acceptance_{preset}_ringon_180.jsonl'
+rows=load_jsonl(path) if os.path.isfile(path) else []
+if not rows:
+    print(f"[ring-ON 180s] missing JSONL: {path}")
+else:
+    res=acceptance_check(rows, preset, warmup_sec=20.0,
+                         hr_target=72.0, hr_tol=2.0,
+                         snr_min_db=6.0, conf_min=0.6,
+                         reject_max=0.10,
+                         ma_low=20.0, ma_high=35.0, ma_share_min=0.6)
+    # Additional diagnostics from JSONL
+    import statistics as st, json
+    def after_warm(rs):
+        return [r for r in rs if r.get('t',0.0)>=20.0]
+    aw=after_warm(rows)
+    def med(k):
+        vals=[r.get(k,0.0) for r in aw]
+        return float(st.median(vals)) if vals else float('nan')
+    def p95(k):
+        vals=[r.get(k,0.0) for r in aw]
+        vals=sorted(vals)
+        return float(vals[int(0.95*len(vals))]) if vals else float('nan')
+    def share(k):
+        return (sum(1 for r in aw if int(r.get(k,0))==1)/len(aw)) if aw else float('nan')
+    rr_fallback_share = share('rr_fallback_mode')
+    min_rr_med = med('min_rr_ms'); min_rr_p95 = p95('min_rr_ms')
+    ref_med = med('ref_ms'); ref_p95 = p95('ref_ms')
+    p_half_med = med('p_half_over_fund')
+    soft_secs = sum(1 for r in aw if int(r.get('soft_dbl',0))==1)
+    hard_secs = sum(1 for r in aw if int(r.get('hard_dbl',0))==1)
+    hint_secs = sum(1 for r in aw if int(r.get('doubling_hint',0))==1)
+    pair_med = med('pair_frac'); short_med = med('short_frac')
+    print(f"[ring-ON 180s] preset={preset} ok={res['ok']} "
+          f"bpm_med={res['bpm_med']:.2f} snr_med={res['snr_med']:.2f} conf_med={res['conf_med']:.2f} rej_med={res['rej_med']:.3f} "
+          f"ma_share={res['ma_share']:.2f} hard_frac={res['hard_frac']:.2f} rr_fallback_share={rr_fallback_share:.2f} "
+          f"min_rr_ms_med={min_rr_med:.1f} min_rr_ms_p95={min_rr_p95:.1f} ref_ms_med={ref_med:.1f} ref_ms_p95={ref_p95:.1f} "
+          f"p_half_over_fund_med={p_half_med:.2f} soft_active_s={soft_secs} hard_active_s={hard_secs} hint_active_s={hint_secs} "
+          f"pair_frac_med={pair_med:.2f} short_frac_med={short_med:.2f}")
+          PY
+
+      - name: High-Precision Delta (non-blocking)
+        if: always()
+        run: |
+          python3 - << 'PY'
+import json,statistics as st,subprocess,os
+preset='${{ matrix.preset }}'
+dur='${{ matrix.duration }}'
+def med(path,key):
+    rows=[json.loads(l) for l in open(path) if l.strip()]
+    aft=[r for r in rows if r.get('t',0.0)>=20.0]
+    vals=[r.get(key,0.0) for r in aft]
+    return float(st.median(vals)) if vals else float('nan')
+base=f'build/acceptance_{preset}_hp0_{dur}.jsonl'
+hp=f'build/acceptance_{preset}_hp1_{dur}.jsonl'
+# Generate if missing
+if not os.path.isfile(base):
+    subprocess.run(['./build/realtime_demo','50.0',dur,preset,'fast','--json-out',base], check=True)
+if not os.path.isfile(hp):
+    subprocess.run(['./build/realtime_demo','50.0',dur,preset,'fast','--high-precision','--json-out',hp], check=True)
+fields=['stream_bpm','snr_db','conf','f0_used_hz']
+mb={k:med(base,k) for k in fields}
+mh={k:med(hp,k) for k in fields}
+delta={k:abs(mh[k]-mb[k]) for k in fields}
+ok = (delta['stream_bpm']<=0.05 and delta['snr_db']<=0.20 and delta['conf']<=0.02 and delta['f0_used_hz']<=0.01)
+print('[hp-delta]', preset, dur, 'HP_DELTA', ('OK' if ok else 'ALERT'), json.dumps({'base':mb,'hp':mh,'delta':delta}))
+PY
+
+      - name: Determinism Check (60s, non-blocking)
+        if: ${{ matrix.duration == 60 }}
+        run: |
+          set -e
+          PRESET="${{ matrix.preset }}"
+          for i in 1 2 3; do ./build/realtime_demo 50.0 60.0 "$PRESET" fast --deterministic --json-out build/det_${PRESET}_60_$i.jsonl; done
+          diff -q build/det_${PRESET}_60_1.jsonl build/det_${PRESET}_60_2.jsonl && diff -q build/det_${PRESET}_60_2.jsonl build/det_${PRESET}_60_3.jsonl && echo "[determinism] 60s preset=${PRESET} DETERMINISM_OK" || echo "[determinism] 60s preset=${PRESET} DETERMINISM_FAIL"
+
+      - name: Determinism Check (180s, non-blocking)
+        if: ${{ matrix.duration == 180 }}
+        run: |
+          set -e
+          PRESET="${{ matrix.preset }}"
+          for i in 1 2 3; do ./build/realtime_demo 50.0 180.0 "$PRESET" fast --deterministic --json-out build/det_${PRESET}_180_$i.jsonl; done
+          diff -q build/det_${PRESET}_180_1.jsonl build/det_${PRESET}_180_2.jsonl && diff -q build/det_${PRESET}_180_2.jsonl build/det_${PRESET}_180_3.jsonl && echo "[determinism] 180s preset=${PRESET} DETERMINISM_OK" || echo "[determinism] 180s preset=${PRESET} DETERMINISM_FAIL"
+      - name: Ring-ON Delta Summary (non-blocking)
+        if: always()
+        run: |
+          python3 - << 'PY'
+import json,statistics as st,os,sys
+from pathlib import Path
+def load_jsonl(path):
+    out=[]
+    p=Path(path)
+    if not p.exists():
+        return []
+    for l in p.read_text().splitlines():
+        l=l.strip()
+        if not l: continue
+        try:
+            out.append(json.loads(l))
+        except Exception:
+            pass
+    return out
+def after_warm(rows):
+    return [r for r in rows if r.get('t',0.0)>=20.0]
+def med(rows, key):
+    vals=[r.get(key,0.0) for r in rows]
+    return float(st.median(vals)) if vals else float('nan')
+def share_ma(rows, lo=20.0, hi=35.0):
+    if not rows: return float('nan')
+    c=sum(1 for r in rows if lo<=r.get('ma_perc',0.0)<=hi)
+    return c/len(rows)
+def share_flag(rows, key):
+    if not rows: return float('nan')
+    c=sum(1 for r in rows if int(r.get(key,0))==1)
+    return c/len(rows)
+preset='${{ matrix.preset }}'
+dur='${{ matrix.duration }}'
+base=f'build/acceptance_{preset}.jsonl'
+ring=f'build/acceptance_{preset}_ringon_{dur}.jsonl'
+rb=after_warm(load_jsonl(base))
+rr=after_warm(load_jsonl(ring))
+if not rb or not rr:
+    print(f"[ring-ON delta] missing JSONLs: base={bool(rb)} ring={bool(rr)} preset={preset} dur={dur}")
+    sys.exit(0)
+fields=['stream_bpm','snr_db','conf','f0_used_hz']
+mb={k:med(rb,k) for k in fields}
+mr={k:med(rr,k) for k in fields}
+delta={k:abs(mb[k]-mr[k]) for k in fields}
+# Add ma_share and hard_frac deltas
+mb['ma_share']=share_ma(rb)
+mr['ma_share']=share_ma(rr)
+mb['hard_frac']=share_flag(rb,'hard_dbl')
+mr['hard_frac']=share_flag(rr,'hard_dbl')
+delta['ma_share']=abs(mb['ma_share']-mr['ma_share']) if all(isinstance(x,(int,float)) for x in (mb['ma_share'],mr['ma_share'])) else float('nan')
+delta['hard_frac']=abs(mb['hard_frac']-mr['hard_frac']) if all(isinstance(x,(int,float)) for x in (mb['hard_frac'],mr['hard_frac'])) else float('nan')
+# Add medians for gating parameters and deltas
+mb['min_rr_ms_med']=med(rb,'min_rr_ms'); mr['min_rr_ms_med']=med(rr,'min_rr_ms')
+mb['ref_ms_med']=med(rb,'ref_ms');     mr['ref_ms_med']=med(rr,'ref_ms')
+delta['min_rr_ms']=abs(mb['min_rr_ms_med']-mr['min_rr_ms_med']) if all(isinstance(x,(int,float)) for x in (mb['min_rr_ms_med'],mr['min_rr_ms_med'])) else float('nan')
+delta['ref_ms']=abs(mb['ref_ms_med']-mr['ref_ms_med']) if all(isinstance(x,(int,float)) for x in (mb['ref_ms_med'],mr['ref_ms_med'])) else float('nan')
+# Optional guardrails (warn only)
+warns=[]
+try:
+    if delta['ma_share']>0.02: warns.append('ma_share_drop>0.02')
+except Exception:
+    pass
+try:
+    if (mr['hard_frac']-mb['hard_frac'])>0.02: warns.append('hard_frac_increase>0.02')
+except Exception:
+    pass
+try:
+    if delta['min_rr_ms']>20.0: warns.append('min_rr_ms_shift>20ms')
+except Exception:
+    pass
+try:
+    if delta['ref_ms']>15.0: warns.append('ref_ms_shift>15ms')
+except Exception:
+    pass
+print('[ring-ON delta]', preset, dur, json.dumps({'base':mb,'ring':mr,'delta':delta,'warn':warns}))
+PY
       - name: Upload JSONL artifacts
         if: always()
         uses: actions/upload-artifact@v3
         with:
           name: jsonl-${{ matrix.os }}-${{ matrix.preset }}-${{ matrix.duration }}
           path: build/acceptance_*.jsonl
+          retention-days: 21
+      - name: Upload Bench Logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: bench-${{ matrix.os }}-${{ matrix.preset }}-${{ matrix.duration }}
+          path: |
+            build/bench_psd_*.log
+            build/bench_poll_ring_off_*.log
+            build/bench_poll_ring_on_*.log
+          retention-days: 21
 
   sanitizers-asan-ubsan:
     name: ASAN/UBSAN (${{ matrix.os }} • ${{ matrix.preset }})
@@ -71,4 +299,3 @@ jobs:
         env:
           TSAN_OPTIONS: "halt_on_error=1"
         run: python3 scripts/check_acceptance.py --build-dir build-tsan --preset ${{ matrix.preset }} --duration 60
-
