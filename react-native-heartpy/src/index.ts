@@ -185,11 +185,74 @@ export async function analyzeRRAsync(rrIntervals: number[], options?: HeartPyOpt
 }
 
 // Optional JSI path (iOS installed via installJSI)
+// ------------------------------
+// Step 0: Risk mitigation flags & profiling (JS-only)
+// ------------------------------
+
+type RuntimeConfig = {
+    jsiEnabled: boolean;
+    zeroCopyEnabled: boolean;
+    debug: boolean;
+    maxSamplesPerPush: number;
+};
+
+const DEFAULT_CFG: RuntimeConfig = {
+    jsiEnabled: true,
+    zeroCopyEnabled: true,
+    debug: false,
+    maxSamplesPerPush: 5000,
+};
+
+let cfg: RuntimeConfig = { ...DEFAULT_CFG };
+let sessionJSIDisabled = false; // permanent for this session once disabled
+
+// Stats/profiling
+const pushDurationsMs: number[] = [];
+const pollDurationsMs: number[] = [];
+let jsCalls = 0, nmCalls = 0, jsiCalls = 0;
+
+function loadNativeConfig() {
+    try {
+        const { NativeModules } = require('react-native');
+        const Native: any = NativeModules?.HeartPyModule;
+        if (Native?.getConfig) {
+            const m = Native.getConfig();
+            cfg = {
+                jsiEnabled: m?.jsiEnabled ?? cfg.jsiEnabled,
+                zeroCopyEnabled: m?.zeroCopyEnabled ?? cfg.zeroCopyEnabled,
+                debug: m?.debug ?? cfg.debug,
+                maxSamplesPerPush: m?.maxSamplesPerPush ?? cfg.maxSamplesPerPush,
+            };
+        }
+    } catch {}
+}
+loadNativeConfig();
+
+function recordDuration(buf: number[], ms: number, cap = 100) {
+    buf.push(ms);
+    if (buf.length > cap) buf.shift();
+}
+function pctl(buf: number[], p: number): number {
+    if (!buf.length) return 0;
+    const a = buf.slice().sort((x, y) => x - y);
+    const idx = Math.min(a.length - 1, Math.max(0, Math.floor((p / 100) * (a.length - 1))));
+    return a[idx];
+}
+
 export function installJSI(): boolean {
-	const { NativeModules } = require('react-native');
-	const Native: any = NativeModules?.HeartPyModule;
-	if (!Native?.installJSI) return false;
-	try { return !!Native.installJSI(); } catch { return false; }
+    const { NativeModules } = require('react-native');
+    const Native: any = NativeModules?.HeartPyModule;
+    if (sessionJSIDisabled || !cfg.jsiEnabled || !Native?.installJSI) return false;
+    try {
+        const ok = !!Native.installJSI();
+        if (!ok) sessionJSIDisabled = true; // rollback for session
+        return ok;
+    } catch (e) {
+        // HEARTPY_E901: JSI unavailable
+        if (cfg.debug) console.warn('HEARTPY_E901: JSI install failed', e);
+        sessionJSIDisabled = true; // rollback for session
+        return false;
+    }
 }
 
 export function analyzeJSI(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): HeartPyResult {
@@ -210,6 +273,12 @@ export async function rtCreate(fs: number, options?: HeartPyOptions): Promise<nu
     const { NativeModules } = require('react-native');
     const Native: any = NativeModules?.HeartPyModule;
     if (!Native?.rtCreate) throw new Error('HeartPyModule.rtCreate not available');
+    jsCalls++;
+    if (!(fs >= 1 && fs <= 10000)) {
+        const err: any = new Error(`Invalid sample rate: ${fs}. Must be 1-10000 Hz.`);
+        err.code = 'HEARTPY_E001';
+        throw err;
+    }
     return Native.rtCreate(fs, options ?? {});
 }
 
@@ -217,18 +286,27 @@ export async function rtPush(handle: number, samples: Float32Array | number[], t
     const { NativeModules } = require('react-native');
     const Native: any = NativeModules?.HeartPyModule;
     if (!Native?.rtPush) throw new Error('HeartPyModule.rtPush not available');
-    if (!handle || (Array.isArray(samples) ? samples.length === 0 : samples.byteLength === 0)) {
-        throw new Error('rtPush invalid args');
-    }
+    jsCalls++;
+    const len = (samples instanceof Float32Array ? samples.length : Array.isArray(samples) ? samples.length : 0);
+    if (!handle) { const e: any = new Error('Invalid or destroyed handle'); e.code = 'HEARTPY_E101'; throw e; }
+    if (!len) { const e: any = new Error('Invalid data buffer: empty buffer'); e.code = 'HEARTPY_E102'; throw e; }
+    if (len > cfg.maxSamplesPerPush) { const e: any = new Error(`Invalid data buffer: too large (max ${cfg.maxSamplesPerPush})`); e.code = 'HEARTPY_E102'; throw e; }
     const arr = (samples instanceof Float32Array ? Array.from(samples) : samples) as number[];
-    return Native.rtPush(handle, arr, t0 ?? 0);
+    const t1 = Date.now();
+    const p = Native.rtPush(handle, arr, t0 ?? 0);
+    nmCalls++;
+    return p?.then?.(() => { recordDuration(pushDurationsMs, Date.now() - t1); }) ?? p;
 }
 
 export async function rtPoll(handle: number): Promise<HeartPyMetrics | null> {
     const { NativeModules } = require('react-native');
     const Native: any = NativeModules?.HeartPyModule;
     if (!Native?.rtPoll) throw new Error('HeartPyModule.rtPoll not available');
-    return Native.rtPoll(handle);
+    jsCalls++;
+    const t1 = Date.now();
+    const p = Native.rtPoll(handle);
+    nmCalls++;
+    return p?.then?.((res: any) => { recordDuration(pollDurationsMs, Date.now() - t1); return res; }) ?? p;
 }
 
 export async function rtDestroy(handle: number): Promise<void> {
@@ -262,6 +340,32 @@ export class RealtimeAnalyzer {
         const h = this.handle; this.handle = 0;
         try { await rtDestroy(h); } catch {}
     }
+
+    // Allow dev-time override of flags
+    static setConfig(next: Partial<RuntimeConfig>) {
+        cfg = { ...cfg, ...next } as RuntimeConfig;
+        try {
+            const { NativeModules } = require('react-native');
+            const Native: any = NativeModules?.HeartPyModule;
+            if (Native?.setConfig) Native.setConfig(next);
+        } catch {}
+    }
+}
+
+// Debugger utility
+export const HeartPyDebugger = {
+    getStats() {
+        return {
+            jsCalls,
+            jsiCalls,
+            nmCalls,
+            pushMsP50: pctl(pushDurationsMs, 50),
+            pushMsP95: pctl(pushDurationsMs, 95),
+            pollMsP50: pctl(pollDurationsMs, 50),
+            pollMsP95: pctl(pollDurationsMs, 95),
+        };
+    },
+};
 }
 
 

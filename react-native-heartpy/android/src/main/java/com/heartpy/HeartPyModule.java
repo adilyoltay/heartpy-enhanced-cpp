@@ -10,6 +10,7 @@ import com.facebook.react.bridge.Promise;
 import com.facebook.jni.HybridData;
 import com.facebook.react.bridge.ReactContext;
 import android.util.Log;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class HeartPyModule extends ReactContextBaseJavaModule {
     static {
@@ -89,6 +90,40 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
     private static native void rtPushNative(long handle, double[] samples, double t0);
     private static native String rtPollNative(long handle);
     private static native void rtDestroyNative(long handle);
+
+    // ---------- Step 0: Risk mitigation flags & profiling ----------
+    private static volatile boolean CFG_JSI_ENABLED = true;
+    private static volatile boolean CFG_ZERO_COPY_ENABLED = true; // honored in JSI step
+    private static volatile boolean CFG_DEBUG = false;
+    private static final int MAX_SAMPLES_PER_PUSH = 5000;
+
+    private static final AtomicInteger NM_PUSH_SUBMIT = new AtomicInteger(0);
+    private static final AtomicInteger NM_PUSH_DONE = new AtomicInteger(0);
+    private static final AtomicInteger NM_POLL_SUBMIT = new AtomicInteger(0);
+    private static final AtomicInteger NM_POLL_DONE = new AtomicInteger(0);
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableMap getConfig() {
+        com.facebook.react.bridge.WritableMap map = com.facebook.react.bridge.Arguments.createMap();
+        map.putBoolean("jsiEnabled", CFG_JSI_ENABLED);
+        map.putBoolean("zeroCopyEnabled", CFG_ZERO_COPY_ENABLED);
+        map.putBoolean("debug", CFG_DEBUG);
+        map.putInt("maxSamplesPerPush", MAX_SAMPLES_PER_PUSH);
+        return map;
+    }
+
+    @ReactMethod
+    public void setConfig(com.facebook.react.bridge.ReadableMap cfg) {
+        if (cfg == null) return;
+        try {
+            if (cfg.hasKey("jsiEnabled")) CFG_JSI_ENABLED = cfg.getBoolean("jsiEnabled");
+            if (cfg.hasKey("zeroCopyEnabled")) CFG_ZERO_COPY_ENABLED = cfg.getBoolean("zeroCopyEnabled");
+            if (cfg.hasKey("debug")) CFG_DEBUG = cfg.getBoolean("debug");
+            Log.d("HeartPyJSI", "setConfig jsi=" + CFG_JSI_ENABLED + " zeroCopy=" + CFG_ZERO_COPY_ENABLED + " debug=" + CFG_DEBUG);
+        } catch (Throwable t) {
+            Log.w("HeartPyJSI", "setConfig error: " + t.getMessage());
+        }
+    }
 
     public HeartPyModule(@NonNull ReactApplicationContext reactContext) {
         super(reactContext);
@@ -448,7 +483,7 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
     public void rtCreate(double fs, com.facebook.react.bridge.ReadableMap options, Promise promise) {
         try {
             Opts o = parseOptions(options);
-            if (fs <= 0.0) { promise.reject("rt_create_invalid_args", "Sampling rate must be > 0"); return; }
+            if (fs < 1.0 || fs > 10000.0) { promise.reject("HEARTPY_E001", "Invalid sample rate: " + fs + ". Must be 1-10000 Hz."); return; }
             long h = rtCreateNative(fs,
                     o.lowHz, o.highHz, o.order,
                     o.nfft, o.overlap, o.wsizeSec,
@@ -465,10 +500,10 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                     o.sdsdMode,
                     o.poincareMode,
                     o.pnnAsPercent);
-            if (h == 0) { promise.reject("rt_create_failed", "hp_rt_create returned 0"); return; }
+            if (h == 0) { promise.reject("HEARTPY_E004", "hp_rt_create returned 0"); return; }
             promise.resolve(h);
         } catch (Exception e) {
-            promise.reject("rt_create_error", e);
+            promise.reject("HEARTPY_E900", e);
         }
     }
 
@@ -476,14 +511,18 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
     public void rtPush(double handle, double[] samples, Double t0, Promise promise) {
         try {
             final long h = (long) handle;
-            if (h == 0L || samples == null || samples.length == 0) { promise.reject("rt_push_invalid_args", "Invalid handle or empty samples"); return; }
+            if (h == 0L) { promise.reject("HEARTPY_E101", "Invalid or destroyed handle"); return; }
+            if (samples == null || samples.length == 0) { promise.reject("HEARTPY_E102", "Invalid data buffer: empty buffer"); return; }
+            if (samples.length > MAX_SAMPLES_PER_PUSH) { promise.reject("HEARTPY_E102", "Invalid data buffer: too large (max " + MAX_SAMPLES_PER_PUSH + ")"); return; }
             final double ts0 = (t0 == null ? 0.0 : t0.doubleValue());
             executorFor(h).submit(() -> {
                 try { rtPushNative(h, samples, ts0); promise.resolve(null); }
-                catch (Exception e) { promise.reject("rt_push_error", e); }
+                catch (Exception e) { promise.reject("HEARTPY_E900", e); }
+                finally { NM_PUSH_DONE.incrementAndGet(); if (CFG_DEBUG) Log.d("HeartPyRT", "nm.push.done="+NM_PUSH_DONE.get()); }
             });
+            NM_PUSH_SUBMIT.incrementAndGet(); if (CFG_DEBUG) Log.d("HeartPyRT", "nm.push.submit="+NM_PUSH_SUBMIT.get());
         } catch (Exception e) {
-            promise.reject("rt_push_exception", e);
+            promise.reject("HEARTPY_E900", e);
         }
     }
 
@@ -491,18 +530,20 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
     public void rtPoll(double handle, Promise promise) {
         try {
             final long h = (long) handle;
-            if (h == 0L) { promise.reject("rt_poll_invalid_args", "Invalid handle"); return; }
+            if (h == 0L) { promise.reject("HEARTPY_E111", "Invalid or destroyed handle"); return; }
             executorFor(h).submit(() -> {
                 try {
                     String json = rtPollNative(h);
                     if (json == null) { promise.resolve(null); return; }
                     promise.resolve(jsonToWritableMap(json));
                 } catch (Exception e) {
-                    promise.reject("rt_poll_error", e);
+                    promise.reject("HEARTPY_E900", e);
                 }
+                finally { NM_POLL_DONE.incrementAndGet(); if (CFG_DEBUG) Log.d("HeartPyRT", "nm.poll.done="+NM_POLL_DONE.get()); }
             });
+            NM_POLL_SUBMIT.incrementAndGet(); if (CFG_DEBUG) Log.d("HeartPyRT", "nm.poll.submit="+NM_POLL_SUBMIT.get());
         } catch (Exception e) {
-            promise.reject("rt_poll_exception", e);
+            promise.reject("HEARTPY_E900", e);
         }
     }
 
