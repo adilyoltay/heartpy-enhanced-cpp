@@ -1,3 +1,8 @@
+export const Platform = {
+  OS: 'android',
+  select: (obj: any) => (obj && obj.android !== undefined ? obj.android : obj?.default),
+};
+
 export const NativeModules = {
   HeartPyModule: {
     analyze: jest.fn((signal: number[], fs: number, options: any) => defaultResult()),
@@ -10,6 +15,12 @@ export const NativeModules = {
     hampelFilter: jest.fn((signal: number[], win: number, thr: number) => signal),
     scaleData: jest.fn((signal: number[], a: number, b: number) => signal),
     installJSI: jest.fn(() => true),
+    getConfig: jest.fn(() => ({ jsiEnabled: true, zeroCopyEnabled: true, debug: false, maxSamplesPerPush: 5000 })),
+    setConfig: jest.fn((_cfg: any) => {}),
+    rtCreate: jest.fn(async (_fs: number, _opt: any) => 123),
+    rtPush: jest.fn(async (_h: number, _arr: number[], _t0?: number) => {}),
+    rtPoll: jest.fn(async (_h: number) => null),
+    rtDestroy: jest.fn(async (_h: number) => {}),
   },
 };
 
@@ -44,4 +55,4 @@ function defaultResult() {
   } as const;
 }
 
-export default { NativeModules };
+export default { NativeModules, Platform };
