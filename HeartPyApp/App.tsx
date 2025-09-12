@@ -5,7 +5,7 @@
  * @format
  */
 
-import React, {useEffect} from 'react';
+import React, {useEffect, useState} from 'react';
 import type {PropsWithChildren} from 'react';
 import {
   SafeAreaView,
@@ -15,6 +15,7 @@ import {
   Text,
   useColorScheme,
   View,
+  TouchableOpacity,
 } from 'react-native';
 
 import {
@@ -25,6 +26,8 @@ import {
   ReloadInstructions,
 } from 'react-native/Libraries/NewAppScreen';
 import {NativeModules} from 'react-native';
+import HeartPyRunner from './HeartPyRunner';
+import CameraPPGAnalyzer from './CameraPPGAnalyzer';
 
 // Global JSI binding declaration
 declare global {
@@ -63,6 +66,7 @@ function Section({children, title}: SectionProps): React.JSX.Element {
 
 function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
+  const [currentScreen, setCurrentScreen] = useState<'home' | 'camera'>('home');
 
   const backgroundStyle = {
     backgroundColor: isDarkMode ? Colors.darker : Colors.lighter,
@@ -174,6 +178,27 @@ function App(): React.JSX.Element {
     }
   }, []);
 
+  if (currentScreen === 'camera') {
+    return (
+      <SafeAreaView style={[backgroundStyle, { flex: 1 }]}>
+        <StatusBar
+          barStyle={isDarkMode ? 'light-content' : 'dark-content'}
+          backgroundColor={backgroundStyle.backgroundColor}
+        />
+        <View style={styles.headerBar}>
+          <TouchableOpacity 
+            style={styles.backButton} 
+            onPress={() => setCurrentScreen('home')}
+          >
+            <Text style={styles.backButtonText}>← Ana Sayfa</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Real-time PPG Analiz</Text>
+        </View>
+        <CameraPPGAnalyzer />
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={backgroundStyle}>
       <StatusBar
@@ -188,20 +213,39 @@ function App(): React.JSX.Element {
           style={{
             backgroundColor: isDarkMode ? Colors.black : Colors.white,
           }}>
-          <Section title="Step One">
-            Edit <Text style={styles.highlight}>App.tsx</Text> to change this
-            screen and then come back to see your edits.
+          
+          {/* Kamera PPG Butonu */}
+          <TouchableOpacity 
+            style={styles.cameraButton} 
+            onPress={() => setCurrentScreen('camera')}
+          >
+            <Text style={styles.cameraButtonText}>
+              📱 Kamera ile Kalp Atışı Ölç
+            </Text>
+            <Text style={styles.cameraButtonSubtext}>
+              Real-time PPG analizi ile anlık kalp atışı ve HRV metrikleri
+            </Text>
+          </TouchableOpacity>
+
+          <HeartPyRunner />
+          <Section title="HeartPy Enhanced">
+            <Text>
+              Bu uygulama HeartPy Python kütüphanesinin C++ portunu kullanarak 
+              yüksek performanslı kalp atışı ve HRV analizi sağlar.
+            </Text>
           </Section>
-          <Section title="See Your Changes">
-            <ReloadInstructions />
+          <Section title="Özellikler">
+            <Text>
+              • Real-time PPG analizi{'\n'}
+              • 1000x daha hızlı işleme{'\n'}
+              • JSI ve streaming desteği{'\n'}
+              • Kapsamlı HRV metrikleri{'\n'}
+              • Bilimsel doğrulanmış algoritma
+            </Text>
           </Section>
           <Section title="Debug">
             <DebugInstructions />
           </Section>
-          <Section title="Learn More">
-            Read the docs to discover what to do next:
-          </Section>
-          <LearnMoreLinks />
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -224,6 +268,60 @@ const styles = StyleSheet.create({
   },
   highlight: {
     fontWeight: '700',
+  },
+  // Kamera özelliği stilleri
+  headerBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#fff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e0e0e0',
+  },
+  backButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 8,
+    marginRight: 16,
+  },
+  backButtonText: {
+    fontSize: 16,
+    color: '#007AFF',
+    fontWeight: '600',
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  cameraButton: {
+    backgroundColor: '#4CAF50',
+    margin: 16,
+    padding: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  cameraButtonText: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: 'white',
+    marginBottom: 8,
+  },
+  cameraButtonSubtext: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.9)',
+    textAlign: 'center',
+    lineHeight: 20,
   },
 });
 

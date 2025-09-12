@@ -6,11 +6,11 @@
 #import <React/RCTBridge.h>
 #import <jsi/jsi.h>
 
-#include "../../cpp/heartpy_core.h"
+#include "../cpp/heartpy_core.h"
 // Realtime streaming API
-#include "../../cpp/heartpy_stream.h"
+#include "../cpp/heartpy_stream.h"
 // Options validator (RN step 1)
-#include "../cpp/rn_options_builder.h"
+#include "cpp/rn_options_builder.h"
 
 using namespace facebook;
 

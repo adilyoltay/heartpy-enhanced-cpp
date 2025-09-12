@@ -432,6 +432,4 @@ export const HeartPyDebugger = {
         };
     },
 };
-}
-
-
+ 

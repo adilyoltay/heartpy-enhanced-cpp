@@ -1,0 +1,55 @@
+name: android-benchmark
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install app deps
+        working-directory: HeartPyApp
+        run: |
+          npm ci
+
+      - name: Build debug APK
+        working-directory: HeartPyApp
+        run: |
+          cd android
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Start emulator and run app
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          arch: x86_64
+          profile: pixel_5
+          script: |
+            adb devices
+            adb install -r HeartPyApp/android/app/build/outputs/apk/debug/app-debug.apk || true
+            adb shell am start -n com.heartpyapp/.MainActivity
+            # Give the developer some time to manually trigger HeartPy Runner if needed
+            sleep 90
+            adb logcat -d | grep -E "HeartPyJSI|Benchmark60s report|JSI report|NM report|create\(0\)|push\(\)" || true
+
+      - name: Upload logcat snippet
+        if: always()
+        run: |
+          adb logcat -d > logcat.txt || true
+        shell: bash
+
+      - name: Archive logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-logcat
+          path: logcat.txt
+

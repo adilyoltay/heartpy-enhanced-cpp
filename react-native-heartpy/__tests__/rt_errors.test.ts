@@ -9,7 +9,6 @@ describe('RealtimeAnalyzer guards and errors', () => {
   it('push([]) on NM path -> HEARTPY_E102', async () => {
     RealtimeAnalyzer.setConfig({ jsiEnabled: false });
     const a = await RealtimeAnalyzer.create(50, {});
-    // @ts-expect-error passing [] to trigger guard
     await expect(a.push([] as any)).rejects.toMatchObject({ code: 'HEARTPY_E102' });
     await a.destroy();
   });
@@ -33,4 +32,3 @@ describe('RealtimeAnalyzer guards and errors', () => {
     await expect(a.destroy()).resolves.toBeUndefined();
   });
 });
-
