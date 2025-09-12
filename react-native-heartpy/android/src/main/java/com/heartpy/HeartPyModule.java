@@ -9,6 +9,7 @@ import com.facebook.react.bridge.UiThreadUtil;
 import com.facebook.react.bridge.Promise;
 import com.facebook.jni.HybridData;
 import com.facebook.react.bridge.ReactContext;
+import android.util.Log;
 
 public class HeartPyModule extends ReactContextBaseJavaModule {
     static {
@@ -66,6 +67,29 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
     private static native double[] hampelFilterNative(double[] signal, int windowSize, double threshold);
     private static native double[] scaleDataNative(double[] signal, double newMin, double newMax);
 
+    // Realtime streaming native bindings (P0)
+    private static native long rtCreateNative(
+            double fs,
+            double lowHz, double highHz, int order,
+            int nfft, double overlap, double welchWsizeSec,
+            double refractoryMs, double thresholdScale, double bpmMin, double bpmMax,
+            boolean interpClipping, double clippingThreshold,
+            boolean hampelCorrect, int hampelWindow, double hampelThreshold,
+            boolean removeBaselineWander, boolean enhancePeaks,
+            boolean highPrecision, double highPrecisionFs,
+            boolean rejectSegmentwise, double segmentRejectThreshold, int segmentRejectMaxRejects, int segmentRejectWindowBeats, double segmentRejectOverlap,
+            boolean cleanRR, int cleanMethod,
+            double segmentWidth, double segmentOverlap, double segmentMinSize, boolean replaceOutliers,
+            double rrSplineS, double rrSplineTargetSse, double rrSplineSmooth,
+            boolean breathingAsBpm,
+            int sdsdMode,
+            int poincareMode,
+            boolean pnnAsPercent
+    );
+    private static native void rtPushNative(long handle, double[] samples, double t0);
+    private static native String rtPollNative(long handle);
+    private static native void rtDestroyNative(long handle);
+
     public HeartPyModule(@NonNull ReactApplicationContext reactContext) {
         super(reactContext);
     }
@@ -74,6 +98,23 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
     @Override
     public String getName() {
         return "HeartPyModule";
+    }
+
+    // Single-thread executors per realtime analyzer handle
+    private static final java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.ExecutorService> EXECUTORS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static java.util.concurrent.ExecutorService executorFor(long handle) {
+        return EXECUTORS.computeIfAbsent(handle, h -> {
+            java.util.concurrent.ExecutorService ex = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try { Log.d("HeartPyRT", "executor.create handle="+h+" active="+EXECUTORS.size()); } catch (Throwable t) {}
+            return ex;
+        });
+    }
+    private static void shutdownExecutor(long handle) {
+        java.util.concurrent.ExecutorService ex = EXECUTORS.remove(handle);
+        if (ex != null) {
+            ex.shutdownNow();
+            try { Log.d("HeartPyRT", "executor.shutdown handle="+handle+" active="+EXECUTORS.size()); } catch (Throwable t) {}
+        }
     }
 
     private static com.facebook.react.bridge.WritableMap jsonToWritableMap(String json) {
@@ -397,6 +438,85 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         com.facebook.react.bridge.WritableArray arr = com.facebook.react.bridge.Arguments.createArray();
         for (double v : y) arr.pushDouble(v);
         return arr;
+    }
+
+    // ------------------------------
+    // Realtime Streaming (NativeModules P0)
+    // ------------------------------
+
+    @ReactMethod
+    public void rtCreate(double fs, com.facebook.react.bridge.ReadableMap options, Promise promise) {
+        try {
+            Opts o = parseOptions(options);
+            if (fs <= 0.0) { promise.reject("rt_create_invalid_args", "Sampling rate must be > 0"); return; }
+            long h = rtCreateNative(fs,
+                    o.lowHz, o.highHz, o.order,
+                    o.nfft, o.overlap, o.wsizeSec,
+                    o.refractoryMs, o.thresholdScale, o.bpmMin, o.bpmMax,
+                    o.interpClipping, o.clippingThreshold,
+                    o.hampelCorrect, o.hampelWindow, o.hampelThreshold,
+                    o.removeBaselineWander, o.enhancePeaks,
+                    o.highPrecision, o.highPrecisionFs,
+                    o.rejectSegmentwise, o.segmentRejectThreshold, o.segmentRejectMaxRejects, o.segmentRejectWindowBeats, o.segmentRejectOverlap,
+                    o.cleanRR, o.cleanMethod,
+                    o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
+                    o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
+                    o.breathingAsBpm,
+                    o.sdsdMode,
+                    o.poincareMode,
+                    o.pnnAsPercent);
+            if (h == 0) { promise.reject("rt_create_failed", "hp_rt_create returned 0"); return; }
+            promise.resolve(h);
+        } catch (Exception e) {
+            promise.reject("rt_create_error", e);
+        }
+    }
+
+    @ReactMethod
+    public void rtPush(double handle, double[] samples, Double t0, Promise promise) {
+        try {
+            final long h = (long) handle;
+            if (h == 0L || samples == null || samples.length == 0) { promise.reject("rt_push_invalid_args", "Invalid handle or empty samples"); return; }
+            final double ts0 = (t0 == null ? 0.0 : t0.doubleValue());
+            executorFor(h).submit(() -> {
+                try { rtPushNative(h, samples, ts0); promise.resolve(null); }
+                catch (Exception e) { promise.reject("rt_push_error", e); }
+            });
+        } catch (Exception e) {
+            promise.reject("rt_push_exception", e);
+        }
+    }
+
+    @ReactMethod
+    public void rtPoll(double handle, Promise promise) {
+        try {
+            final long h = (long) handle;
+            if (h == 0L) { promise.reject("rt_poll_invalid_args", "Invalid handle"); return; }
+            executorFor(h).submit(() -> {
+                try {
+                    String json = rtPollNative(h);
+                    if (json == null) { promise.resolve(null); return; }
+                    promise.resolve(jsonToWritableMap(json));
+                } catch (Exception e) {
+                    promise.reject("rt_poll_error", e);
+                }
+            });
+        } catch (Exception e) {
+            promise.reject("rt_poll_exception", e);
+        }
+    }
+
+    @ReactMethod
+    public void rtDestroy(double handle, Promise promise) {
+        try {
+            final long h = (long) handle;
+            if (h == 0L) { promise.resolve(null); return; }
+            shutdownExecutor(h);
+            rtDestroyNative(h);
+            promise.resolve(null);
+        } catch (Exception e) {
+            promise.reject("rt_destroy_error", e);
+        }
     }
 }
 

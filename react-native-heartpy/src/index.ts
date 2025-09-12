@@ -200,4 +200,68 @@ export function analyzeJSI(signal: number[] | Float64Array, fs: number, options?
 	throw new Error('JSI analyze not installed. Call installJSI() on iOS, or use NativeModules/async methods.');
 }
 
+// ------------------------------
+// Realtime Streaming (NativeModules P0)
+// ------------------------------
+
+type HeartPyMetrics = HeartPyResult; // streaming returns same shape
+
+export async function rtCreate(fs: number, options?: HeartPyOptions): Promise<number> {
+    const { NativeModules } = require('react-native');
+    const Native: any = NativeModules?.HeartPyModule;
+    if (!Native?.rtCreate) throw new Error('HeartPyModule.rtCreate not available');
+    return Native.rtCreate(fs, options ?? {});
+}
+
+export async function rtPush(handle: number, samples: Float32Array | number[], t0?: number): Promise<void> {
+    const { NativeModules } = require('react-native');
+    const Native: any = NativeModules?.HeartPyModule;
+    if (!Native?.rtPush) throw new Error('HeartPyModule.rtPush not available');
+    if (!handle || (Array.isArray(samples) ? samples.length === 0 : samples.byteLength === 0)) {
+        throw new Error('rtPush invalid args');
+    }
+    const arr = (samples instanceof Float32Array ? Array.from(samples) : samples) as number[];
+    return Native.rtPush(handle, arr, t0 ?? 0);
+}
+
+export async function rtPoll(handle: number): Promise<HeartPyMetrics | null> {
+    const { NativeModules } = require('react-native');
+    const Native: any = NativeModules?.HeartPyModule;
+    if (!Native?.rtPoll) throw new Error('HeartPyModule.rtPoll not available');
+    return Native.rtPoll(handle);
+}
+
+export async function rtDestroy(handle: number): Promise<void> {
+    const { NativeModules } = require('react-native');
+    const Native: any = NativeModules?.HeartPyModule;
+    if (!Native?.rtDestroy) throw new Error('HeartPyModule.rtDestroy not available');
+    return Native.rtDestroy(handle);
+}
+
+export class RealtimeAnalyzer {
+    private handle: number = 0;
+    private constructor(h: number) { this.handle = h; }
+
+    static async create(fs: number, options?: HeartPyOptions): Promise<RealtimeAnalyzer> {
+        const h = await rtCreate(fs, options);
+        return new RealtimeAnalyzer(h);
+    }
+
+    async push(samples: Float32Array | number[], t0?: number): Promise<void> {
+        if (!this.handle) throw new Error('RealtimeAnalyzer destroyed');
+        return rtPush(this.handle, samples, t0);
+    }
+
+    async poll(): Promise<HeartPyMetrics | null> {
+        if (!this.handle) throw new Error('RealtimeAnalyzer destroyed');
+        return rtPoll(this.handle);
+    }
+
+    async destroy(): Promise<void> {
+        if (!this.handle) return; // idempotent
+        const h = this.handle; this.handle = 0;
+        try { await rtDestroy(h); } catch {}
+    }
+}
+
 

@@ -7,6 +7,8 @@
 #import <jsi/jsi.h>
 
 #include "../../cpp/heartpy_core.h"
+// Realtime streaming API
+#include "../../cpp/heartpy_stream.h"
 
 using namespace facebook;
 
@@ -486,6 +488,159 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(installJSI)
 	#endif
 	installBinding(rt);
 	return @YES;
+}
+
+// MARK: - Realtime Streaming (NativeModules P0)
+
+// Create realtime analyzer and return opaque handle (as number)
+RCT_EXPORT_METHOD(rtCreate:(double)fs
+                  options:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    @try {
+        if (fs <= 0.0) { reject(@"rt_create_invalid_args", @"Sampling rate must be > 0", nil); return; }
+        heartpy::Options opt = optionsFromNSDictionary(options);
+        void* handle = hp_rt_create(fs, &opt);
+        if (!handle) { reject(@"rt_create_failed", @"hp_rt_create returned null", nil); return; }
+        resolve(@((long)handle));
+    } @catch (NSException* e) {
+        reject(@"rt_create_exception", e.reason, nil);
+    }
+}
+
+// Push a chunk of samples (number[])
+RCT_EXPORT_METHOD(rtPush:(nonnull NSNumber*)handle
+                  samples:(NSArray<NSNumber*>*)samples
+                  timestamp:(nullable NSNumber*)t0
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    @try {
+        if (handle == nil || samples == nil || samples.count == 0) { reject(@"rt_push_invalid_args", @"Invalid handle or empty samples", nil); return; }
+        void* h = (void*)[handle longValue];
+        const NSUInteger n = samples.count;
+        std::vector<float> x; x.reserve(n);
+        for (NSNumber* v in samples) x.push_back([v floatValue]);
+        double ts0 = t0 ? [t0 doubleValue] : 0.0;
+        hp_rt_push(h, x.data(), (size_t)x.size(), ts0);
+        resolve(nil);
+    } @catch (NSException* e) {
+        reject(@"rt_push_exception", e.reason, nil);
+    }
+}
+
+// Poll for latest metrics; returns object or null
+RCT_EXPORT_METHOD(rtPoll:(nonnull NSNumber*)handle
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    @try {
+        if (handle == nil) { reject(@"rt_poll_invalid_args", @"Invalid handle", nil); return; }
+        void* h = (void*)[handle longValue];
+        heartpy::HeartMetrics res;
+        if (!hp_rt_poll(h, &res)) { resolve(nil); return; }
+
+        NSMutableDictionary* out = [NSMutableDictionary new];
+        out[@"bpm"] = @(res.bpm);
+        // Arrays
+        {
+            NSMutableArray* ibi = [NSMutableArray arrayWithCapacity:res.ibiMs.size()];
+            for (double v : res.ibiMs) [ibi addObject:@(v)];
+            out[@"ibiMs"] = ibi;
+            NSMutableArray* rr = [NSMutableArray arrayWithCapacity:res.rrList.size()];
+            for (double v : res.rrList) [rr addObject:@(v)];
+            out[@"rrList"] = rr;
+            NSMutableArray* peaks = [NSMutableArray arrayWithCapacity:res.peakList.size()];
+            for (int idx : res.peakList) [peaks addObject:@(idx)];
+            out[@"peakList"] = peaks;
+        }
+        // Time domain
+        out[@"sdnn"] = @(res.sdnn);
+        out[@"rmssd"] = @(res.rmssd);
+        out[@"sdsd"] = @(res.sdsd);
+        out[@"pnn20"] = @(res.pnn20);
+        out[@"pnn50"] = @(res.pnn50);
+        out[@"nn20"] = @(res.nn20);
+        out[@"nn50"] = @(res.nn50);
+        out[@"mad"] = @(res.mad);
+        // Poincaré
+        out[@"sd1"] = @(res.sd1);
+        out[@"sd2"] = @(res.sd2);
+        out[@"sd1sd2Ratio"] = @(res.sd1sd2Ratio);
+        out[@"ellipseArea"] = @(res.ellipseArea);
+        // Frequency domain
+        out[@"vlf"] = @(res.vlf);
+        out[@"lf"] = @(res.lf);
+        out[@"hf"] = @(res.hf);
+        out[@"lfhf"] = @(res.lfhf);
+        out[@"totalPower"] = @(res.totalPower);
+        out[@"lfNorm"] = @(res.lfNorm);
+        out[@"hfNorm"] = @(res.hfNorm);
+        // Breathing
+        out[@"breathingRate"] = @(res.breathingRate);
+        // Quality
+        {
+            NSMutableDictionary* q = [NSMutableDictionary new];
+            q[@"totalBeats"] = @(res.quality.totalBeats);
+            q[@"rejectedBeats"] = @(res.quality.rejectedBeats);
+            q[@"rejectionRate"] = @(res.quality.rejectionRate);
+            q[@"goodQuality"] = @(res.quality.goodQuality);
+            // Streaming quality fields (if available)
+            q[@"snrDb"] = @(res.quality.snrDb);
+            q[@"confidence"] = @(res.quality.confidence);
+            q[@"f0Hz"] = @(res.quality.f0Hz);
+            q[@"maPercActive"] = @(res.quality.maPercActive);
+            q[@"doublingFlag"] = @(res.quality.doublingFlag);
+            q[@"softDoublingFlag"] = @(res.quality.softDoublingFlag);
+            q[@"doublingHintFlag"] = @(res.quality.doublingHintFlag);
+            q[@"hardFallbackActive"] = @(res.quality.hardFallbackActive);
+            q[@"rrFallbackModeActive"] = @(res.quality.rrFallbackModeActive);
+            q[@"refractoryMsActive"] = @(res.quality.refractoryMsActive);
+            q[@"minRRBoundMs"] = @(res.quality.minRRBoundMs);
+            q[@"pairFrac"] = @(res.quality.pairFrac);
+            q[@"rrShortFrac"] = @(res.quality.rrShortFrac);
+            q[@"rrLongMs"] = @(res.quality.rrLongMs);
+            q[@"pHalfOverFund"] = @(res.quality.pHalfOverFund);
+            if (!res.quality.qualityWarning.empty()) {
+                q[@"qualityWarning"] = [NSString stringWithUTF8String:res.quality.qualityWarning.c_str()];
+            }
+            out[@"quality"] = q;
+        }
+        // Binary segments (if any)
+        {
+            NSMutableArray* segs = [NSMutableArray arrayWithCapacity:res.binarySegments.size()];
+            for (const auto& s : res.binarySegments) {
+                NSMutableDictionary* d = [NSMutableDictionary new];
+                d[@"index"] = @(s.index);
+                d[@"startBeat"] = @(s.startBeat);
+                d[@"endBeat"] = @(s.endBeat);
+                d[@"totalBeats"] = @(s.totalBeats);
+                d[@"rejectedBeats"] = @(s.rejectedBeats);
+                d[@"accepted"] = @(s.accepted);
+                [segs addObject:d];
+            }
+            out[@"binarySegments"] = segs;
+        }
+        resolve(out);
+    } @catch (NSException* e) {
+        reject(@"rt_poll_exception", e.reason, nil);
+    }
+}
+
+// Destroy analyzer and release native resources
+RCT_EXPORT_METHOD(rtDestroy:(nonnull NSNumber*)handle
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    @try {
+        if (handle == nil) { reject(@"rt_destroy_invalid_args", @"Invalid handle", nil); return; }
+        void* h = (void*)[handle longValue];
+        hp_rt_destroy(h);
+        resolve(nil);
+    } @catch (NSException* e) {
+        reject(@"rt_destroy_exception", e.reason, nil);
+    }
 }
 
 @end

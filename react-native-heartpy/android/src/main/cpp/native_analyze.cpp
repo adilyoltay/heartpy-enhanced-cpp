@@ -4,6 +4,8 @@
 #include <sstream>
 #include <string>
 #include "../../../../cpp/heartpy_core.h"
+// Realtime streaming API
+#include "../../../../cpp/heartpy_stream.h"
 
 static std::string to_json(const heartpy::HeartMetrics& r, bool includeSegments=false) {
     std::ostringstream os;
@@ -34,6 +36,22 @@ static std::string to_json(const heartpy::HeartMetrics& r, bool includeSegments=
     os << "\"quality\":{";
     kv("totalBeats", r.quality.totalBeats); os << ","; kv("rejectedBeats", r.quality.rejectedBeats); os << ","; kv("rejectionRate", r.quality.rejectionRate); os << ",";
     os << "\"goodQuality\":" << (r.quality.goodQuality ? "true" : "false");
+    // Streaming metrics (if available)
+    os << ",\"snrDb\":" << r.quality.snrDb;
+    os << ",\"confidence\":" << r.quality.confidence;
+    os << ",\"f0Hz\":" << r.quality.f0Hz;
+    os << ",\"maPercActive\":" << r.quality.maPercActive;
+    os << ",\"doublingFlag\":" << r.quality.doublingFlag;
+    os << ",\"softDoublingFlag\":" << r.quality.softDoublingFlag;
+    os << ",\"doublingHintFlag\":" << r.quality.doublingHintFlag;
+    os << ",\"hardFallbackActive\":" << r.quality.hardFallbackActive;
+    os << ",\"rrFallbackModeActive\":" << r.quality.rrFallbackModeActive;
+    os << ",\"refractoryMsActive\":" << r.quality.refractoryMsActive;
+    os << ",\"minRRBoundMs\":" << r.quality.minRRBoundMs;
+    os << ",\"pairFrac\":" << r.quality.pairFrac;
+    os << ",\"rrShortFrac\":" << r.quality.rrShortFrac;
+    os << ",\"rrLongMs\":" << r.quality.rrLongMs;
+    os << ",\"pHalfOverFund\":" << r.quality.pHalfOverFund;
     if (!r.quality.qualityWarning.empty()) {
         os << ",\"qualityWarning\":\"";
         // naive string escape for quotes/backslashes
@@ -260,6 +278,99 @@ Java_com_heartpy_HeartPyModule_scaleDataNative(JNIEnv* env, jclass, jdoubleArray
     jdoubleArray out = env->NewDoubleArray((jsize)y.size());
     if (!y.empty()) env->SetDoubleArrayRegion(out, 0, (jsize)y.size(), y.data());
     return out;
+}
+
+// ------------------------------
+// Realtime Streaming JNI (P0)
+// ------------------------------
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_heartpy_HeartPyModule_rtCreateNative(
+        JNIEnv* env,
+        jclass,
+        jdouble fs,
+        jdouble lowHz,
+        jdouble highHz,
+        jint order,
+        jint nfft,
+        jdouble overlap,
+        jdouble welchWsizeSec,
+        jdouble refractoryMs,
+        jdouble thresholdScale,
+        jdouble bpmMin,
+        jdouble bpmMax,
+        jboolean interpClipping,
+        jdouble clippingThreshold,
+        jboolean hampelCorrect,
+        jint hampelWindow,
+        jdouble hampelThreshold,
+        jboolean removeBaselineWander,
+        jboolean enhancePeaks,
+        jboolean highPrecision,
+        jdouble highPrecisionFs,
+        jboolean rejectSegmentwise,
+        jdouble segmentRejectThreshold,
+        jint segmentRejectMaxRejects,
+        jint segmentRejectWindowBeats,
+        jdouble segmentRejectOverlap,
+        jboolean cleanRR,
+        jint cleanMethod,
+        jdouble segmentWidth,
+        jdouble segmentOverlap,
+        jdouble segmentMinSize,
+        jboolean replaceOutliers,
+        jdouble rrSplineS,
+        jdouble rrSplineTargetSse,
+        jdouble rrSplineSmooth,
+        jboolean breathingAsBpm,
+        jint sdsdMode,
+        jint poincareMode,
+        jboolean pnnAsPercent) {
+    heartpy::Options opt;
+    opt.lowHz = lowHz; opt.highHz = highHz; opt.iirOrder = order;
+    opt.nfft = nfft; opt.overlap = overlap; opt.welchWsizeSec = welchWsizeSec;
+    opt.refractoryMs = refractoryMs; opt.thresholdScale = thresholdScale; opt.bpmMin = bpmMin; opt.bpmMax = bpmMax;
+    opt.interpClipping = interpClipping; opt.clippingThreshold = clippingThreshold;
+    opt.hampelCorrect = hampelCorrect; opt.hampelWindow = hampelWindow; opt.hampelThreshold = hampelThreshold;
+    opt.removeBaselineWander = removeBaselineWander; opt.enhancePeaks = enhancePeaks;
+    opt.highPrecision = highPrecision; opt.highPrecisionFs = highPrecisionFs;
+    opt.rejectSegmentwise = rejectSegmentwise; opt.segmentRejectThreshold = segmentRejectThreshold; opt.segmentRejectMaxRejects = segmentRejectMaxRejects; opt.segmentRejectWindowBeats = segmentRejectWindowBeats; opt.segmentRejectOverlap = segmentRejectOverlap;
+    opt.cleanRR = cleanRR; opt.cleanMethod = (cleanMethod==1? heartpy::Options::CleanMethod::IQR : (cleanMethod==2? heartpy::Options::CleanMethod::Z_SCORE : heartpy::Options::CleanMethod::QUOTIENT_FILTER));
+    opt.segmentWidth = segmentWidth; opt.segmentOverlap = segmentOverlap; opt.segmentMinSize = segmentMinSize; opt.replaceOutliers = replaceOutliers;
+    opt.rrSplineS = rrSplineS; opt.rrSplineSTargetSse = rrSplineTargetSse; opt.rrSplineSmooth = rrSplineSmooth;
+    opt.breathingAsBpm = breathingAsBpm;
+    opt.sdsdMode = (sdsdMode==0 ? heartpy::Options::SdsdMode::SIGNED : heartpy::Options::SdsdMode::ABS);
+    opt.poincareMode = (poincareMode==1 ? heartpy::Options::PoincareMode::MASKED : heartpy::Options::PoincareMode::FORMULA);
+    opt.pnnAsPercent = (pnnAsPercent==JNI_TRUE);
+    void* h = hp_rt_create(fs, &opt);
+    return (jlong)h;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_heartpy_HeartPyModule_rtPushNative(JNIEnv* env, jclass, jlong h, jdoubleArray jData, jdouble t0) {
+    if (!h || !jData) return;
+    jsize len = env->GetArrayLength(jData);
+    if (len <= 0) return;
+    std::vector<double> tmp(len);
+    env->GetDoubleArrayRegion(jData, 0, len, tmp.data());
+    std::vector<float> x(len);
+    for (jsize i = 0; i < len; ++i) x[i] = static_cast<float>(tmp[i]);
+    hp_rt_push((void*)h, x.data(), (size_t)x.size(), t0);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_heartpy_HeartPyModule_rtPollNative(JNIEnv* env, jclass, jlong h) {
+    if (!h) return nullptr;
+    heartpy::HeartMetrics out;
+    if (!hp_rt_poll((void*)h, &out)) return nullptr;
+    std::string json = to_json(out, false);
+    return env->NewStringUTF(json.c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_heartpy_HeartPyModule_rtDestroyNative(JNIEnv* env, jclass, jlong h) {
+    if (!h) return;
+    hp_rt_destroy((void*)h);
 }
 
 
