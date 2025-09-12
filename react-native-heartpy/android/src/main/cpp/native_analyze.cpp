@@ -3,6 +3,12 @@
 #include <algorithm>
 #include <sstream>
 #include <string>
+#include <android/log.h>
+#include <unordered_map>
+#include <mutex>
+#include <atomic>
+#include <cstdint>
+#include <jsi/jsi.h>
 #include "../../../../cpp/heartpy_core.h"
 // Realtime streaming API
 #include "../../../../cpp/heartpy_stream.h"
@@ -444,6 +450,14 @@ static void hp_handle_remove(uint32_t id) {
     }
 }
 
+// Zero-copy flag (updated from Java setConfig)
+static std::atomic<bool> g_zero_copy_enabled{true};
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_heartpy_HeartPyModule_setZeroCopyEnabledNative(JNIEnv*, jclass, jboolean enabled) {
+    g_zero_copy_enabled.store(enabled == JNI_TRUE);
+}
+
 static void installBinding(facebook::jsi::Runtime& rt) {
     using namespace facebook::jsi;
     // __hpRtCreate(fs:number, options?:object) -> number (id)
@@ -490,11 +504,35 @@ static void installBinding(facebook::jsi::Runtime& rt) {
             size_t len = (size_t)o.getProperty(rt, "length").asNumber();
             if (len == 0) throw JSError(rt, "HEARTPY_E102: empty buffer");
             double t0 = (count > 2 && args[2].isNumber()) ? args[2].asNumber() : 0.0;
-            // Fallback copy (portable). Zero-copy will be attempted in future via ArrayBuffer pointer extraction.
-            __android_log_print(ANDROID_LOG_DEBUG, "HeartPyJSI", "rtPush: fallback copy path (len=%zu)", len);
-            std::vector<float> tmp; tmp.reserve(len);
-            for (size_t i = 0; i < len; ++i) tmp.push_back((float)o.getPropertyAtIndex(rt, (uint32_t)i).asNumber());
-            hp_rt_push(p, tmp.data(), tmp.size(), t0);
+            const size_t MAX_SAMPLES_PER_PUSH = 5000;
+            if (len > MAX_SAMPLES_PER_PUSH) throw JSError(rt, "HEARTPY_E102: buffer too large");
+
+            bool usedZeroCopy = false;
+            if (g_zero_copy_enabled.load()) {
+                try {
+                    size_t bpe = (size_t)o.getProperty(rt, "BYTES_PER_ELEMENT").asNumber();
+                    size_t byteOffset = (size_t)o.getProperty(rt, "byteOffset").asNumber();
+                    auto buf = o.getProperty(rt, "buffer").asObject(rt);
+                    auto ab = buf.getArrayBuffer(rt);
+                    uint8_t* base = ab.data(rt);
+                    size_t abSize = ab.size(rt);
+                    size_t need = byteOffset + len * bpe;
+                    if (bpe == 4 && base && need <= abSize && (byteOffset % 4 == 0)) {
+                        float* data = reinterpret_cast<float*>(base + byteOffset);
+                        hp_rt_push(p, data, len, t0);
+                        usedZeroCopy = true;
+                        __android_log_print(ANDROID_LOG_DEBUG, "HeartPyJSI", "rtPush: zero-copy used (len=%zu)", len);
+                    }
+                } catch (...) {
+                    // fall through to copy path
+                }
+            }
+            if (!usedZeroCopy) {
+                __android_log_print(ANDROID_LOG_DEBUG, "HeartPyJSI", "rtPush: fallback copy path (len=%zu)", len);
+                std::vector<float> tmp; tmp.reserve(len);
+                for (size_t i = 0; i < len; ++i) tmp.push_back((float)o.getPropertyAtIndex(rt, (uint32_t)i).asNumber());
+                hp_rt_push(p, tmp.data(), tmp.size(), t0);
+            }
             return Value::undefined();
         }
     );

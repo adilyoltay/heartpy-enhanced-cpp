@@ -100,6 +100,7 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                                                          double bpmMin, double bpmMax,
                                                          double highPrecisionFs);
     private static native void installJSIHybrid(long runtimePtr);
+    private static native void setZeroCopyEnabledNative(boolean enabled);
 
     // ---------- Step 0: Risk mitigation flags & profiling ----------
     private static volatile boolean CFG_JSI_ENABLED = true;
@@ -127,7 +128,10 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         if (cfg == null) return;
         try {
             if (cfg.hasKey("jsiEnabled")) CFG_JSI_ENABLED = cfg.getBoolean("jsiEnabled");
-            if (cfg.hasKey("zeroCopyEnabled")) CFG_ZERO_COPY_ENABLED = cfg.getBoolean("zeroCopyEnabled");
+            if (cfg.hasKey("zeroCopyEnabled")) {
+                CFG_ZERO_COPY_ENABLED = cfg.getBoolean("zeroCopyEnabled");
+                try { setZeroCopyEnabledNative(CFG_ZERO_COPY_ENABLED); } catch (Throwable ignore) {}
+            }
             if (cfg.hasKey("debug")) CFG_DEBUG = cfg.getBoolean("debug");
             Log.d("HeartPyJSI", "setConfig jsi=" + CFG_JSI_ENABLED + " zeroCopy=" + CFG_ZERO_COPY_ENABLED + " debug=" + CFG_DEBUG);
         } catch (Throwable t) {
