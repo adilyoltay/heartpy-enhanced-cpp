@@ -9,6 +9,8 @@
 #include "../../cpp/heartpy_core.h"
 // Realtime streaming API
 #include "../../cpp/heartpy_stream.h"
+// Options validator (RN step 1)
+#include "../cpp/rn_options_builder.h"
 
 using namespace facebook;
 
@@ -499,13 +501,21 @@ RCT_EXPORT_METHOD(rtCreate:(double)fs
                   rejecter:(RCTPromiseRejectBlock)reject)
 {
     @try {
-        if (fs <= 0.0) { reject(@"rt_create_invalid_args", @"Sampling rate must be > 0", nil); return; }
+        if (fs <= 0.0) { reject(@"HEARTPY_E001", @"Invalid sample rate: must be 1-10000 Hz", nil); return; }
         heartpy::Options opt = optionsFromNSDictionary(options);
+        // Validate options centrally
+        const char* code = nullptr; std::string msg;
+        if (!hp_validate_options(fs, opt, &code, &msg)) {
+            NSString* nscode = code ? [NSString stringWithUTF8String:code] : @"HEARTPY_E015";
+            NSString* nsmsg = [NSString stringWithUTF8String:msg.c_str()];
+            reject(nscode, nsmsg, nil);
+            return;
+        }
         void* handle = hp_rt_create(fs, &opt);
-        if (!handle) { reject(@"rt_create_failed", @"hp_rt_create returned null", nil); return; }
+        if (!handle) { reject(@"HEARTPY_E004", @"hp_rt_create returned null", nil); return; }
         resolve(@((long)handle));
     } @catch (NSException* e) {
-        reject(@"rt_create_exception", e.reason, nil);
+        reject(@"HEARTPY_E900", e.reason, nil);
     }
 }
 

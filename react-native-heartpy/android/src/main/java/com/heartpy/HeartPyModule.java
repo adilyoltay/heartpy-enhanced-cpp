@@ -90,6 +90,15 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
     private static native void rtPushNative(long handle, double[] samples, double t0);
     private static native String rtPollNative(long handle);
     private static native void rtDestroyNative(long handle);
+    private static native String rtValidateOptionsNative(double fs,
+                                                         double lowHz, double highHz,
+                                                         int order,
+                                                         int nfft,
+                                                         double overlap,
+                                                         double welchWsizeSec,
+                                                         double refractoryMs,
+                                                         double bpmMin, double bpmMax,
+                                                         double highPrecisionFs);
 
     // ---------- Step 0: Risk mitigation flags & profiling ----------
     private static volatile boolean CFG_JSI_ENABLED = true;
@@ -484,6 +493,21 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         try {
             Opts o = parseOptions(options);
             if (fs < 1.0 || fs > 10000.0) { promise.reject("HEARTPY_E001", "Invalid sample rate: " + fs + ". Must be 1-10000 Hz."); return; }
+            // Native validation
+            String vcode = rtValidateOptionsNative(fs, o.lowHz, o.highHz, o.order, o.nfft, o.overlap, o.wsizeSec, o.refractoryMs, o.bpmMin, o.bpmMax, o.highPrecisionFs);
+            if (vcode != null) {
+                String msg;
+                switch (vcode) {
+                    case "HEARTPY_E001": msg = "Invalid sample rate (1-10000 Hz)"; break;
+                    case "HEARTPY_E011": msg = "Invalid bandpass (0<=low<high<=fs/2)"; break;
+                    case "HEARTPY_E012": msg = "Invalid nfft (64-16384)"; break;
+                    case "HEARTPY_E013": msg = "Invalid BPM range (30<=min<max<=240)"; break;
+                    case "HEARTPY_E014": msg = "Invalid refractory (50-2000 ms)"; break;
+                    default: msg = "Invalid options"; break;
+                }
+                promise.reject(vcode, msg);
+                return;
+            }
             long h = rtCreateNative(fs,
                     o.lowHz, o.highHz, o.order,
                     o.nfft, o.overlap, o.wsizeSec,

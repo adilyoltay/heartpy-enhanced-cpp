@@ -9,11 +9,13 @@ add_library(heartpy_rn SHARED
     native_analyze.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp/heartpy_core.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp/heartpy_stream.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../cpp/rn_options_builder.cpp
 )
 
 target_include_directories(heartpy_rn PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/kissfft
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../cpp
 )
 
 # Use vendored KissFFT if available within the package

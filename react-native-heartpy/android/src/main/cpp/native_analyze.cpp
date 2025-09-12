@@ -6,6 +6,8 @@
 #include "../../../../cpp/heartpy_core.h"
 // Realtime streaming API
 #include "../../../../cpp/heartpy_stream.h"
+// RN options validator (step 1)
+#include "../../cpp/rn_options_builder.h"
 
 static std::string to_json(const heartpy::HeartMetrics& r, bool includeSegments=false) {
     std::ostringstream os;
@@ -371,6 +373,35 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_heartpy_HeartPyModule_rtDestroyNative(JNIEnv* env, jclass, jlong h) {
     if (!h) return;
     hp_rt_destroy((void*)h);
+}
+
+// Validator JNI: returns error code string on failure, or null on success
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_heartpy_HeartPyModule_rtValidateOptionsNative(
+        JNIEnv* env,
+        jclass,
+        jdouble fs,
+        jdouble lowHz,
+        jdouble highHz,
+        jint order,
+        jint nfft,
+        jdouble overlap,
+        jdouble welchWsizeSec,
+        jdouble refractoryMs,
+        jdouble bpmMin,
+        jdouble bpmMax,
+        jdouble highPrecisionFs) {
+    heartpy::Options opt;
+    opt.lowHz = lowHz; opt.highHz = highHz; opt.iirOrder = order;
+    opt.nfft = nfft; opt.overlap = overlap; opt.welchWsizeSec = welchWsizeSec;
+    opt.refractoryMs = refractoryMs; opt.bpmMin = bpmMin; opt.bpmMax = bpmMax;
+    opt.highPrecisionFs = highPrecisionFs;
+    const char* code = nullptr; std::string msg;
+    if (!hp_validate_options(fs, opt, &code, &msg)) {
+        if (code) return env->NewStringUTF(code);
+        return env->NewStringUTF("HEARTPY_E015");
+    }
+    return nullptr;
 }
 
 
