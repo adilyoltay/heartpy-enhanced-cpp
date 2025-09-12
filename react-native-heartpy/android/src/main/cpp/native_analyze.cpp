@@ -452,10 +452,22 @@ static void hp_handle_remove(uint32_t id) {
 
 // Zero-copy flag (updated from Java setConfig)
 static std::atomic<bool> g_zero_copy_enabled{true};
+static std::atomic<unsigned long long> g_zero_copy_used{0};
+static std::atomic<unsigned long long> g_fallback_copy_used{0};
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_heartpy_HeartPyModule_setZeroCopyEnabledNative(JNIEnv*, jclass, jboolean enabled) {
     g_zero_copy_enabled.store(enabled == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_heartpy_HeartPyModule_getJSIStatsNative(JNIEnv* env, jclass) {
+    jlongArray arr = env->NewLongArray(2);
+    jlong vals[2];
+    vals[0] = (jlong)g_zero_copy_used.load();
+    vals[1] = (jlong)g_fallback_copy_used.load();
+    env->SetLongArrayRegion(arr, 0, 2, vals);
+    return arr;
 }
 
 static void installBinding(facebook::jsi::Runtime& rt) {
@@ -521,6 +533,7 @@ static void installBinding(facebook::jsi::Runtime& rt) {
                         float* data = reinterpret_cast<float*>(base + byteOffset);
                         hp_rt_push(p, data, len, t0);
                         usedZeroCopy = true;
+                        g_zero_copy_used.fetch_add(1);
                         __android_log_print(ANDROID_LOG_DEBUG, "HeartPyJSI", "rtPush: zero-copy used (len=%zu)", len);
                     }
                 } catch (...) {
@@ -532,6 +545,7 @@ static void installBinding(facebook::jsi::Runtime& rt) {
                 std::vector<float> tmp; tmp.reserve(len);
                 for (size_t i = 0; i < len; ++i) tmp.push_back((float)o.getPropertyAtIndex(rt, (uint32_t)i).asNumber());
                 hp_rt_push(p, tmp.data(), tmp.size(), t0);
+                g_fallback_copy_used.fetch_add(1);
             }
             return Value::undefined();
         }

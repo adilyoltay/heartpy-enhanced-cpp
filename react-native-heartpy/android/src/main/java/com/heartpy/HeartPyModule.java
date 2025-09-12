@@ -101,6 +101,7 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                                                          double highPrecisionFs);
     private static native void installJSIHybrid(long runtimePtr);
     private static native void setZeroCopyEnabledNative(boolean enabled);
+    private static native long[] getJSIStatsNative();
 
     // ---------- Step 0: Risk mitigation flags & profiling ----------
     private static volatile boolean CFG_JSI_ENABLED = true;
@@ -165,6 +166,20 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             Log.e("HeartPyJSI", "HEARTPY_E900: installJSI failed: " + t.getMessage());
             return false;
         }
+    }
+
+    // Debug-only JSI stats: zero-copy vs fallback counts
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableMap getJSIStats() {
+        com.facebook.react.bridge.WritableMap out = com.facebook.react.bridge.Arguments.createMap();
+        try {
+            long[] vals = getJSIStatsNative();
+            out.putDouble("zeroCopyUsed", (double) (vals != null && vals.length > 0 ? vals[0] : 0));
+            out.putDouble("fallbackUsed", (double) (vals != null && vals.length > 1 ? vals[1] : 0));
+        } catch (Throwable t) {
+            out.putString("error", t.getMessage());
+        }
+        return out;
     }
 
     // Single-thread executors per realtime analyzer handle
