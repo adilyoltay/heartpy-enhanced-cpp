@@ -696,10 +696,10 @@ export default function CameraPPGAnalyzer() {
           {isAnalyzing ? (
             <View style={styles.buttonContentRow}>
               <ActivityIndicator size="small" color="#ffffff" />
-              <Text style={[styles.buttonText, styles.buttonTextWithIcon]}>Dur</Text>
+              <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.buttonText, styles.buttonTextWithIcon]}>Dur</Text>
             </View>
           ) : (
-            <Text style={styles.buttonText}>▶️ Başlat</Text>
+            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.buttonText}>▶️ Başlat</Text>
           )}
         </TouchableOpacity>
 
@@ -709,7 +709,7 @@ export default function CameraPPGAnalyzer() {
             setHapticEnabled(!hapticEnabled); 
           }}
         >
-          <Text style={styles.hapticButtonText}>
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
             {hapticEnabled ? '📳 Haptic ON' : '📵 Haptic OFF'}
           </Text>
         </TouchableOpacity>
@@ -721,7 +721,7 @@ export default function CameraPPGAnalyzer() {
           }}
           disabled={isAnalyzing}
         >
-          <Text style={styles.hapticButtonText}>
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
             {`FPS ${targetFps} (tap to ${targetFps === 15 ? 30 : 15})`}
           </Text>
         </TouchableOpacity>
@@ -733,7 +733,7 @@ export default function CameraPPGAnalyzer() {
           }}
           disabled={isAnalyzing}
         >
-          <Text style={styles.hapticButtonText}>
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
             {useNativePPG ? 'PPG: Native ROI' : 'PPG: Off'}
           </Text>
         </TouchableOpacity>
@@ -754,7 +754,7 @@ export default function CameraPPGAnalyzer() {
             onPress={() => setTorchOn(!torchOn)}
             disabled={!isActive}
           >
-            <Text style={styles.hapticButtonText}>
+            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
               {torchOn ? '🔦 Torch ON' : '🔦 Torch OFF'}
             </Text>
           </TouchableOpacity>
@@ -771,7 +771,7 @@ export default function CameraPPGAnalyzer() {
           }}
           disabled={isAnalyzing || !useNativePPG}
         >
-          <Text style={styles.hapticButtonText}>
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
             {`ROI ${roi.toFixed(1)}`}
           </Text>
         </TouchableOpacity>
@@ -786,7 +786,7 @@ export default function CameraPPGAnalyzer() {
           }}
           disabled={isAnalyzing || !useNativePPG}
         >
-          <Text style={styles.hapticButtonText}>
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
             {`CH ${ppgChannel}`}
           </Text>
         </TouchableOpacity>
@@ -801,7 +801,7 @@ export default function CameraPPGAnalyzer() {
           }}
           disabled={isAnalyzing || !useNativePPG}
         >
-          <Text style={styles.hapticButtonText}>
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
             {`MODE ${ppgMode}`}
           </Text>
         </TouchableOpacity>
@@ -816,7 +816,7 @@ export default function CameraPPGAnalyzer() {
           }}
           disabled={isAnalyzing || !useNativePPG}
         >
-          <Text style={styles.hapticButtonText}>
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
             {`GRID ${ppgGrid}`}
           </Text>
         </TouchableOpacity>
@@ -824,11 +824,11 @@ export default function CameraPPGAnalyzer() {
 
       {/* Durum / Ayar Özeti */}
       <View style={styles.infoRow}>
-        <Text style={styles.infoText}>
+        <Text numberOfLines={1} ellipsizeMode="tail" style={styles.infoText}>
           {`Mode: ${ppgMode.toUpperCase()}  •  CH: ${ppgChannel.toUpperCase()}  •  GRID: ${ppgGrid}  •  Torch: ${torchOn ? 'ON' : 'OFF'}  •  Auto: ${autoSelect ? 'ON' : 'OFF'}`}
         </Text>
         <View style={[styles.qualityPill, { backgroundColor: confColor }]}> 
-          <Text style={styles.qualityPillText}>{Math.round(finalConfidence * 100)}%</Text>
+          <Text numberOfLines={1} style={styles.qualityPillText}>{Math.round(finalConfidence * 100)}%</Text>
         </View>
       </View>
 
@@ -843,7 +843,7 @@ export default function CameraPPGAnalyzer() {
           }}
           disabled={isAnalyzing}
         >
-          <Text style={styles.hapticButtonText}>🖐️ Parmak (Torch+Red)</Text>
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>🖐️ Parmak (Torch+Red)</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -855,7 +855,7 @@ export default function CameraPPGAnalyzer() {
           }}
           disabled={isAnalyzing}
         >
-          <Text style={styles.hapticButtonText}>🙂 Yüz (CHROM+Green)</Text>
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>🙂 Yüz (CHROM+Green)</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -863,7 +863,7 @@ export default function CameraPPGAnalyzer() {
           onPress={() => setAutoSelect(!autoSelect)}
           disabled={isAnalyzing}
         >
-          <Text style={styles.hapticButtonText}>{autoSelect ? 'AUTO ON' : 'AUTO OFF'}</Text>
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>{autoSelect ? 'AUTO ON' : 'AUTO OFF'}</Text>
         </TouchableOpacity>
       </View>
 
@@ -970,7 +970,7 @@ const styles = StyleSheet.create({
     color: '#333',
   },
   cameraContainer: {
-    height: 200,
+    height: 150,
     borderRadius: 12,
     overflow: 'hidden',
     marginBottom: 16,
@@ -999,21 +999,25 @@ const styles = StyleSheet.create({
   },
   controlsContainer: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 16,
-    gap: 12,
+    marginBottom: 12,
   },
   button: {
-    padding: 16,
+    height: 48,
+    paddingHorizontal: 12,
     borderRadius: 8,
     alignItems: 'center',
+    justifyContent: 'center',
+    margin: 6,
+    flexBasis: '48%',
   },
   mainButton: {
-    flex: 2,
+    flexBasis: '100%',
   },
   hapticButton: {
-    flex: 1,
-    paddingVertical: 12,
+    paddingVertical: 0,
   },
   startButton: {
     backgroundColor: '#4CAF50',
@@ -1031,6 +1035,8 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 18,
     fontWeight: '600',
+    lineHeight: 22,
+    textAlignVertical: 'center',
   },
   buttonTextWithIcon: {
     marginLeft: 8,
@@ -1042,9 +1048,11 @@ const styles = StyleSheet.create({
   },
   hapticButtonText: {
     color: 'white',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
     textAlign: 'center',
+    lineHeight: 18,
+    textAlignVertical: 'center',
   },
   permissionText: {
     textAlign: 'center',
