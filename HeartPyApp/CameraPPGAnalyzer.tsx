@@ -88,6 +88,7 @@ export default function CameraPPGAnalyzer() {
   const [ppgMode, setPpgMode] = useState<'mean' | 'chrom' | 'pos'>('mean');
   const [ppgGrid, setPpgGrid] = useState<1 | 2 | 3>(1);
   const [pluginConfidence, setPluginConfidence] = useState<number>(0);
+  const [autoSelect, setAutoSelect] = useState(true);
 
   const device = useCameraDevice('back', {
     physicalDevices: ['wide-angle-camera'],
@@ -273,7 +274,7 @@ export default function CameraPPGAnalyzer() {
         
         if (plugin != null && frame != null) {
           try {
-            const v = plugin.call(frame, { roi, channel: ppgChannel, step: 2, mode: ppgMode, grid: ppgGrid }) as number;
+            const v = plugin.call(frame, { roi, channel: ppgChannel, step: 2, mode: ppgMode, grid: ppgGrid, blend: autoSelect ? 'auto' : 'off', torch: !!torchOn }) as number;
             // Native data flow handled in-platform; no per-frame logs
           } catch (pluginError) {
             if (globalFrameCounter.current % 240 === 0) {
@@ -292,7 +293,7 @@ export default function CameraPPGAnalyzer() {
         console.log('Frame processor error:', e);
       }
     }
-  }, [useNativePPG, roi, ppgPlugin, ppgChannel, ppgMode, ppgGrid]);
+  }, [useNativePPG, roi, ppgPlugin, ppgChannel, ppgMode, ppgGrid, autoSelect, torchOn]);
 
   // Native module polling for real PPG data + plugin confidence
   useEffect(() => {
@@ -726,6 +727,16 @@ export default function CameraPPGAnalyzer() {
         >
           <Text style={styles.hapticButtonText}>
             {useNativePPG ? 'PPG: Native ROI' : 'PPG: Off'}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton, autoSelect ? styles.hapticEnabled : styles.hapticDisabled]}
+          onPress={() => setAutoSelect(!autoSelect)}
+          disabled={isAnalyzing}
+        >
+          <Text style={styles.hapticButtonText}>
+            {autoSelect ? 'AUTO ON' : 'AUTO OFF'}
           </Text>
         </TouchableOpacity>
 

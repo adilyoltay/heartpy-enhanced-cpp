@@ -28,6 +28,9 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       val channel = (params?.get("channel") as? String) ?: "green"
       val mode = (params?.get("mode") as? String) ?: "mean" // mean | chrom | pos
       val useCHROM = (mode == "chrom" || mode == "pos")
+      val blend = (params?.get("blend") as? String) ?: "off" // off | auto
+      val autoBlend = (blend == "auto")
+      val torchOnHint = (params?.get("torch") as? Boolean) ?: false
       val gridIn = (params?.get("grid") as? Number)?.toInt() ?: 1
       val grid = gridIn.coerceIn(1, 3)
       val stepIn = (params?.get("step") as? Number)?.toInt() ?: 2
@@ -156,8 +159,8 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       }
 
       // Compute out sample
-      var outVal = resultMean
-      if (mode != "mean" && histCount >= 8) {
+      var chromVal = Double.NaN
+      if (histCount >= 8) {
         val N = histCount
         // CHROM rolling alpha over history
         var meanX = 0.0; var meanYc = 0.0
@@ -225,7 +228,7 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
           s1 + aPos * s2
         }
         val k = 0.5
-        outVal = (128.0 + k * Sc).coerceIn(0.0, 255.0)
+        chromVal = (128.0 + k * Sc).coerceIn(0.0, 255.0)
       }
 
       // Dynamic exposure gating via percentiles of Y history
@@ -245,12 +248,30 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
         expoGate = kotlin.math.min(gDark, gSat)
       }
       val baseConf = if (weightTotal > 0.0) confAccum / weightTotal else 0.0
-      val pluginConf = (0.5 * baseConf + 0.5 * expoGate).coerceIn(0.0, 1.0)
+      val confChrom = (0.5 * baseConf + 0.5 * expoGate).coerceIn(0.0, 1.0)
+      val confMean = expoGate.coerceIn(0.0, 1.0)
+
+      // Default by mode
+      var outVal = if (mode == "mean" || !chromVal.isFinite()) resultMean else chromVal
+      var outConf = if (mode == "mean" || !chromVal.isFinite()) confMean else confChrom
+
+      // Auto crossfade based on confidence and torch hint
+      if (autoBlend && (resultMean.isFinite() || chromVal.isFinite())) {
+        var wTorch = if (torchOnHint) 0.0 else 1.0
+        val wSnr = confChrom
+        var w = (0.7 * wSnr + 0.3 * wTorch).coerceIn(0.0, 1.0)
+        if (!chromVal.isFinite()) w = 0.0
+        if (!resultMean.isFinite()) w = 1.0
+        val mv = if (resultMean.isFinite()) resultMean else 0.0
+        val cv = if (chromVal.isFinite()) chromVal else 0.0
+        outVal = (1.0 - w) * mv + w * cv
+        outConf = (1.0 - w) * confMean + w * confChrom
+      }
 
       if (outVal.isFinite()) {
         try { HeartPyModule.addPPGSample(outVal) } catch (_: Throwable) {}
       }
-      try { HeartPyModule.addPPGSampleConfidence(pluginConf) } catch (_: Throwable) {}
+      try { HeartPyModule.addPPGSampleConfidence(outConf) } catch (_: Throwable) {}
       outVal
     } catch (t: Throwable) {
       java.lang.Double.NaN

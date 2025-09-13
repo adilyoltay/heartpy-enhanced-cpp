@@ -24,6 +24,12 @@
   NSString* mode = [arguments objectForKey:@"mode"];
   if (![mode isKindOfClass:[NSString class]] || mode.length == 0) mode = @"mean";
   BOOL useCHROM = ([mode isEqualToString:@"chrom"] || [mode isEqualToString:@"pos"]);
+  // Blend: "off" | "auto" (auto crossfades mean vs chrom/pos)
+  NSString* blend = [arguments objectForKey:@"blend"];
+  BOOL autoBlend = [blend isKindOfClass:[NSString class]] && [blend isEqualToString:@"auto"];
+  // Torch hint from JS for scenario weighting
+  NSNumber* torchNum = arguments[@"torch"];
+  BOOL torchOnHint = torchNum != nil ? [torchNum boolValue] : NO;
 
   // Grid size for multi-ROI (1..3)
   NSNumber* gridNum = arguments[@"grid"];
@@ -176,9 +182,8 @@
   }
 
   // Compute outSample based on mode using rolling alpha (CHROM) or POS
-  if ([mode isEqualToString:@"mean"]) {
-    outSample = mean;
-  } else if (histCount >= 8) {
+  double chromVal = NAN;
+  if (histCount >= 8) {
     // Build arrays over available window
     int N = histCount;
     // Compute X, Y over window
@@ -256,12 +261,13 @@
       }
       // map to 0..255 around 128
       double k = 0.5; // conservative scale
-      outSample = 128.0 + k * Sc;
-      if (outSample < 0.0) outSample = 0.0; if (outSample > 255.0) outSample = 255.0;
+      chromVal = 128.0 + k * Sc;
+      if (chromVal < 0.0) chromVal = 0.0; if (chromVal > 255.0) chromVal = 255.0;
     }
-  } else {
-    outSample = mean;
   }
+  // Default selection by mode
+  outSample = isfinite(mean) ? mean : chromVal;
+  if (![mode isEqualToString:@"mean"] && isfinite(chromVal)) outSample = chromVal;
 
   // Dynamic exposure gating via Y percentiles
   double expoGate = 1.0;
@@ -293,7 +299,20 @@
     ampConf = fmin(1.0, (/*stdX proxy*/ 1.0) * 0.8);
   }
   double baseConf = (weightTotal > 0.0) ? (confAccum / weightTotal) : 0.0;
-  outConfidence = fmin(1.0, fmax(0.0, 0.5 * baseConf + 0.5 * expoGate));
+  double confChrom = fmin(1.0, fmax(0.0, 0.5 * baseConf + 0.5 * expoGate));
+  double confMean = expoGate;
+  // Auto blend: crossfade mean vs chrom/pos using confidence and torch hint
+  if (autoBlend && (isfinite(chromVal) || isfinite(mean))) {
+    double wTorch = torchOnHint ? 0.0 : 1.0;
+    double wSnr = confChrom;
+    double w = fmin(1.0, fmax(0.0, 0.7 * wSnr + 0.3 * wTorch));
+    if (!isfinite(chromVal)) w = 0.0;
+    if (!isfinite(mean)) w = 1.0;
+    outSample = (1.0 - w) * (isfinite(mean) ? mean : 0.0) + w * (isfinite(chromVal) ? chromVal : 0.0);
+    outConfidence = (1.0 - w) * confMean + w * confChrom;
+  } else {
+    outConfidence = fmin(1.0, fmax(0.0, 0.5 * baseConf + 0.5 * expoGate));
+  }
 
   CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
   if (!isfinite(outSample)) outSample = NAN;
