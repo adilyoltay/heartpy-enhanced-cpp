@@ -75,15 +75,42 @@ interface PPGMetrics {
   snrDb: number;
   rmssd: number;
   sdnn: number;
+  sdsd: number;
   pnn50: number;
+  pnn20?: number;
+  nn20?: number;
+  nn50?: number;
+  mad?: number;
   lfhf: number;
+  vlf?: number;
+  lf?: number;
+  hf?: number;
+  totalPower?: number;
+  lfNorm?: number;
+  hfNorm?: number;
   breathingRate: number;
+  sd1?: number;
+  sd2?: number;
+  sd1sd2Ratio?: number;
+  ellipseArea?: number;
+  f0Hz?: number;
   quality: {
     goodQuality: boolean;
     totalBeats: number;
     rejectedBeats: number;
     rejectionRate: number;
     qualityWarning?: string;
+    doublingFlag?: boolean;
+    softDoublingFlag?: boolean;
+    doublingHintFlag?: boolean;
+    hardFallbackActive?: boolean;
+    rrFallbackModeActive?: boolean;
+    refractoryMsActive?: number;
+    minRRBoundMs?: number;
+    pairFrac?: number;
+    rrShortFrac?: number;
+    rrLongMs?: number;
+    pHalfOverFund?: number;
   };
 }
 
@@ -93,6 +120,7 @@ export default function CameraPPGAnalyzer() {
   const [metrics, setMetrics] = useState<PPGMetrics | null>(null);
   const [frameCount, setFrameCount] = useState(0);
   const [ppgSignal, setPpgSignal] = useState<number[]>([]);
+  const [rawResult, setRawResult] = useState<any | null>(null);
   const [statusMessage, setStatusMessage] = useState('Kamerayı başlatmak için butona basın');
   const [lastBeatCount, setLastBeatCount] = useState(0);
   const [hapticEnabled, setHapticEnabled] = useState(true); // Haptic feedback aktif
@@ -461,6 +489,7 @@ export default function CameraPPGAnalyzer() {
       }
       
       if (result && typeof result === 'object') {
+        try { setRawResult(result as any); } catch {}
         try {
           const newMetrics: PPGMetrics = {
             bpm: typeof result.bpm === 'number' ? result.bpm : 0,
@@ -1086,6 +1115,75 @@ export default function CameraPPGAnalyzer() {
               ({(metrics.quality.rejectionRate * 100).toFixed(0)}%)
             </Text>
           </View>
+
+          {rawResult && (
+            <View style={styles.detailedMetrics}>
+              {/* Sanity BPM via RR */}
+              {rawResult?.rrList?.length > 0 && (
+                <Text style={styles.detailText}>
+                  BPM (RR): {(() => { const rr = rawResult.rrList as number[]; const mean = rr.reduce((a: number,b: number)=>a+b,0)/rr.length; return isFinite(mean)&&mean>1e-6 ? (60000/mean).toFixed(0) : '—'; })()}
+                </Text>
+              )}
+              {/* Time domain extras */}
+              {rawResult?.sdsd != null && (
+                <Text style={styles.detailText}>SDSD: {rawResult.sdsd.toFixed?.(1) ?? rawResult.sdsd}</Text>
+              )}
+              {rawResult?.pnn20 != null && (
+                <Text style={styles.detailText}>pNN20: {(rawResult.pnn20 * 100).toFixed?.(1) ?? rawResult.pnn20}</Text>
+              )}
+              {rawResult?.nn20 != null && (
+                <Text style={styles.detailText}>NN20: {rawResult.nn20.toFixed?.(0) ?? rawResult.nn20}</Text>
+              )}
+              {rawResult?.nn50 != null && (
+                <Text style={styles.detailText}>NN50: {rawResult.nn50.toFixed?.(0) ?? rawResult.nn50}</Text>
+              )}
+              {rawResult?.mad != null && (
+                <Text style={styles.detailText}>MAD: {rawResult.mad.toFixed?.(1) ?? rawResult.mad}</Text>
+              )}
+              {/* Poincaré */}
+              {(rawResult?.sd1 != null || rawResult?.sd2 != null) && (
+                <Text style={styles.detailText}>SD1/SD2: {(rawResult.sd1 ?? 0).toFixed?.(1) ?? rawResult.sd1}/{(rawResult.sd2 ?? 0).toFixed?.(1) ?? rawResult.sd2}</Text>
+              )}
+              {rawResult?.sd1sd2Ratio != null && (
+                <Text style={styles.detailText}>SD1/SD2 Oranı: {rawResult.sd1sd2Ratio.toFixed?.(2) ?? rawResult.sd1sd2Ratio}</Text>
+              )}
+              {rawResult?.ellipseArea != null && (
+                <Text style={styles.detailText}>Elips Alanı: {rawResult.ellipseArea.toFixed?.(1) ?? rawResult.ellipseArea}</Text>
+              )}
+              {/* Frequency domain */}
+              {(rawResult?.vlf != null || rawResult?.lf != null || rawResult?.hf != null) && (
+                <Text style={styles.detailText}>VLF/LF/HF: {(rawResult.vlf ?? 0).toFixed?.(1) ?? rawResult.vlf}/{(rawResult.lf ?? 0).toFixed?.(1) ?? rawResult.lf}/{(rawResult.hf ?? 0).toFixed?.(1) ?? rawResult.hf}</Text>
+              )}
+              {rawResult?.totalPower != null && (
+                <Text style={styles.detailText}>Toplam Güç: {rawResult.totalPower.toFixed?.(1) ?? rawResult.totalPower}</Text>
+              )}
+              {(rawResult?.lfNorm != null || rawResult?.hfNorm != null) && (
+                <Text style={styles.detailText}>LFnorm/HFnorm: {(rawResult.lfNorm ?? 0).toFixed?.(1) ?? rawResult.lfNorm}/{(rawResult.hfNorm ?? 0).toFixed?.(1) ?? rawResult.hfNorm}</Text>
+              )}
+              {/* Quality extras */}
+              {rawResult?.quality?.f0Hz != null && (
+                <Text style={styles.detailText}>Fundamental f0: {rawResult.quality.f0Hz.toFixed?.(2) ?? rawResult.quality.f0Hz} Hz</Text>
+              )}
+              {(rawResult?.quality?.minRRBoundMs != null || rawResult?.quality?.refractoryMsActive != null) && (
+                <Text style={styles.detailText}>Bounds/Refr: minRR {rawResult.quality?.minRRBoundMs ?? '—'} ms • Refr {rawResult.quality?.refractoryMsActive ?? '—'} ms</Text>
+              )}
+              {(rawResult?.quality?.pairFrac != null || rawResult?.quality?.rrShortFrac != null || rawResult?.quality?.rrLongMs != null) && (
+                <Text style={styles.detailText}>Pairs/Short/Long: {rawResult.quality?.pairFrac ?? '—'} / {rawResult.quality?.rrShortFrac ?? '—'} / {rawResult.quality?.rrLongMs ?? '—'} ms</Text>
+              )}
+              {rawResult?.quality?.pHalfOverFund != null && (
+                <Text style={styles.detailText}>P(half/fund): {rawResult.quality.pHalfOverFund}</Text>
+              )}
+              {(rawResult?.quality?.doublingFlag || rawResult?.quality?.softDoublingFlag || rawResult?.quality?.doublingHintFlag) && (
+                <Text style={styles.detailText}>Doubling: {rawResult.quality?.doublingFlag ? 'Hard' : rawResult.quality?.softDoublingFlag ? 'Soft' : 'Hint'}</Text>
+              )}
+              {(rawResult?.quality?.rrFallbackModeActive != null || rawResult?.quality?.hardFallbackActive != null) && (
+                <Text style={styles.detailText}>Fallback: RR {rawResult.quality?.rrFallbackModeActive ? 'On' : 'Off'} - Hard {rawResult.quality?.hardFallbackActive ? 'On' : 'Off'}</Text>
+              )}
+              {(rawResult?.quality?.maPercActive != null) && (
+                <Text style={styles.detailText}>ma% Aktif: {Number(rawResult.quality.maPercActive).toFixed?.(0) ?? rawResult.quality.maPercActive}</Text>
+              )}
+            </View>
+          )}
         </View>
       )}
     </View>

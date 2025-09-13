@@ -4,9 +4,7 @@ module.exports = {
       android: {
         sourceDir: './android',
       },
-      ios: {
-        podspec: './ios/HeartPy.podspec',
-      },
+      ios: {}, // Auto-detect podspec
     },
   },
 };
