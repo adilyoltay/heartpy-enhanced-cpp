@@ -10,15 +10,44 @@ import {
   PermissionsAndroid,
   Platform,
 } from 'react-native';
-import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+// Haptics is optional; load lazily to avoid crash if native module is missing
+let OptionalHaptics: any | null = null;
+function getHaptics(): any | null {
+  if (OptionalHaptics !== null) return OptionalHaptics;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    OptionalHaptics = require('react-native-haptic-feedback');
+  } catch (e) {
+    OptionalHaptics = null;
+    console.warn('react-native-haptic-feedback not available; skipping haptics');
+  }
+  return OptionalHaptics;
+}
 import {
   Camera,
   useCameraDevice,
   useCameraPermission,
   useFrameProcessor,
+  VisionCameraProxy,
 } from 'react-native-vision-camera';
 import { runOnJS } from 'react-native-reanimated';
-import { RealtimeAnalyzer, type HeartPyResult } from 'react-native-heartpy';
+// Load HeartPy lazily to avoid Metro resolving issues with local package links
+type HeartPyExports = {
+  RealtimeAnalyzer: {
+    create: (fs: number, options?: any) => Promise<any>;
+  };
+};
+function getHeartPy(): HeartPyExports | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('react-native-heartpy');
+    return mod as HeartPyExports;
+  } catch (e) {
+    console.warn('react-native-heartpy not available; streaming disabled', e);
+    return null;
+  }
+}
 
 const { width, height } = Dimensions.get('window');
 
@@ -48,21 +77,66 @@ export default function CameraPPGAnalyzer() {
   const [ppgSignal, setPpgSignal] = useState<number[]>([]);
   const [statusMessage, setStatusMessage] = useState('Kamerayı başlatmak için butona basın');
   const [lastBeatCount, setLastBeatCount] = useState(0);
-  const [hapticEnabled, setHapticEnabled] = useState(true);
+  const [hapticEnabled, setHapticEnabled] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+  const [useNativePPG, setUseNativePPG] = useState(true);
+  const [roi, setRoi] = useState(0.4);
 
   const device = useCameraDevice('back', {
     physicalDevices: ['wide-angle-camera'],
   });
   const { hasPermission, requestPermission } = useCameraPermission();
 
-  const analyzerRef = useRef<RealtimeAnalyzer | null>(null);
-  const samplingRate = 30; // 30 FPS kamera
-  const bufferSize = 150; // 5 saniye buffer (30 FPS * 5s)
+  const analyzerRef = useRef<any | null>(null);
+  const [targetFps, setTargetFps] = useState(15); // start low for stabilization
+  const samplingRate = targetFps; // keep analyzer in sync with camera fps
+  const bufferSize = samplingRate * 5; // 5 saniye buffer
   const analysisInterval = 1000; // 1 saniyede bir analiz
   
   const frameBufferRef = useRef<number[]>([]);
   const lastAnalysisTimeRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
+  const torchTimerRef = useRef<any>(null);
+  const torchOnTimeRef = useRef<number | null>(null);
+  const smoothBufRef = useRef<number[]>([]);
+  const ppgPluginRef = React.useRef<any | null>(null);
+  const skipWindowRef = useRef<number[]>([]); // 1 = skipped, 0 = accepted
+  const brightWindowRef = useRef<number[]>([]); // recent brightness samples
+  const [badExposure, setBadExposure] = useState(false);
+  const [badExposureReason, setBadExposureReason] = useState<'dark' | 'saturated' | null>(null);
+
+  // Initialize native ROI plugin (respect current ROI)
+  useEffect(() => {
+    try {
+      ppgPluginRef.current = VisionCameraProxy.initFrameProcessorPlugin('ppgMean', { roi });
+      console.log('ppgMean plugin initialized:', !!ppgPluginRef.current);
+    } catch (e) {
+      console.warn('ppgMean plugin init failed:', e);
+      ppgPluginRef.current = null;
+    }
+  }, [roi]);
+
+  // Load persisted settings on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const [m, f, r, h] = await Promise.all([
+          AsyncStorage.getItem('ppg.mode'),
+          AsyncStorage.getItem('ppg.fps'),
+          AsyncStorage.getItem('ppg.roi'),
+          AsyncStorage.getItem('ppg.haptics'),
+        ]);
+        if (m === 'native' || m === 'sim') setUseNativePPG(m === 'native');
+        const fi = parseInt(f ?? '', 10);
+        if (fi === 15 || fi === 30) setTargetFps(fi);
+        const rv = parseFloat(r ?? '');
+        if (!Number.isNaN(rv) && rv >= 0.2 && rv <= 0.6) setRoi(rv);
+        if (h === 'true' || h === 'false') setHapticEnabled(h === 'true');
+      } catch (e) {
+        console.warn('Settings load failed:', e);
+      }
+    })();
+  }, []);
 
   // Haptic feedback configuration
   const hapticOptions = {
@@ -75,16 +149,23 @@ export default function CameraPPGAnalyzer() {
     if (!hapticEnabled) return;
     
     try {
+      const Haptics = getHaptics();
+      if (!Haptics) return;
       // Use different haptic patterns for iOS and Android
       if (Platform.OS === 'ios') {
-        ReactNativeHapticFeedback.trigger('impactLight', hapticOptions);
+        Haptics.trigger('impactLight', hapticOptions);
       } else {
-        ReactNativeHapticFeedback.trigger('impactMedium', hapticOptions);
+        Haptics.trigger('impactMedium', hapticOptions);
       }
     } catch (error) {
       console.warn('Haptic feedback error:', error);
     }
   }, [hapticEnabled]);
+
+  // Stable JS handler for frame processor errors (avoid inline runOnJS closures)
+  const onFrameError = useCallback((message: string) => {
+    console.warn(message);
+  }, []);
 
   // İzin kontrolü
   useEffect(() => {
@@ -94,16 +175,11 @@ export default function CameraPPGAnalyzer() {
   const requestCameraPermission = async () => {
     if (Platform.OS === 'android') {
       try {
-        const granted = await PermissionsAndroid.requestMultiple([
-          PermissionsAndroid.PERMISSIONS.CAMERA,
-          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-        ]);
-        
-        if (
-          granted['android.permission.CAMERA'] === PermissionsAndroid.RESULTS.GRANTED &&
-          granted['android.permission.RECORD_AUDIO'] === PermissionsAndroid.RESULTS.GRANTED
-        ) {
-          console.log('Android permissions granted');
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.CAMERA
+        );
+        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+          console.log('Android camera permission granted');
         } else {
           Alert.alert('İzin Gerekli', 'Kamera izni gereklidir');
         }
@@ -120,59 +196,145 @@ export default function CameraPPGAnalyzer() {
     }
   };
 
-  // PPG sinyali çıkarma fonksiyonu
-  const extractPPGFromFrame = (frame: any): number => {
-    // Bu basit bir implementasyon - gerçek PPG çıkarma daha karmaşık
-    // Kameradan gelen RGB değerlerinin yeşil kanalını kullanıyoruz
-    // Çünkü yeşil ışık kan akımını en iyi tespit eder
-    
-    // Frame'den RGB değerlerini çıkarma simülasyonu
-    // Gerçek implementasyon frame buffer'ından pikselleri okuyacak
-    const timestamp = Date.now();
-    const heartRateBase = 1.2; // 72 BPM base
-    
-    // Simüle edilmiş PPG sinyali (gerçek implementasyon için frame processing gerekir)
-    const t = (timestamp - startTimeRef.current) / 1000;
-    const signal = Math.sin(2 * Math.PI * heartRateBase * t) +
-                   0.3 * Math.sin(2 * Math.PI * heartRateBase * 2 * t) + // harmonik
-                   0.1 * Math.sin(2 * Math.PI * 0.3 * t) + // nefes alma
-                   0.05 * (Math.random() - 0.5); // gürültü
-    
-    return signal + 512; // DC offset ekle
-  };
+  // Frame tick handler: simulate PPG on JS side, keep buffer & trigger analysis
+  const onFrameTick = useCallback((timestamp: number) => {
+    setFrameCount(prev => prev + 1);
+
+    // Simulate PPG signal (remove once real extractor is stable)
+    const nowSec = Date.now() / 1000;
+    const hrHz = 1.2; // ~72 BPM
+    const sample =
+      512 +
+      8 * Math.sin(2 * Math.PI * hrHz * nowSec) +
+      2 * Math.sin(2 * Math.PI * hrHz * 2 * nowSec) +
+      0.5 * Math.sin(2 * Math.PI * 0.25 * nowSec) +
+      (Math.random() - 0.5) * 0.5;
+
+    frameBufferRef.current.push(sample);
+    if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
+
+    setPpgSignal(prev => {
+      const next = [...prev, sample];
+      if (next.length > 100) next.shift();
+      return next;
+    });
+
+    const now = Date.now();
+    if (now - lastAnalysisTimeRef.current > analysisInterval && frameBufferRef.current.length >= samplingRate * 3) {
+      lastAnalysisTimeRef.current = now;
+      performRealtimeAnalysis();
+    }
+  }, [analysisInterval]);
+
+  // Real sample handler from native plugin
+  const onFrameSample = useCallback((timestamp: number, sample: number) => {
+    // Update brightness window
+    const bw = brightWindowRef.current;
+    bw.push(sample);
+    if (bw.length > 30) bw.shift(); // last ~2s at 15 FPS
+
+    // Determine skip decision
+    let skip = false;
+    if (!Number.isFinite(sample)) skip = true;
+    if (sample < 15 || sample > 240) skip = true; // too dark/bright
+
+    // Outlier guard vs recent smoothed history
+    const recent = smoothBufRef.current;
+    if (!skip && recent.length >= 3) {
+      const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+      const varc = recent.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / recent.length;
+      const std = Math.sqrt(varc);
+      if (std > 0 && Math.abs(sample - mean) > 3 * std) skip = true;
+    }
+
+    // Update skip window (1 skipped, 0 accepted)
+    const sw = skipWindowRef.current;
+    sw.push(skip ? 1 : 0);
+    if (sw.length > 30) sw.shift();
+
+    if (skip) return;
+
+    // Smoothing: simple moving average over last N values (including this one)
+    const N = 5; // ~150–250 ms at 15–30 FPS
+    const nextRecent = [...recent, sample];
+    if (nextRecent.length > N) nextRecent.shift();
+    smoothBufRef.current = nextRecent;
+    const smoothed = nextRecent.reduce((a, b) => a + b, 0) / nextRecent.length;
+
+    setFrameCount(prev => prev + 1);
+    frameBufferRef.current.push(smoothed);
+    if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
+    setPpgSignal(prev => {
+      const next = [...prev, smoothed];
+      if (next.length > 100) next.shift();
+      return next;
+    });
+    const now = Date.now();
+    // Delay analysis start for 500ms after torch turns on (exposure settle)
+    if (useNativePPG) {
+      if (!torchOnTimeRef.current || now - torchOnTimeRef.current < 500) return;
+    }
+    if (now - lastAnalysisTimeRef.current > analysisInterval && frameBufferRef.current.length >= samplingRate * 3) {
+      lastAnalysisTimeRef.current = now;
+      performRealtimeAnalysis();
+    }
+  }, [analysisInterval, samplingRate, useNativePPG]);
 
   // Frame işleme
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
-    
-    const ppgValue = extractPPGFromFrame(frame);
-    
-    runOnJS((value: number, frameNum: number) => {
-      // Frame buffer'ına ekle
-      frameBufferRef.current.push(value);
-      
-      // Buffer boyutunu kontrol et
-      if (frameBufferRef.current.length > bufferSize) {
-        frameBufferRef.current.shift();
+    try {
+      const ts = (frame as any)?.timestamp ?? 0;
+      if (useNativePPG) {
+        const plugin = (ppgPluginRef as any)?.current;
+        // Call native plugin for ROI mean intensity
+        const v = plugin?.call?.(frame, { roi });
+        const sample = typeof v === 'number' ? v : 0;
+        runOnJS(onFrameSample)(ts, sample);
+      } else {
+        // Notify JS to simulate/handle buffering
+        runOnJS(onFrameTick)(ts);
       }
-      
-      // PPG sinyalini güncelle (gösterim için)
-      setPpgSignal(prev => {
-        const newSignal = [...prev, value];
-        if (newSignal.length > 100) newSignal.shift(); // Son 100 değeri göster
-        return newSignal;
-      });
-      
-      setFrameCount(frameNum);
-      
-      // Analiz zamanı geldi mi?
-      const now = Date.now();
-      if (now - lastAnalysisTimeRef.current > analysisInterval && 
-          frameBufferRef.current.length >= 90) { // En az 3 saniye veri
-        lastAnalysisTimeRef.current = now;
-        performRealtimeAnalysis();
+    } catch (error) {
+      // Only pass simple data across the bridge
+      // Avoid sending full error objects from worklet → JS
+      const msg = `Frame processor error: ${error}`;
+      runOnJS(onFrameError)(msg);
+    }
+  }, [onFrameTick, onFrameSample, useNativePPG, roi]);
+
+  // Derive bad exposure badge at 2 Hz
+  useEffect(() => {
+    const id = setInterval(() => {
+      const sw = skipWindowRef.current;
+      const bw = brightWindowRef.current;
+      const n = sw.length;
+      if (n === 0) {
+        setBadExposure(false);
+        setBadExposureReason(null);
+        return;
       }
-    })(ppgValue, frame.pixelFormat.length);
+      const skipRate = sw.reduce((a, b) => a + b, 0) / n;
+      // Check last 5 brightness samples for saturation/darkness trend
+      const lastK = bw.slice(-5);
+      let darkCount = 0;
+      let satCount = 0;
+      for (const v of lastK) {
+        if (!Number.isFinite(v)) continue;
+        if (v < 15) darkCount++;
+        if (v > 240) satCount++;
+      }
+      const flag = skipRate > 0.3 || darkCount >= 5 || satCount >= 5;
+      setBadExposure(flag);
+      if (!flag) {
+        setBadExposureReason(null);
+      } else {
+        if (satCount >= darkCount && satCount >= 3) setBadExposureReason('saturated');
+        else if (darkCount >= 3) setBadExposureReason('dark');
+        else setBadExposureReason(null);
+      }
+    }, 500);
+    return () => clearInterval(id);
   }, []);
 
   // Real-time analiz
@@ -180,8 +342,9 @@ export default function CameraPPGAnalyzer() {
     if (!analyzerRef.current || frameBufferRef.current.length < 60) return;
 
     try {
-      // Son n sample'ı al
-      const samples = frameBufferRef.current.slice(-90); // Son 3 saniye
+      // Son n sample'ı al (3 saniye)
+      const samplesNeeded = samplingRate * 3;
+      const samples = frameBufferRef.current.slice(-samplesNeeded);
       const samplesArray = new Float32Array(samples);
       
       // Streaming analyzer'a gönder
@@ -238,9 +401,14 @@ export default function CameraPPGAnalyzer() {
       // Durdur
       setIsAnalyzing(false);
       setIsActive(false);
+      setTorchOn(false);
       if (analyzerRef.current) {
         await analyzerRef.current.destroy();
         analyzerRef.current = null;
+      }
+      if (torchTimerRef.current) {
+        clearTimeout(torchTimerRef.current);
+        torchTimerRef.current = null;
       }
       frameBufferRef.current = [];
       setMetrics(null);
@@ -257,9 +425,22 @@ export default function CameraPPGAnalyzer() {
         setLastBeatCount(0);
         setFrameCount(0);
         setPpgSignal([]);
+        setTorchOn(false);
         
         // RealtimeAnalyzer oluştur
-        analyzerRef.current = await RealtimeAnalyzer.create(samplingRate, {
+        console.log('Getting HeartPy module...');
+        const HP = getHeartPy();
+        console.log('HeartPy module:', !!HP);
+        if (!HP) throw new Error('HeartPy JS wrapper not available');
+        
+        console.log('RealtimeAnalyzer available:', !!HP.RealtimeAnalyzer);
+        console.log('create function available:', !!HP.RealtimeAnalyzer?.create);
+        
+        console.log('Creating analyzer with samplingRate:', samplingRate);
+        
+        // Test simple creation first
+        console.log('Testing simple analyzer creation...');
+        analyzerRef.current = await HP.RealtimeAnalyzer.create(samplingRate, {
           bandpass: { lowHz: 0.5, highHz: 4.0, order: 2 },
           welch: { nfft: 512, overlap: 0.5 },
           peak: { 
@@ -273,16 +454,26 @@ export default function CameraPPGAnalyzer() {
             cleanMethod: 'quotient-filter',
           },
         });
+        console.log('Analyzer created successfully:', !!analyzerRef.current);
         
+        console.log('HeartPy module test completed successfully!');
+        
+        // Kamerayı aktif et
+        console.log('Setting camera active...');
         setIsActive(true);
+        console.log('Camera activated, setting status message...');
         setStatusMessage('📱 Parmağınızı kameranın flaş ışığına hafifçe yerleştirin');
-        
-        console.log('PPG Analysis started with 30 FPS sampling');
+
+        console.log(`PPG Analysis started with ${targetFps} FPS sampling via frameProcessor`);
       } catch (error) {
         console.error('Start analysis error:', error);
+        try { console.error('Error type:', typeof error); } catch {}
+        // Avoid accessing non-standard properties on unknown error
+        try { console.error('Error string:', String(error)); } catch {}
         setIsAnalyzing(false);
+        setIsActive(false); // Kamerayı da kapat
         setStatusMessage('❌ Başlatma hatası');
-        Alert.alert('Hata', 'Analiz başlatılamadı: ' + String(error));
+        // Avoid UI blocking alert during start
       }
     }
   };
@@ -293,10 +484,21 @@ export default function CameraPPGAnalyzer() {
       if (analyzerRef.current) {
         analyzerRef.current.destroy();
       }
+      if (torchTimerRef.current) {
+        clearTimeout(torchTimerRef.current);
+        torchTimerRef.current = null;
+      }
     };
   }, []);
 
+  // Debug info
+  useEffect(() => {
+    console.log('Camera permission status:', hasPermission);
+    console.log('Camera device available:', !!device);
+  }, [hasPermission, device]);
+  
   if (!hasPermission) {
+    console.log('Camera permission denied, showing permission screen');
     return (
       <View style={styles.container}>
         <Text style={styles.permissionText}>Kamera izni gerekiyor</Text>
@@ -326,8 +528,33 @@ export default function CameraPPGAnalyzer() {
           device={device}
           isActive={isActive}
           frameProcessor={isActive ? frameProcessor : undefined}
-          torch={isActive ? 'on' : 'off'} // Flaşı aç PPG için
+          fps={targetFps}
+          torch={device?.hasTorch && torchOn ? 'on' : 'off'} // Torch enabled after init delay
+          onError={(error) => {
+            console.error('Camera error:', error);
+            console.error('Camera error code:', error.code);
+            console.error('Camera error message:', error.message);
+            // Avoid blocking alerts during camera runtime
+            setIsActive(false);
+            setIsAnalyzing(false);
+            setStatusMessage('❌ Kamera hatası: ' + error.message);
+          }}
+          onInitialized={() => {
+            // Delay torch enable to avoid crash on some devices
+            if (torchTimerRef.current) clearTimeout(torchTimerRef.current);
+            torchTimerRef.current = setTimeout(() => {
+              if (isActive) setTorchOn(true);
+              try { torchOnTimeRef.current = Date.now(); } catch {}
+            }, 300);
+          }}
         />
+        {isActive && badExposure && (
+          <View style={styles.badBadge}>
+            <Text style={styles.badBadgeText}>
+              {badExposureReason === 'dark' ? 'Too dark' : badExposureReason === 'saturated' ? 'Saturated' : 'Bad exposure'}
+            </Text>
+          </View>
+        )}
         {!isActive && (
           <View style={styles.cameraOverlay}>
             <Text style={styles.overlayText}>Kamera Hazır</Text>
@@ -357,10 +584,58 @@ export default function CameraPPGAnalyzer() {
 
         <TouchableOpacity 
           style={[styles.button, styles.hapticButton, hapticEnabled ? styles.hapticEnabled : styles.hapticDisabled]} 
-          onPress={() => setHapticEnabled(!hapticEnabled)}
+          onPress={async () => { 
+            const next = !hapticEnabled; 
+            setHapticEnabled(next); 
+            try { await AsyncStorage.setItem('ppg.haptics', String(next)); } catch {}
+          }}
         >
           <Text style={styles.hapticButtonText}>
             {hapticEnabled ? '📳 Haptic ON' : '📵 Haptic OFF'}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton]}
+          onPress={async () => {
+            const next = targetFps === 15 ? 30 : 15;
+            setTargetFps(next);
+            try { await AsyncStorage.setItem('ppg.fps', String(next)); } catch {}
+          }}
+          disabled={isAnalyzing}
+        >
+          <Text style={styles.hapticButtonText}>
+            {`FPS ${targetFps} (tap to ${targetFps === 15 ? 30 : 15})`}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton, useNativePPG ? styles.hapticEnabled : styles.hapticDisabled]}
+          onPress={async () => {
+            const next = !useNativePPG;
+            setUseNativePPG(next);
+            try { await AsyncStorage.setItem('ppg.mode', next ? 'native' : 'sim'); } catch {}
+          }}
+          disabled={isAnalyzing}
+        >
+          <Text style={styles.hapticButtonText}>
+            {useNativePPG ? 'PPG: Native ROI' : 'PPG: Simulated'}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton]}
+          onPress={async () => {
+            const steps = [0.2, 0.3, 0.4, 0.5, 0.6];
+            const idx = steps.indexOf(Number(roi.toFixed(1)));
+            const next = steps[(idx + 1) % steps.length];
+            setRoi(next);
+            try { await AsyncStorage.setItem('ppg.roi', String(next)); } catch {}
+          }}
+          disabled={isAnalyzing || !useNativePPG}
+        >
+          <Text style={styles.hapticButtonText}>
+            {`ROI ${roi.toFixed(1)}`}
           </Text>
         </TouchableOpacity>
       </View>
@@ -561,5 +836,19 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#333',
     marginBottom: 4,
+  },
+  badBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    backgroundColor: '#FB8C00',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  badBadgeText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

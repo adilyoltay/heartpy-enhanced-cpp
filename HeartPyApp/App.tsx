@@ -31,7 +31,7 @@ import CameraPPGAnalyzer from './CameraPPGAnalyzer';
 
 // Global JSI binding declaration
 declare global {
-  var __HeartPyAnalyze: (signal: number[], fs: number, options?: any) => any;
+  var __HeartPyAnalyze: ((signal: number[], fs: number, options?: any) => any) | undefined;
 }
 
 type SectionProps = PropsWithChildren<{
@@ -76,21 +76,26 @@ function App(): React.JSX.Element {
     try {
       console.log('Available NativeModules:', Object.keys(NativeModules));
       console.log('HeartPyModule:', NativeModules.HeartPyModule);
-      
-      // Initialize JSI binding first
-      if (NativeModules.HeartPyModule && NativeModules.HeartPyModule.installJSI) {
-        console.log('Installing HeartPy JSI binding...');
-        const installed = NativeModules.HeartPyModule.installJSI();
-        console.log('JSI installation result:', installed);
-        
-        if (installed && global.__HeartPyAnalyze) {
-          console.log('JSI binding installed successfully!');
-        } else {
-          console.warn('JSI binding installation failed');
-          return;
+      console.log('Installing HeartPy JSI binding...');
+      let installed = false;
+      try {
+        // Prefer the library wrapper if resolvable
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const heartpy = require('react-native-heartpy');
+        if (heartpy && typeof heartpy.installJSI === 'function') {
+          installed = !!heartpy.installJSI();
         }
+      } catch (e) {
+        console.warn('react-native-heartpy JS wrapper unavailable, falling back to NativeModules', e);
+      }
+      if (!installed && NativeModules.HeartPyModule?.installJSI) {
+        try { installed = !!NativeModules.HeartPyModule.installJSI(); } catch {}
+      }
+      console.log('JSI installation result (boolean):', installed);
+      if (installed && global.__HeartPyAnalyze) {
+        console.log('JSI binding installed successfully!');
       } else {
-        console.warn('HeartPyModule or installJSI method not available');
+        console.warn('JSI binding installation failed');
         return;
       }
       
