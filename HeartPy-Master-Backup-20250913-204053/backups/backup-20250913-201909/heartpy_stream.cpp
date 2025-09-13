@@ -1341,12 +1341,6 @@ void  hp_rt_push(void* h, const float* x, size_t n, double t0) {
     S->p->push(x, n, t0); // push() clamps batch size internally
 }
 
-void  hp_rt_push_ts(void* h, const float* x, const double* ts, size_t n) {
-    if (!h || !x || !ts || n == 0) return;
-    auto* S = reinterpret_cast<_hp_rt_handle*>(h);
-    S->p->push(x, ts, n);
-}
-
 int   hp_rt_poll(void* h, heartpy::HeartMetrics* out) {
     if (!h || !out) return 0; auto* S = reinterpret_cast<_hp_rt_handle*>(h); return S->p->poll(*out) ? 1 : 0;
 }

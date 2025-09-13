@@ -3,10 +3,6 @@
 #include <vector>
 #include <functional>
 
-#ifdef USE_KISSFFT
-#include "kissfft/kiss_fftr.h"
-#endif
-
 namespace heartpy {
 
 // Enhanced Options structure with all Python HeartPy features

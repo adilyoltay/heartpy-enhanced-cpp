@@ -20,7 +20,8 @@ function getHaptics(): any | null {
   if (OptionalHaptics !== null) return OptionalHaptics;
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    OptionalHaptics = require('react-native-haptic-feedback');
+    const mod = require('react-native-haptic-feedback');
+    OptionalHaptics = mod && (mod.default ? mod.default : mod);
   } catch (e) {
     OptionalHaptics = null;
     console.warn('react-native-haptic-feedback not available; skipping haptics');
@@ -204,7 +205,8 @@ export default function CameraPPGAnalyzer() {
   // Haptic feedback configuration
   const hapticOptions = {
     enableVibrateFallback: true,
-    ignoreAndroidSystemSettings: false,
+    // Force haptic even if system toggle is off (Android)
+    ignoreAndroidSystemSettings: true,
   };
 
   // Trigger haptic feedback for each heartbeat
@@ -353,7 +355,7 @@ export default function CameraPPGAnalyzer() {
     const pollingInterval = setInterval(async () => {
       try {
         const [pack, conf] = await Promise.all([
-          NativeModules.HeartPyModule?.getLatestPPGSamplesTs?.?.() ?? NativeModules.HeartPyModule?.getLatestPPGSamples?.(),
+          NativeModules.HeartPyModule?.getLatestPPGSamplesTs?.() ?? NativeModules.HeartPyModule?.getLatestPPGSamples?.(),
           NativeModules.HeartPyModule?.getLastPPGConfidence?.(),
         ]);
         if (typeof conf === 'number' && isFinite(conf)) setPluginConfidence(conf);
@@ -476,7 +478,7 @@ export default function CameraPPGAnalyzer() {
           
         // Check for new beats and trigger haptic feedback
         const currentBeatCount = newMetrics.quality.totalBeats;
-        if (currentBeatCount > lastBeatCount && lastBeatCount > 0) {
+        if (currentBeatCount > lastBeatCount) {
           // New beat detected! Trigger haptic feedback
           const newBeats = currentBeatCount - lastBeatCount;
           console.log(`💓 ${newBeats} new beat(s) detected! Total: ${currentBeatCount}`);
