@@ -87,6 +87,18 @@ export default function CameraPPGAnalyzer() {
   });
   const { hasPermission, requestPermission } = useCameraPermission();
 
+  // Debug camera state (logs only; avoid alerts on UI)
+  useEffect(() => {
+    try {
+      console.log('🔍 Camera Debug Info:', {
+        hasPermission,
+        deviceAvailable: !!device,
+        deviceId: device?.id,
+        deviceName: device?.name,
+      });
+    } catch {}
+  }, [hasPermission, device]);
+
   const analyzerRef = useRef<any | null>(null);
   const [targetFps, setTargetFps] = useState(15); // start low for stabilization
   const samplingRate = targetFps; // keep analyzer in sync with camera fps
@@ -104,9 +116,24 @@ export default function CameraPPGAnalyzer() {
   const brightWindowRef = useRef<number[]>([]); // recent brightness samples
   const [badExposure, setBadExposure] = useState(false);
   const [badExposureReason, setBadExposureReason] = useState<'dark' | 'saturated' | null>(null);
+  const warnedJSIFallbackRef = useRef(false);
 
-  // (iOS stability) Do NOT initialize plugins on JS thread.
-  // Plugins are initialized inside the worklet to avoid invalid handles.
+  // VisionCamera frame processor plugin initialized on JS thread
+  const ppgPluginRef = useRef<any>(null);
+  useEffect(() => {
+    if (useNativePPG) {
+      try {
+        console.log('🟢 Initializing ppgMean plugin on JS thread...');
+        ppgPluginRef.current = VisionCameraProxy.initFrameProcessorPlugin('ppgMean', {});
+        console.log('🟢 ppgMean plugin initialized successfully:', !!ppgPluginRef.current);
+      } catch (e) {
+        console.error('🔴 ppgMean plugin init failed:', e);
+        ppgPluginRef.current = null;
+      }
+    } else {
+      ppgPluginRef.current = null;
+    }
+  }, [useNativePPG]);
 
   // Load persisted settings on mount
   // Settings are now handled in-memory only (no AsyncStorage dependency)
@@ -268,14 +295,8 @@ export default function CameraPPGAnalyzer() {
     try {
       const ts = (frame as any)?.timestamp ?? 0;
       if (useNativePPG) {
-        // Initialize plugin inside worklet (once), then call per frame
-        // @ts-ignore
-        if (!(globalThis as any).__ppg) {
-          // @ts-ignore
-          (globalThis as any).__ppg = VisionCameraProxy.initFrameProcessorPlugin('ppgMean', {});
-        }
-        // @ts-ignore
-        const plugin = (globalThis as any).__ppg;
+        // Use plugin initialized on JS thread
+        const plugin = ppgPluginRef.current;
         if (plugin != null) {
           const v = plugin.call(frame, { roi, channel: 'red', step: 2 }) as number;
           runOnJS(onFrameSample)(ts, v);
@@ -290,9 +311,11 @@ export default function CameraPPGAnalyzer() {
       // Only pass simple data across the bridge
       // Avoid sending full error objects from worklet → JS
       const msg = `Frame processor error: ${error}`;
+      // Log on JS thread without constructing closures in worklet
+      runOnJS(console.error)('🔴 Frame processor crash:', msg);
       runOnJS(onFrameError)(msg);
     }
-  }, [onFrameTick, onFrameSample, useNativePPG, roi]);
+  }, [onFrameTick, onFrameSample, useNativePPG, roi, ppgPluginRef]);
 
   // Derive bad exposure badge at 2 Hz
   useEffect(() => {
@@ -388,6 +411,7 @@ export default function CameraPPGAnalyzer() {
 
   // Analizi başlat/durdur
   const toggleAnalysis = async () => {
+    console.log('🔵 toggleAnalysis called, isAnalyzing:', isAnalyzing);
     if (isAnalyzing) {
       // Durdur
       setIsAnalyzing(false);
@@ -410,7 +434,9 @@ export default function CameraPPGAnalyzer() {
       setStatusMessage('Analiz durduruldu');
     } else {
       // Başlat
+      console.log('🟢 Starting analysis...');
       try {
+        console.log('🟢 Setting isAnalyzing to true');
         setIsAnalyzing(true);
         setStatusMessage('Analiz başlatılıyor...');
         startTimeRef.current = Date.now();
@@ -419,19 +445,20 @@ export default function CameraPPGAnalyzer() {
         setPpgSignal([]);
         setTorchOn(false);
         
-        // RealtimeAnalyzer oluştur
-        console.log('Getting HeartPy module...');
+        // RealtimeAnalyzer oluştur (library already falls back to NativeModule if JSI is unavailable)
+        console.log('🟢 Getting HeartPy module...');
         const HP = getHeartPy();
-        console.log('HeartPy module:', !!HP);
-        if (!HP) throw new Error('HeartPy JS wrapper not available');
-        
-        console.log('RealtimeAnalyzer available:', !!HP.RealtimeAnalyzer);
-        console.log('create function available:', !!HP.RealtimeAnalyzer?.create);
-        
+        console.log('🟢 HeartPy module available:', !!HP);
+        if (!HP?.RealtimeAnalyzer?.create) throw new Error('HeartPy RealtimeAnalyzer not available');
         console.log('Creating analyzer with samplingRate:', samplingRate);
-        
-        // Test simple creation first
-        console.log('Testing simple analyzer creation...');
+        // One-time warning if JSI is unavailable (fallback to NativeModule)
+        try {
+          const g: any = global as any;
+          if (!warnedJSIFallbackRef.current && !(g && typeof g.__hpRtCreate === 'function')) {
+            console.warn('HeartPy JSI not available; using NativeModule for streaming');
+            warnedJSIFallbackRef.current = true;
+          }
+        } catch {}
         analyzerRef.current = await HP.RealtimeAnalyzer.create(samplingRate, {
           bandpass: { lowHz: 0.5, highHz: 4.0, order: 2 },
           welch: { nfft: 512, overlap: 0.5 },
@@ -447,15 +474,10 @@ export default function CameraPPGAnalyzer() {
           },
         });
         console.log('Analyzer created successfully:', !!analyzerRef.current);
-        
-        console.log('HeartPy module test completed successfully!');
-        
         // Kamerayı aktif et
-        console.log('Setting camera active...');
+        console.log('🟢 Setting camera active...');
         setIsActive(true);
-        console.log('Camera activated, setting status message...');
-        setStatusMessage('📱 Parmağınızı kameranın flaş ışığına hafifçe yerleştirin');
-
+        setStatusMessage('Analiz başlatıldı');
         console.log(`PPG Analysis started with ${targetFps} FPS sampling via frameProcessor`);
       } catch (error) {
         console.error('Start analysis error:', error);
@@ -465,7 +487,6 @@ export default function CameraPPGAnalyzer() {
         setIsAnalyzing(false);
         setIsActive(false); // Kamerayı da kapat
         setStatusMessage('❌ Başlatma hatası');
-        // Avoid UI blocking alert during start
       }
     }
   };
@@ -523,25 +544,30 @@ export default function CameraPPGAnalyzer() {
           frameProcessor={isActive ? frameProcessor : undefined}
           {...(Platform.OS === 'android' ? { fps: targetFps } : {})}
           torch={device?.hasTorch && torchOn ? 'on' : 'off'} // Torch enabled after init delay
-          onError={(error) => {
-            console.error('Camera error:', error);
-            console.error('Camera error code:', error.code);
-            console.error('Camera error message:', error.message);
-            // Avoid blocking alerts during camera runtime
-            setIsActive(false);
-            setIsAnalyzing(false);
-            setStatusMessage('❌ Kamera hatası: ' + error.message);
-          }}
-          onInitialized={() => {
-        // Delay torch enable (Android only). On iOS, gate by processed frames in onFrameSample.
-        if (Platform.OS === 'android') {
-          if (torchTimerRef.current) clearTimeout(torchTimerRef.current);
-          torchTimerRef.current = setTimeout(() => {
-            if (isActive) setTorchOn(true);
-            try { torchOnTimeRef.current = Date.now(); } catch {}
-          }, 300);
-        }
-          }}
+            onError={(error) => {
+              console.error('🔴 Camera error:', error);
+              console.error('🔴 Camera error code:', error.code);
+              console.error('🔴 Camera error message:', error.message);
+              console.error('🔴 Camera error cause:', error.cause);
+              // Avoid blocking alerts during camera runtime
+              setIsActive(false);
+              setIsAnalyzing(false);
+              setStatusMessage('❌ Kamera hatası: ' + error.message);
+            }}
+            onInitialized={() => {
+              console.log('🟢 Camera initialized successfully');
+              // Delay torch enable (Android only). On iOS, gate by processed frames in onFrameSample.
+              if (Platform.OS === 'android') {
+                console.log('🟢 Setting up torch timer for Android');
+                if (torchTimerRef.current) clearTimeout(torchTimerRef.current);
+                torchTimerRef.current = setTimeout(() => {
+                  if (isActive) setTorchOn(true);
+                  try { torchOnTimeRef.current = Date.now(); } catch {}
+                }, 300);
+              } else {
+                console.log('🟢 iOS: Torch will be enabled after frame processing starts');
+              }
+            }}
         />
         {isActive && badExposure && (
           <View style={styles.badBadge}>
@@ -566,15 +592,14 @@ export default function CameraPPGAnalyzer() {
           onPress={toggleAnalysis}
           disabled={!device}
         >
-          <Text style={styles.buttonText}>
-            {isAnalyzing ? (
-              <>
-                <ActivityIndicator size="small" color="white" /> Dur
-              </>
-            ) : (
-              '▶️ Başlat'
-            )}
-          </Text>
+          {isAnalyzing ? (
+            <View style={styles.buttonContentRow}>
+              <ActivityIndicator size="small" color="#ffffff" />
+              <Text style={[styles.buttonText, styles.buttonTextWithIcon]}>Dur</Text>
+            </View>
+          ) : (
+            <Text style={styles.buttonText}>▶️ Başlat</Text>
+          )}
         </TouchableOpacity>
 
         <TouchableOpacity 
@@ -754,6 +779,14 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 18,
     fontWeight: '600',
+  },
+  buttonTextWithIcon: {
+    marginLeft: 8,
+  },
+  buttonContentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   hapticButtonText: {
     color: 'white',
