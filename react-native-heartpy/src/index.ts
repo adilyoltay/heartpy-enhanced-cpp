@@ -316,6 +316,22 @@ export async function rtDestroy(handle: number): Promise<void> {
     return Native.rtDestroy(handle);
 }
 
+// Timestamped push (NativeModules path)
+export async function rtPushTs(handle: number, samples: number[] | Float32Array, timestamps: number[] | Float64Array): Promise<void> {
+    const { NativeModules } = require('react-native');
+    const Native: any = NativeModules?.HeartPyModule;
+    if (!Native?.rtPushTs) throw new Error('HeartPyModule.rtPushTs not available');
+    jsCalls++;
+    const xs = (samples instanceof Float32Array ? Array.from(samples) : samples) as number[];
+    const ts = (timestamps instanceof Float64Array ? Array.from(timestamps) : timestamps) as number[];
+    if (!handle) { const e: any = new Error('Invalid or destroyed handle'); e.code = 'HEARTPY_E101'; throw e; }
+    if (!xs?.length || !ts?.length) { const e: any = new Error('Invalid buffers'); e.code = 'HEARTPY_E102'; throw e; }
+    const t1 = Date.now();
+    const p = Native.rtPushTs(handle, xs, ts);
+    nmCalls++;
+    return p?.then?.(() => { recordDuration(pushDurationsMs, Date.now() - t1); }) ?? p;
+}
+
 export class RealtimeAnalyzer {
     private handle: number = 0;
     private mode: 'nm' | 'jsi' = 'nm';
@@ -405,6 +421,15 @@ export class RealtimeAnalyzer {
             const h = this.handle; this.handle = 0;
             try { await rtDestroy(h); } catch {}
         }
+    }
+
+    async pushWithTimestamps(samples: Float32Array | number[], timestamps: Float64Array | number[]): Promise<void> {
+        if (this.mode === 'jsi') {
+            // Fallback to non-TS push for JSI
+            return this.push(samples);
+        }
+        if (!this.handle) throw new Error('RealtimeAnalyzer destroyed');
+        return rtPushTs(this.handle, (samples as any), (timestamps as any));
     }
 
     // Allow dev-time override of flags

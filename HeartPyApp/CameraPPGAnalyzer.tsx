@@ -347,35 +347,49 @@ export default function CameraPPGAnalyzer() {
     }
   }, [useNativePPG, roi, ppgPlugin, ppgChannel, ppgMode, ppgGrid, autoSelect, torchOn]);
 
-  // Native module polling for real PPG data + plugin confidence
+  // Native module polling for real PPG data + timestamps + plugin confidence
   useEffect(() => {
     if (!isActive || !useNativePPG) return;
     const pollingInterval = setInterval(async () => {
       try {
-        const [samples, conf] = await Promise.all([
-          NativeModules.HeartPyModule?.getLatestPPGSamples?.(),
+        const [pack, conf] = await Promise.all([
+          NativeModules.HeartPyModule?.getLatestPPGSamplesTs?.?.() ?? NativeModules.HeartPyModule?.getLatestPPGSamples?.(),
           NativeModules.HeartPyModule?.getLastPPGConfidence?.(),
         ]);
         if (typeof conf === 'number' && isFinite(conf)) setPluginConfidence(conf);
-        if (samples && Array.isArray(samples) && samples.length > 0) {
-          const latestSamples = samples.slice(-10);
-          latestSamples.forEach(sample => {
-            const val = typeof sample === 'number' ? sample : parseFloat(sample);
-            if (isFinite(val)) {
-              frameBufferRef.current.push(val);
-              if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
-              pendingSamplesRef.current.push(val);
-              if (pendingSamplesRef.current.length > bufferSize) {
-                pendingSamplesRef.current.splice(0, pendingSamplesRef.current.length - bufferSize);
-              }
-            }
+        let latestSamples: number[] = [];
+        let latestTs: number[] | null = null;
+        if (pack && Array.isArray(pack)) {
+          latestSamples = (pack as any[]).slice(-10).map(s => (typeof s === 'number' ? s : parseFloat(s))).filter((v: any) => isFinite(v));
+        } else if (pack && typeof pack === 'object') {
+          const xs = Array.isArray(pack.samples) ? pack.samples : [];
+          const ts = Array.isArray(pack.timestamps) ? pack.timestamps : [];
+          const k = Math.min(xs.length, ts.length);
+          latestSamples = xs.slice(-10).map((s: any) => (typeof s === 'number' ? s : parseFloat(s))).filter((v: any) => isFinite(v));
+          latestTs = ts.slice(-10).map((t: any) => (typeof t === 'number' ? t : parseFloat(t))).filter((v: any) => isFinite(v));
+        }
+        if (latestSamples.length > 0) {
+          // Update UI and incremental queue
+          latestSamples.forEach((val, i) => {
+            frameBufferRef.current.push(val);
+            if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
+            pendingSamplesRef.current.push(val);
+            if (pendingSamplesRef.current.length > bufferSize) pendingSamplesRef.current.splice(0, pendingSamplesRef.current.length - bufferSize);
           });
           setPpgSignal(prev => {
-            const validSamples = latestSamples.map(s => (typeof s === 'number' ? s : parseFloat(s))).filter((v) => isFinite(v));
-            const next = [...prev, ...validSamples];
+            const next = [...prev, ...latestSamples];
             if (next.length > 100) return next.slice(-100);
             return next;
           });
+          // If timestamps available and analyzer supports, push with timestamps now (optional)
+          try {
+            if (latestTs && latestTs.length === latestSamples.length && analyzerRef.current?.pushWithTimestamps) {
+              const xs = new Float32Array(latestSamples);
+              const ts = new Float64Array(latestTs);
+              await analyzerRef.current.pushWithTimestamps(xs, ts);
+              pendingSamplesRef.current = [];
+            }
+          } catch {}
         }
       } catch (e) {
         // occasional polling errors are non-fatal
@@ -617,9 +631,10 @@ export default function CameraPPGAnalyzer() {
         } catch {}
         try {
           analyzerRef.current = await HP.RealtimeAnalyzer.create(fsForAnalyzer, {
-            bandpass: { lowHz: 0.5, highHz: 4.0, order: 2 },
+            bandpass: { lowHz: 0.7, highHz: 3.5, order: 2 },
             welch: { nfft: 512, overlap: 0.5 },
-            peak: { refractoryMs: 300, thresholdScale: 0.6, bpmMin: 50, bpmMax: 150 }
+            peak: { refractoryMs: 320, thresholdScale: 0.6, bpmMin: 50, bpmMax: 150 },
+            preprocessing: { removeBaselineWander: true }
           });
           console.log('Real native analyzer created successfully');
         } catch (createError) {

@@ -268,8 +268,12 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
         outConf = (1.0 - w) * confMean + w * confChrom
       }
 
+      // Publish sample + ts (seconds) to native buffer
       if (outVal.isFinite()) {
-        try { HeartPyModule.addPPGSample(outVal) } catch (_: Throwable) {}
+        try {
+          val tsSec = try { frame.timestamp.toDouble() / 1_000_000_000.0 } catch (_: Throwable) { System.nanoTime().toDouble() / 1_000_000_000.0 }
+          HeartPyModule.addPPGSampleWithTs(outVal, tsSec)
+        } catch (_: Throwable) {}
       }
       try { HeartPyModule.addPPGSampleConfidence(outConf) } catch (_: Throwable) {}
       outVal

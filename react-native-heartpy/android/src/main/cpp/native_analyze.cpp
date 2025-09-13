@@ -366,6 +366,21 @@ Java_com_heartpy_HeartPyModule_rtPushNative(JNIEnv* env, jclass, jlong h, jdoubl
     hp_rt_push((void*)h, x.data(), (size_t)x.size(), t0);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_heartpy_HeartPyModule_rtPushTsNative(JNIEnv* env, jclass, jlong h, jdoubleArray jData, jdoubleArray jTs) {
+    if (!h || !jData || !jTs) return;
+    jsize len = env->GetArrayLength(jData);
+    jsize lt = env->GetArrayLength(jTs);
+    if (len <= 0 || lt <= 0) return;
+    jsize n = std::min(len, lt);
+    std::vector<double> tmp(n), tsv(n);
+    env->GetDoubleArrayRegion(jData, 0, n, tmp.data());
+    env->GetDoubleArrayRegion(jTs, 0, n, tsv.data());
+    std::vector<float> x(n);
+    for (jsize i = 0; i < n; ++i) x[i] = static_cast<float>(tmp[i]);
+    hp_rt_push_ts((void*)h, x.data(), tsv.data(), (size_t)n);
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_heartpy_HeartPyModule_rtPollNative(JNIEnv* env, jclass, jlong h) {
     if (!h) return nullptr;

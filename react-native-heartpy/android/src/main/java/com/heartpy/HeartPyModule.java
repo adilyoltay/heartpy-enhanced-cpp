@@ -91,6 +91,7 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             boolean pnnAsPercent
     );
     private static native void rtPushNative(long handle, double[] samples, double t0);
+    private static native void rtPushTsNative(long handle, double[] samples, double[] timestamps);
     private static native String rtPollNative(long handle);
     private static native void rtDestroyNative(long handle);
     private static native String rtValidateOptionsNative(double fs,
@@ -674,6 +675,27 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             promise.resolve(null);
         } catch (Exception e) {
             promise.reject("rt_destroy_error", e);
+        }
+    }
+
+    @ReactMethod
+    public void rtPushTs(double handle, double[] samples, double[] timestamps, Promise promise) {
+        try {
+            final long h = (long) handle;
+            if (h == 0L) { promise.reject("HEARTPY_E101", "Invalid or destroyed handle"); return; }
+            if (samples == null || timestamps == null || samples.length == 0 || timestamps.length == 0) { promise.reject("HEARTPY_E102", "Invalid buffers: empty"); return; }
+            final int k = Math.min(samples.length, timestamps.length);
+            if (k > MAX_SAMPLES_PER_PUSH) { promise.reject("HEARTPY_E102", "Invalid data buffer: too large (max " + MAX_SAMPLES_PER_PUSH + ")"); return; }
+            final double[] xs = (samples.length == k ? samples : java.util.Arrays.copyOf(samples, k));
+            final double[] ts = (timestamps.length == k ? timestamps : java.util.Arrays.copyOf(timestamps, k));
+            executorFor(h).submit(() -> {
+                try { rtPushTsNative(h, xs, ts); promise.resolve(null); }
+                catch (Exception e) { promise.reject("HEARTPY_E900", e); }
+                finally { NM_PUSH_DONE.incrementAndGet(); if (CFG_DEBUG) Log.d("HeartPyRT", "nm.pushTs.done="+NM_PUSH_DONE.get()); }
+            });
+            NM_PUSH_SUBMIT.incrementAndGet(); if (CFG_DEBUG) Log.d("HeartPyRT", "nm.pushTs.submit="+NM_PUSH_SUBMIT.get());
+        } catch (Exception e) {
+            promise.reject("HEARTPY_E900", e);
         }
     }
 }

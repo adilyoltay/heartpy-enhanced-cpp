@@ -23,12 +23,14 @@ using namespace facebook;
 
 // Global PPG buffer for frame processor data
 static NSMutableArray<NSNumber*>* globalPPGBuffer = nil;
+static NSMutableArray<NSNumber*>* globalPPGTsBuffer = nil;
 static dispatch_queue_t ppgBufferQueue = nil;
 static double lastPPGConfidence = 0.0;
 
 + (void)initialize {
     if (self == [HeartPyModule class]) {
         globalPPGBuffer = [[NSMutableArray alloc] init];
+        globalPPGTsBuffer = [[NSMutableArray alloc] init];
         ppgBufferQueue = dispatch_queue_create("heartpy.ppg.buffer", DISPATCH_QUEUE_SERIAL);
         // Subscribe to native PPG notifications from VisionCamera frame processor
         [[NSNotificationCenter defaultCenter] addObserverForName:@"HeartPyPPGSample"
@@ -37,6 +39,8 @@ static double lastPPGConfidence = 0.0;
                                                       usingBlock:^(__unused NSNotification * _Nonnull note) {
             NSNumber* value = note.userInfo[@"value"];
             if (!value) return;
+            NSNumber* tsNum = note.userInfo[@"timestamp"];
+            double ts = tsNum ? [tsNum doubleValue] : [[NSDate date] timeIntervalSince1970];
             NSNumber* confNum = note.userInfo[@"confidence"];
             if (confNum) {
                 double c = [confNum doubleValue];
@@ -46,10 +50,15 @@ static double lastPPGConfidence = 0.0;
             // Add to buffer on dedicated queue
             dispatch_async(ppgBufferQueue, ^{
                 [globalPPGBuffer addObject:value];
+                [globalPPGTsBuffer addObject:@(ts)];
                 // Keep last 300 samples (~10-20 seconds of data at 15-30 fps)
                 if (globalPPGBuffer.count > 300) {
                     NSRange removeRange = NSMakeRange(0, globalPPGBuffer.count - 300);
                     [globalPPGBuffer removeObjectsInRange:removeRange];
+                }
+                if (globalPPGTsBuffer.count > 300) {
+                    NSRange removeRange2 = NSMakeRange(0, globalPPGTsBuffer.count - 300);
+                    [globalPPGTsBuffer removeObjectsInRange:removeRange2];
                 }
                 
                 // Debug log every 30 samples
@@ -79,6 +88,19 @@ RCT_EXPORT_METHOD(getLatestPPGSamples:(RCTPromiseResolveBlock)resolve
         NSArray* samples = [globalPPGBuffer copy];
         [globalPPGBuffer removeAllObjects]; // drain buffer on poll
         resolve(samples ?: @[]);
+    });
+}
+
+// Get latest PPG samples with timestamps
+RCT_EXPORT_METHOD(getLatestPPGSamplesTs:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject) {
+    dispatch_async(ppgBufferQueue, ^{
+        NSArray* samples = [globalPPGBuffer copy];
+        NSArray* ts = [globalPPGTsBuffer copy];
+        [globalPPGBuffer removeAllObjects];
+        [globalPPGTsBuffer removeAllObjects];
+        NSDictionary* out = @{ @"samples": samples ?: @[], @"timestamps": ts ?: @[] };
+        resolve(out);
     });
 }
 

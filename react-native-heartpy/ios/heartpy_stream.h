@@ -291,6 +291,8 @@ extern "C" {
     void  hp_rt_set_window(void* h, double sec);
     void  hp_rt_set_update_interval(void* h, double sec);
     void  hp_rt_push(void* h, const float* x, size_t n, double t0);
+    // Per-sample timestamped push (seconds)
+    void  hp_rt_push_ts(void* h, const float* x, const double* ts, size_t n);
     int   hp_rt_poll(void* h, heartpy::HeartMetrics* out);
     void  hp_rt_destroy(void* h);
 }
