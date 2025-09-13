@@ -27,6 +27,20 @@ function getHaptics(): any | null {
   }
   return OptionalHaptics;
 }
+// Optional persistent storage (AsyncStorage) - fallback to no-op if missing
+let OptionalStorage: any | null = null;
+function getStorage(): any | null {
+  if (OptionalStorage !== null) return OptionalStorage;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('@react-native-async-storage/async-storage');
+    OptionalStorage = mod?.default ?? mod;
+  } catch (e) {
+    OptionalStorage = null;
+    console.warn('AsyncStorage not available; settings will not persist');
+  }
+  return OptionalStorage;
+}
 import {
   Camera,
   useCameraDevice,
@@ -89,6 +103,36 @@ export default function CameraPPGAnalyzer() {
   const [ppgGrid, setPpgGrid] = useState<1 | 2 | 3>(1);
   const [pluginConfidence, setPluginConfidence] = useState<number>(0);
   const [autoSelect, setAutoSelect] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Load/save persistent settings (best-effort)
+  useEffect(() => {
+    (async () => {
+      const S = getStorage();
+      if (!S?.getItem) return;
+      try {
+        const raw = await S.getItem('hp_ppg_settings');
+        if (!raw) return;
+        const cfg = JSON.parse(raw);
+        if (typeof cfg.autoSelect === 'boolean') setAutoSelect(cfg.autoSelect);
+        if (cfg.ppgChannel && ['green','red','luma'].includes(cfg.ppgChannel)) setPpgChannel(cfg.ppgChannel);
+        if (cfg.ppgMode && ['mean','chrom','pos'].includes(cfg.ppgMode)) setPpgMode(cfg.ppgMode);
+        if (cfg.ppgGrid && [1,2,3].includes(cfg.ppgGrid)) setPpgGrid(cfg.ppgGrid);
+        if (typeof cfg.roi === 'number') setRoi(Math.max(0.2, Math.min(0.6, cfg.roi)));
+      } catch {}
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      const S = getStorage();
+      if (!S?.setItem) return;
+      try {
+        const cfg = { autoSelect, ppgChannel, ppgMode, ppgGrid, roi };
+        await S.setItem('hp_ppg_settings', JSON.stringify(cfg));
+      } catch {}
+    })();
+  }, [autoSelect, ppgChannel, ppgMode, ppgGrid, roi]);
   
   // Derived: blended final confidence (0..1)
   const finalConfidence = (() => {
@@ -748,6 +792,16 @@ export default function CameraPPGAnalyzer() {
           </Text>
         </TouchableOpacity>
 
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton]}
+          onPress={() => setShowAdvanced(!showAdvanced)}
+          disabled={isAnalyzing}
+        >
+          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
+            {showAdvanced ? 'ADV ON' : 'ADV OFF'}
+          </Text>
+        </TouchableOpacity>
+
         {device?.hasTorch && (
           <TouchableOpacity
             style={[styles.button, styles.hapticButton, torchOn ? styles.hapticEnabled : styles.hapticDisabled]}
@@ -867,6 +921,71 @@ export default function CameraPPGAnalyzer() {
         </TouchableOpacity>
       </View>
 
+      {/* Advanced Controls */}
+      {showAdvanced && (
+        <View style={styles.controlsContainer}>
+          <TouchableOpacity
+            style={[styles.button, styles.hapticButton]}
+            onPress={async () => {
+              const steps = [0.2, 0.3, 0.4, 0.5, 0.6];
+              const idx = steps.indexOf(Number(roi.toFixed(1)));
+              const next = steps[(idx + 1) % steps.length];
+              setRoi(next);
+            }}
+            disabled={isAnalyzing || !useNativePPG}
+          >
+            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
+              {`ROI ${roi.toFixed(1)}`}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.button, styles.hapticButton]}
+            onPress={() => {
+              const order: Array<'green' | 'red' | 'luma'> = ['green', 'red', 'luma'];
+              const i = order.indexOf(ppgChannel);
+              const next = order[(i + 1) % order.length];
+              setPpgChannel(next);
+            }}
+            disabled={isAnalyzing || !useNativePPG}
+          >
+            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
+              {`CH ${ppgChannel}`}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.button, styles.hapticButton]}
+            onPress={() => {
+              const order: Array<'mean' | 'chrom' | 'pos'> = ['mean', 'chrom', 'pos'];
+              const i = order.indexOf(ppgMode);
+              const next = order[(i + 1) % order.length];
+              setPpgMode(next);
+            }}
+            disabled={isAnalyzing || !useNativePPG}
+          >
+            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
+              {`MODE ${ppgMode}`}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.button, styles.hapticButton]}
+            onPress={() => {
+              const order: Array<1 | 2 | 3> = [1, 2, 3];
+              const i = order.indexOf(ppgGrid);
+              const next = order[(i + 1) % order.length];
+              setPpgGrid(next);
+            }}
+            disabled={isAnalyzing || !useNativePPG}
+          >
+            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hapticButtonText}>
+              {`GRID ${ppgGrid}`}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* PPG Sinyali Gösterimi - Kalp Grafiği */}
       {ppgSignal.length > 0 && (
         <View style={styles.signalContainer}>
@@ -970,7 +1089,7 @@ const styles = StyleSheet.create({
     color: '#333',
   },
   cameraContainer: {
-    height: 150,
+    height: 140,
     borderRadius: 12,
     overflow: 'hidden',
     marginBottom: 16,
