@@ -120,18 +120,23 @@ export default function CameraPPGAnalyzer() {
 
   // VisionCamera frame processor plugin initialized on JS thread
   const ppgPluginRef = useRef<any>(null);
+  const [ppgPlugin, setPpgPlugin] = useState<any>(null);
   useEffect(() => {
     if (useNativePPG) {
       try {
         console.log('🟢 Initializing ppgMean plugin on JS thread...');
-        ppgPluginRef.current = VisionCameraProxy.initFrameProcessorPlugin('ppgMean', {});
-        console.log('🟢 ppgMean plugin initialized successfully:', !!ppgPluginRef.current);
+        const plugin = VisionCameraProxy.initFrameProcessorPlugin('ppgMean', {});
+        ppgPluginRef.current = plugin;
+        setPpgPlugin(plugin);
+        console.log('🟢 ppgMean plugin initialized successfully:', !!plugin);
       } catch (e) {
         console.error('🔴 ppgMean plugin init failed:', e);
         ppgPluginRef.current = null;
+        setPpgPlugin(null);
       }
     } else {
       ppgPluginRef.current = null;
+      setPpgPlugin(null);
     }
   }, [useNativePPG]);
 
@@ -172,27 +177,27 @@ export default function CameraPPGAnalyzer() {
     requestCameraPermission();
   }, []);
 
-  const requestCameraPermission = async () => {
+  const requestCameraPermission = async (): Promise<boolean> => {
     if (Platform.OS === 'android') {
       try {
         const granted = await PermissionsAndroid.request(
           PermissionsAndroid.PERMISSIONS.CAMERA
         );
-        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
-          console.log('Android camera permission granted');
-        } else {
-          Alert.alert('İzin Gerekli', 'Kamera izni gereklidir');
-        }
+        const ok = granted === PermissionsAndroid.RESULTS.GRANTED;
+        if (ok) console.log('Android camera permission granted');
+        else Alert.alert('İzin Gerekli', 'Kamera izni gereklidir');
+        return ok;
       } catch (err) {
         console.warn('Permission error:', err);
+        return false;
       }
     } else {
       if (!hasPermission) {
         const granted = await requestPermission();
-        if (!granted) {
-          Alert.alert('İzin Gerekli', 'Kamera izni gereklidir');
-        }
+        if (!granted) Alert.alert('İzin Gerekli', 'Kamera izni gereklidir');
+        return !!granted;
       }
+      return true;
     }
   };
 
@@ -296,7 +301,7 @@ export default function CameraPPGAnalyzer() {
       const ts = (frame as any)?.timestamp ?? 0;
       if (useNativePPG) {
         // Use plugin initialized on JS thread
-        const plugin = ppgPluginRef.current;
+        const plugin = ppgPlugin;
         if (plugin != null) {
           const v = plugin.call(frame, { roi, channel: 'red', step: 2 }) as number;
           runOnJS(onFrameSample)(ts, v);
@@ -311,11 +316,9 @@ export default function CameraPPGAnalyzer() {
       // Only pass simple data across the bridge
       // Avoid sending full error objects from worklet → JS
       const msg = `Frame processor error: ${error}`;
-      // Log on JS thread without constructing closures in worklet
-      runOnJS(console.error)('🔴 Frame processor crash:', msg);
       runOnJS(onFrameError)(msg);
     }
-  }, [onFrameTick, onFrameSample, useNativePPG, roi, ppgPluginRef]);
+  }, [onFrameTick, onFrameSample, useNativePPG, roi, ppgPlugin]);
 
   // Derive bad exposure badge at 2 Hz
   useEffect(() => {
@@ -409,6 +412,8 @@ export default function CameraPPGAnalyzer() {
     }
   };
 
+  const pendingActivateRef = useRef(false);
+
   // Analizi başlat/durdur
   const toggleAnalysis = async () => {
     console.log('🔵 toggleAnalysis called, isAnalyzing:', isAnalyzing);
@@ -444,6 +449,17 @@ export default function CameraPPGAnalyzer() {
         setFrameCount(0);
         setPpgSignal([]);
         setTorchOn(false);
+
+        // Ensure permission first
+        if (!hasPermission) {
+          console.log('Requesting camera permission before activation...');
+          const ok = await requestCameraPermission();
+          if (!ok) {
+            setIsAnalyzing(false);
+            setStatusMessage('Kamera izni gerekiyor');
+            return;
+          }
+        }
         
         // RealtimeAnalyzer oluştur (library already falls back to NativeModule if JSI is unavailable)
         console.log('🟢 Getting HeartPy module...');
@@ -474,9 +490,15 @@ export default function CameraPPGAnalyzer() {
           },
         });
         console.log('Analyzer created successfully:', !!analyzerRef.current);
-        // Kamerayı aktif et
-        console.log('🟢 Setting camera active...');
-        setIsActive(true);
+        // Kamerayı aktif et (permission granted). If device not ready, defer activation.
+        if (device) {
+          console.log('🟢 Setting camera active...');
+          setIsActive(true);
+        } else {
+          console.log('⏳ Device not ready yet; will activate when available');
+          pendingActivateRef.current = true;
+          setStatusMessage('Kamera hazırlanıyor...');
+        }
         setStatusMessage('Analiz başlatıldı');
         console.log(`PPG Analysis started with ${targetFps} FPS sampling via frameProcessor`);
       } catch (error) {
@@ -490,6 +512,16 @@ export default function CameraPPGAnalyzer() {
       }
     }
   };
+
+  // Activate camera once device becomes available after permission
+  useEffect(() => {
+    if (isAnalyzing && pendingActivateRef.current && hasPermission && device) {
+      console.log('🟢 Device ready after permission; activating camera');
+      pendingActivateRef.current = false;
+      setIsActive(true);
+      setStatusMessage('Analiz başlatıldı');
+    }
+  }, [isAnalyzing, hasPermission, device]);
 
   // Component unmount temizleme
   useEffect(() => {
@@ -510,53 +542,32 @@ export default function CameraPPGAnalyzer() {
     console.log('Camera device available:', !!device);
   }, [hasPermission, device]);
   
-  if (!hasPermission) {
-    console.log('Camera permission denied, showing permission screen');
-    return (
-      <View style={styles.container}>
-        <Text style={styles.permissionText}>Kamera izni gerekiyor</Text>
-        <TouchableOpacity style={styles.button} onPress={requestCameraPermission}>
-          <Text style={styles.buttonText}>İzin Ver</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  if (!device) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.permissionText}>Kamera bulunamadı</Text>
-      </View>
-    );
-  }
-
   return (
     <View style={styles.container}>
       <Text style={styles.title}>📱 Kamera PPG - Kalp Atışı Ölçümü</Text>
       
       {/* Kamera Görünümü */}
       <View style={styles.cameraContainer}>
-        {/* Spread fps prop conditionally to avoid iOS format reconfig issues */}
-        <Camera
-          style={styles.camera}
-          device={device}
-          isActive={isActive}
-          frameProcessor={isActive ? frameProcessor : undefined}
-          {...(Platform.OS === 'android' ? { fps: targetFps } : {})}
-          torch={device?.hasTorch && torchOn ? 'on' : 'off'} // Torch enabled after init delay
+        {device && hasPermission ? (
+          // Spread fps prop conditionally to avoid iOS format reconfig issues
+          <Camera
+            style={styles.camera}
+            device={device}
+            isActive={isActive}
+            frameProcessor={isActive ? frameProcessor : undefined}
+            {...(Platform.OS === 'android' ? { fps: targetFps } : {})}
+            torch={device?.hasTorch && torchOn ? 'on' : 'off'}
             onError={(error) => {
               console.error('🔴 Camera error:', error);
               console.error('🔴 Camera error code:', error.code);
               console.error('🔴 Camera error message:', error.message);
               console.error('🔴 Camera error cause:', error.cause);
-              // Avoid blocking alerts during camera runtime
               setIsActive(false);
               setIsAnalyzing(false);
               setStatusMessage('❌ Kamera hatası: ' + error.message);
             }}
             onInitialized={() => {
               console.log('🟢 Camera initialized successfully');
-              // Delay torch enable (Android only). On iOS, gate by processed frames in onFrameSample.
               if (Platform.OS === 'android') {
                 console.log('🟢 Setting up torch timer for Android');
                 if (torchTimerRef.current) clearTimeout(torchTimerRef.current);
@@ -568,7 +579,14 @@ export default function CameraPPGAnalyzer() {
                 console.log('🟢 iOS: Torch will be enabled after frame processing starts');
               }
             }}
-        />
+          />
+        ) : (
+          <View style={styles.cameraPlaceholder}>
+            <Text style={styles.permissionText}>
+              {!hasPermission ? 'Kamera izni gerekiyor' : 'Kamera hazırlanıyor...'}
+            </Text>
+          </View>
+        )}
         {isActive && badExposure && (
           <View style={styles.badBadge}>
             <Text style={styles.badBadgeText}>
@@ -590,7 +608,7 @@ export default function CameraPPGAnalyzer() {
         <TouchableOpacity 
           style={[styles.button, styles.mainButton, isAnalyzing ? styles.stopButton : styles.startButton]} 
           onPress={toggleAnalysis}
-          disabled={!device}
+          disabled={false}
         >
           {isAnalyzing ? (
             <View style={styles.buttonContentRow}>
@@ -799,6 +817,14 @@ const styles = StyleSheet.create({
     fontSize: 18,
     color: '#666',
     marginBottom: 20,
+  },
+  cameraPlaceholder: {
+    height: 220,
+    backgroundColor: '#e9ecef',
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
   },
   signalContainer: {
     backgroundColor: 'white',
