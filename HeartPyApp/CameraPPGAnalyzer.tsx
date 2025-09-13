@@ -104,13 +104,15 @@ export default function CameraPPGAnalyzer() {
   }, [hasPermission, device]);
 
   const analyzerRef = useRef<any | null>(null);
-  const [targetFps, setTargetFps] = useState(15); // start low for stabilization
-  const samplingRate = targetFps; // keep analyzer in sync with camera fps
+  const [targetFps, setTargetFps] = useState(15); // camera request (Android only)
+  const [analyzerFs, setAnalyzerFs] = useState(15); // measured/selected fs for analyzer
+  const samplingRate = analyzerFs; // keep analyzer in sync with actual fps
   const bufferSize = samplingRate * 5; // 5 saniye buffer
   const analysisInterval = 1000; // 1 saniyede bir analiz
   
   const frameBufferRef = useRef<number[]>([]);
   const lastAnalysisTimeRef = useRef<number>(0);
+  const pendingSamplesRef = useRef<number[]>([]); // incremental push queue
   const startTimeRef = useRef<number>(0);
   const torchTimerRef = useRef<any>(null);
   const simulationTimerRef = useRef<any>(null);
@@ -301,6 +303,11 @@ export default function CameraPPGAnalyzer() {
             if (isFinite(val)) {
               frameBufferRef.current.push(val);
               if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
+              // Queue for incremental streaming
+              pendingSamplesRef.current.push(val);
+              if (pendingSamplesRef.current.length > bufferSize) {
+                pendingSamplesRef.current.splice(0, pendingSamplesRef.current.length - bufferSize);
+              }
             }
           });
           
@@ -430,31 +437,29 @@ export default function CameraPPGAnalyzer() {
     return () => clearInterval(id);
   }, []);
 
-  // Real-time analiz - Native analyzer simulated data ile
+  // Real-time analiz - incremental streaming push + metric poll
   const performRealtimeAnalysis = async () => {
-    if (!analyzerRef.current || frameBufferRef.current.length < 60) return;
-    
-    console.log(`Performing analysis with ${frameBufferRef.current.length} samples`);
+    if (!analyzerRef.current) return;
 
     try {
-      // Son n sample'ı al (3 saniye)
-      const samplesNeeded = samplingRate * 3;
-      const samples = frameBufferRef.current.slice(-samplesNeeded);
-      const samplesArray = new Float32Array(samples);
-      
-      // Validate samples array
-      if (samplesArray.length === 0 || !samplesArray.every(s => typeof s === 'number' && isFinite(s))) {
-        console.warn('Invalid samples for analysis');
-        return;
-      }
-      
-      // Streaming analyzer'a gönder - defensive native call
-      try {
-        await analyzerRef.current.push(samplesArray);
-      } catch (pushError) {
-        console.error('Native analyzer push failed:', pushError);
-        setStatusMessage('❌ Native analyzer push hatası');
-        return;
+      // Push only new samples accumulated since last call
+      const pending = pendingSamplesRef.current;
+      if (pending.length > 0) {
+        const samplesArray = new Float32Array(pending);
+        // Validate samples array
+        if (!samplesArray.every(s => typeof s === 'number' && isFinite(s))) {
+          console.warn('Invalid samples in pending queue');
+        } else {
+          try {
+            await analyzerRef.current.push(samplesArray);
+          } catch (pushError) {
+            console.error('Native analyzer push failed:', pushError);
+            setStatusMessage('❌ Native analyzer push hatası');
+            return;
+          }
+        }
+        // Clear pending after push
+        pendingSamplesRef.current = [];
       }
       
       // Metrikleri al - defensive native call
@@ -552,6 +557,7 @@ export default function CameraPPGAnalyzer() {
         simulationTimerRef.current = null;
       }
       frameBufferRef.current = [];
+      pendingSamplesRef.current = [];
       ppgDataBuffer.current = [];
       globalFrameCounter.current = 0;
       setMetrics(null);
@@ -583,13 +589,54 @@ export default function CameraPPGAnalyzer() {
           }
         }
         
-        // RealtimeAnalyzer oluştur (library already falls back to NativeModule if JSI is unavailable)
+        // Camera activation & FS calibration before analyzer create
+        let fsForAnalyzer = analyzerFs;
+        if (device) {
+          console.log('🟢 Activating camera for FS calibration...');
+          setIsActive(true);
+          setStatusMessage('Kalibrasyon: FPS ölçülüyor...');
+          // Small delay for camera warm-up
+          await new Promise(res => setTimeout(res, 300));
+          // Try to enable torch quickly for finger PPG
+          if (device?.hasTorch) setTorchOn(true);
+          // Drain any stale samples
+          try { await NativeModules.HeartPyModule?.getLatestPPGSamples?.(); } catch {}
+          const t0 = Date.now();
+          let total = 0;
+          while (Date.now() - t0 < 1200) {
+            try {
+              const arr = await NativeModules.HeartPyModule?.getLatestPPGSamples?.();
+              if (Array.isArray(arr)) total += arr.length;
+            } catch {}
+            await new Promise(res => setTimeout(res, 200));
+          }
+          const elapsed = Math.max(0.5, (Date.now() - t0) / 1000);
+          const measured = Math.round(total / elapsed);
+          // Snap to common rates if close
+          const candidates = [15, 24, 30, 60];
+          let snapped = measured;
+          for (const c of candidates) {
+            if (Math.abs(measured - c) <= 2) { snapped = c; break; }
+          }
+          fsForAnalyzer = Math.max(10, Math.min(60, snapped || analyzerFs));
+          setAnalyzerFs(fsForAnalyzer);
+          // On Android, request camera to that fps
+          if (Platform.OS === 'android') {
+            setTargetFps(fsForAnalyzer >= 28 ? 30 : 15);
+          }
+          console.log(`📏 FS calibrated: measured=${measured} snapped=${snapped} -> using ${fsForAnalyzer}`);
+        } else {
+          console.log('⏳ Device not ready; skipping FS calibration, using analyzerFs');
+          pendingActivateRef.current = true;
+          setStatusMessage('Kamera hazırlanıyor...');
+        }
+
+        // RealtimeAnalyzer oluştur
         console.log('🟢 Getting HeartPy module...');
         const HP = getHeartPy();
         console.log('🟢 HeartPy module available:', !!HP);
         if (!HP?.RealtimeAnalyzer?.create) throw new Error('HeartPy RealtimeAnalyzer not available');
-        console.log('Creating analyzer with samplingRate:', samplingRate);
-        // One-time warning if JSI is unavailable (fallback to NativeModule)
+        console.log('Creating analyzer with samplingRate:', fsForAnalyzer);
         try {
           const g: any = global as any;
           if (!warnedJSIFallbackRef.current && !(g && typeof g.__hpRtCreate === 'function')) {
@@ -598,45 +645,18 @@ export default function CameraPPGAnalyzer() {
           }
         } catch {}
         try {
-          // Gerçek native analyzer - güvenli minimal options
-          analyzerRef.current = await HP.RealtimeAnalyzer.create(samplingRate, {
+          analyzerRef.current = await HP.RealtimeAnalyzer.create(fsForAnalyzer, {
             bandpass: { lowHz: 0.5, highHz: 4.0, order: 2 },
             welch: { nfft: 512, overlap: 0.5 },
-            peak: { 
-              refractoryMs: 300, 
-              thresholdScale: 0.6, 
-              bpmMin: 50, 
-              bpmMax: 150 
-            }
-            // quality options removed to prevent crash
+            peak: { refractoryMs: 300, thresholdScale: 0.6, bpmMin: 50, bpmMax: 150 }
           });
           console.log('Real native analyzer created successfully');
         } catch (createError) {
           console.error('Native analyzer creation failed:', createError);
-          // NO MOCK FALLBACK - sadece gerçek analyzer
-          throw createError; // Re-throw to stop analysis
+          throw createError;
         }
         console.log('Analyzer created successfully:', !!analyzerRef.current);
-        // Kamerayı aktif et (permission granted). If device not ready, defer activation.
-        if (device) {
-          console.log('🟢 Setting camera active...');
-          setIsActive(true);
-          
-          // Flash'ı direkt aç (PPG için gerekli)
-          setTimeout(() => {
-            if (device?.hasTorch) {
-              setTorchOn(true);
-              console.log('🔦 Flash enabled for PPG');
-            }
-          }, 500); // Kamera initialization sonrası
-        } else {
-          console.log('⏳ Device not ready yet; will activate when available');
-          pendingActivateRef.current = true;
-          setStatusMessage('Kamera hazırlanıyor...');
-        }
-        
-        setStatusMessage('🔴 Gerçek PPG analizi aktif - console\'da veriler görünür');
-        console.log(`Real PPG analysis active - check console for PPG values`);
+        setStatusMessage('🔴 Gerçek PPG analizi aktif - veriler akıyor');
       } catch (error) {
         console.error('Start analysis error:', error);
         try { console.error('Error type:', typeof error); } catch {}
