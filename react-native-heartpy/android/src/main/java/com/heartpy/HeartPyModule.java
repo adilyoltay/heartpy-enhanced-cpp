@@ -7,10 +7,13 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.UiThreadUtil;
 import com.facebook.react.bridge.Promise;
+import com.facebook.react.bridge.WritableArray;
+import com.facebook.react.bridge.Arguments;
 import com.facebook.jni.HybridData;
 import com.facebook.react.bridge.ReactContext;
 import android.util.Log;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class HeartPyModule extends ReactContextBaseJavaModule {
     static {
@@ -148,6 +151,37 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
     @Override
     public String getName() {
         return "HeartPyModule";
+    }
+
+    // Cross-platform PPG buffer (Android parity with iOS notification path)
+    private static final ConcurrentLinkedQueue<Double> PPG_BUFFER = new ConcurrentLinkedQueue<>();
+    public static void addPPGSample(double value) {
+        try {
+            if (Double.isNaN(value) || Double.isInfinite(value)) return;
+            PPG_BUFFER.add(value);
+            // Keep last ~300 samples
+            while (PPG_BUFFER.size() > 300) {
+                PPG_BUFFER.poll();
+            }
+        } catch (Throwable ignore) {}
+    }
+
+    @ReactMethod
+    public void getLatestPPGSamples(Promise promise) {
+        final WritableArray out = Arguments.createArray();
+        try {
+            int drained = 0;
+            while (true) {
+                final Double v = PPG_BUFFER.poll();
+                if (v == null) break;
+                out.pushDouble(v);
+                drained++;
+                if (drained >= 1000) break; // safety cap
+            }
+            promise.resolve(out);
+        } catch (Throwable t) {
+            promise.reject("ppg_buffer_error", t);
+        }
     }
 
     // Install Android JSI bindings (blocking, sync)
@@ -624,5 +658,4 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         }
     }
 }
-
 

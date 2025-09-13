@@ -8,8 +8,13 @@
 #ifdef USE_ACCELERATE_FFT
 #include <Accelerate/Accelerate.h>
 #endif
+#if defined(HEARTPY_ENABLE_NEON) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 namespace heartpy {
+
+static bool s_deterministic = false;
 
 namespace {
 
@@ -205,12 +210,19 @@ PSDResult welchPSD(const std::vector<double>& x, double fs, int nfft, double ove
     // Hann window
     std::vector<double> w(nfft);
     for (int i = 0; i < nfft; ++i) w[i] = 0.5 - 0.5 * std::cos(2.0 * PI * i / (nfft - 1));
-    double U = 0.0; for (double v : w) U += v * v; // sum(w^2)
+    double U = 0.0;
+#if defined(HEARTPY_ENABLE_ACCELERATE)
+    // Use vDSP to compute sum of squares when enabled
+    vDSP_svesqD(w.data(), 1, &U, (vDSP_Length)nfft);
+#else
+    for (double v : w) U += v * v; // sum(w^2)
+#endif
 
     const int kmax = nfft / 2 + 1;
     std::vector<double> P(kmax, 0.0);
 
-    const bool useFFT = isPowerOfTwo(nfft);
+    bool useFFT = isPowerOfTwo(nfft);
+    if (heartpy::isDeterministic()) useFFT = false; // force DFT for determinism
     if (useFFT) {
 #ifdef USE_ACCELERATE_FFT
         // Use Accelerate vDSP double-precision split-complex FFT if available
@@ -221,9 +233,20 @@ PSDResult welchPSD(const std::vector<double>& x, double fs, int nfft, double ove
         DSPDoubleSplitComplex split{real.data(), imag.data()};
         for (int s = 0; s < nseg; ++s) {
             int start = s * step;
-            // detrend (constant): subtract mean
-            double mu = 0.0; for (int t = 0; t < nfft; ++t) mu += x[start + t]; mu /= nfft;
-            for (int t = 0; t < nfft; ++t) real[t] = (x[start + t] - mu) * w[t];
+            // Copy segment into real buffer
+            std::memcpy(real.data(), &x[start], sizeof(double) * (size_t)nfft);
+#if defined(HEARTPY_ENABLE_ACCELERATE)
+            // mu = mean(real)
+            double mu = 0.0; vDSP_meanvD(real.data(), 1, &mu, (vDSP_Length)nfft);
+            // real = (real - mu)
+            double negMu = -mu; vDSP_vsaddD(real.data(), 1, &negMu, real.data(), 1, (vDSP_Length)nfft);
+            // real = real .* w
+            vDSP_vmulD(real.data(), 1, w.data(), 1, real.data(), 1, (vDSP_Length)nfft);
+#else
+            // Scalar detrend + window (fallback)
+            double mu = 0.0; for (int t = 0; t < nfft; ++t) mu += real[t]; mu /= nfft;
+            for (int t = 0; t < nfft; ++t) real[t] = (real[t] - mu) * w[t];
+#endif
             vDSP_fft_zipD(setup, &split, 1, static_cast<vDSP_Length>(std::log2(nfft)), kFFTDirection_Forward);
             for (int k = 0; k < kmax; ++k) {
                 double realv = real[k];
@@ -240,9 +263,32 @@ PSDResult welchPSD(const std::vector<double>& x, double fs, int nfft, double ove
         std::vector<kiss_fft_cpx> out(kmax);
         for (int s = 0; s < nseg; ++s) {
             int start = s * step;
-            // detrend (constant)
+            // detrend (constant) and window
+#if defined(HEARTPY_ENABLE_NEON) && defined(__ARM_NEON)
+            // Compute mean using NEON reduction in float
+            float32x4_t acc4 = vdupq_n_f32(0.0f);
+            int t_mean = 0;
+            for (; t_mean + 4 <= nfft; t_mean += 4) {
+                float32x4_t xv = { (float)x[start + t_mean + 0], (float)x[start + t_mean + 1], (float)x[start + t_mean + 2], (float)x[start + t_mean + 3] };
+                acc4 = vaddq_f32(acc4, xv);
+            }
+            float acc = vgetq_lane_f32(acc4, 0) + vgetq_lane_f32(acc4, 1) + vgetq_lane_f32(acc4, 2) + vgetq_lane_f32(acc4, 3);
+            for (; t_mean < nfft; ++t_mean) acc += (float)x[start + t_mean];
+            const float fmu = acc / (float)nfft;
+            int t = 0;
+            for (; t + 4 <= nfft; t += 4) {
+                float32x4_t xv = { (float)x[start + t + 0], (float)x[start + t + 1], (float)x[start + t + 2], (float)x[start + t + 3] };
+                float32x4_t wv = { (float)w[t + 0], (float)w[t + 1], (float)w[t + 2], (float)w[t + 3] };
+                float32x4_t mu4 = vdupq_n_f32(fmu);
+                float32x4_t dv = vsubq_f32(xv, mu4);
+                float32x4_t yv = vmulq_f32(dv, wv);
+                vst1q_f32(&in[t], yv);
+            }
+            for (; t < nfft; ++t) in[t] = ((float)x[start + t] - fmu) * (float)w[t];
+#else
             double mu = 0.0; for (int t = 0; t < nfft; ++t) mu += x[start + t]; mu /= nfft;
             for (int t = 0; t < nfft; ++t) in[t] = static_cast<float>((x[start + t] - mu) * w[t]);
+#endif
             kiss_fftr(cfg, in.data(), out.data());
             for (int k = 0; k < kmax; ++k) {
                 double realv = out[k].r;
@@ -1434,24 +1480,7 @@ std::pair<std::vector<double>, std::vector<double>> welchPowerSpectrum(
     return {psd.freqs, psd.psd};
 }
 
+void setDeterministic(bool on) { s_deterministic = on; }
+bool isDeterministic() { return s_deterministic; }
+
 } // namespace heartpy
-// HeartPy-style quotient filter: builds/updates a mask (0=accept,1=reject)
-static std::vector<int> quotientFilterMask(const std::vector<double>& rr, const std::vector<int>& base_mask, int iterations) {
-    const size_t n = rr.size();
-    std::vector<int> mask;
-    if (base_mask.empty()) mask.assign(n, 0); else mask = base_mask;
-    for (int it = 0; it < iterations; ++it) {
-        if (n < 2) break;
-        for (size_t i = 0; i + 1 < n; ++i) {
-            if (mask[i] + mask[i + 1] != 0) continue; // skip if any already rejected
-            double r1 = rr[i];
-            double r2 = rr[i + 1];
-            if (r2 == 0.0) { mask[i] = 1; continue; }
-            double q = r1 / r2;
-            if (q < 0.8 || q > 1.2) {
-                mask[i] = 1; // mark current, leave i+1 as in HP
-            }
-        }
-    }
-    return mask;
-}

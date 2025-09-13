@@ -1,7 +1,22 @@
 import React, { useState } from 'react';
 import { View, Text, Button, StyleSheet } from 'react-native';
-import { RealtimeAnalyzer } from 'react-native-heartpy';
-import { runBenchmark60s } from '../react-native-heartpy/examples/Benchmark60s';
+// Lazy-resolve HeartPy to avoid Metro issues when using local package links
+function getHeartPy() {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require('react-native-heartpy');
+  } catch (e) {
+    return null;
+  }
+}
+function getBenchmark() {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require('../react-native-heartpy/examples/Benchmark60s');
+  } catch (e) {
+    return null;
+  }
+}
 
 export default function HeartPyRunner() {
   const [lines, setLines] = useState<string[]>([]);
@@ -9,10 +24,19 @@ export default function HeartPyRunner() {
 
   const onRun = async () => {
     try {
-      RealtimeAnalyzer.setConfig({ debug: true, zeroCopyEnabled: true, jsiEnabled: true });
-      log('Running 60s JSI...');
-      const jsi = await runBenchmark60s('jsi', 50);
-      log('JSI report: ' + JSON.stringify(jsi));
+      const HP = getHeartPy();
+      if (!HP?.RealtimeAnalyzer) {
+        log('react-native-heartpy not available');
+        return;
+      }
+      const bench = getBenchmark();
+      const runBenchmark60s = bench?.runBenchmark60s;
+      HP.RealtimeAnalyzer.setConfig?.({ debug: true, zeroCopyEnabled: true, jsiEnabled: true });
+      if (runBenchmark60s) {
+        log('Running 60s JSI...');
+        const jsi = await runBenchmark60s('jsi', 50);
+        log('JSI report: ' + JSON.stringify(jsi));
+      }
 
       // Optional native JSI stats if available
       try {
@@ -22,18 +46,20 @@ export default function HeartPyRunner() {
         if (stats) log('JSI Stats: ' + JSON.stringify(stats));
       } catch {}
 
-      RealtimeAnalyzer.setConfig({ jsiEnabled: false, debug: true });
-      log('Running 60s NM...');
-      const nm = await runBenchmark60s('nm', 50);
-      log('NM report: ' + JSON.stringify(nm));
+      if (runBenchmark60s) {
+        HP.RealtimeAnalyzer.setConfig?.({ jsiEnabled: false, debug: true });
+        log('Running 60s NM...');
+        const nm = await runBenchmark60s('nm', 50);
+        log('NM report: ' + JSON.stringify(nm));
+      }
 
       // Test errors on JSI path
-      RealtimeAnalyzer.setConfig({ jsiEnabled: true, debug: true });
-      try { await RealtimeAnalyzer.create(0 as any, {} as any); } catch (e: any) {
+      HP.RealtimeAnalyzer.setConfig?.({ jsiEnabled: true, debug: true });
+      try { await HP.RealtimeAnalyzer.create(0 as any, {} as any); } catch (e: any) {
         log(`JSI create(0,{}) -> ${e?.code} ${e?.message}`);
       }
       try {
-        const jsiAnalyzer = await RealtimeAnalyzer.create(50, {} as any);
+        const jsiAnalyzer = await HP.RealtimeAnalyzer.create(50, {} as any);
         try { await jsiAnalyzer.push(new Float32Array(0)); } catch (e: any) {
           log(`JSI push(Float32Array(0)) -> ${e?.code} ${e?.message}`);
         }
@@ -41,12 +67,12 @@ export default function HeartPyRunner() {
       } catch {}
 
       // Test errors on NM path  
-      RealtimeAnalyzer.setConfig({ jsiEnabled: false, debug: true });
-      try { await RealtimeAnalyzer.create(0 as any, {} as any); } catch (e: any) {
+      HP.RealtimeAnalyzer.setConfig?.({ jsiEnabled: false, debug: true });
+      try { await HP.RealtimeAnalyzer.create(0 as any, {} as any); } catch (e: any) {
         log(`NM create(0,{}) -> ${e?.code} ${e?.message}`);
       }
       try {
-        const nmAnalyzer = await RealtimeAnalyzer.create(50, {} as any);
+        const nmAnalyzer = await HP.RealtimeAnalyzer.create(50, {} as any);
         try { await nmAnalyzer.push([]); } catch (e: any) {
           log(`NM push([]) -> ${e?.code} ${e?.message}`);
         }
@@ -75,4 +101,3 @@ const styles = StyleSheet.create({
   title: { fontWeight: '600', marginBottom: 8 },
   log: { fontFamily: 'Courier', fontSize: 12, marginTop: 6 },
 });
-

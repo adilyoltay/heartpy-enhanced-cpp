@@ -15,7 +15,7 @@
     "@react-native-async-storage/async-storage": "^1.21.0",
     "react-native-haptic-feedback": "^2.3.3",
     "react-native-heartpy": "file:../react-native-heartpy",
-    "react-native-reanimated": "^3.10.1",
+    "react-native-reanimated": "3.8.1",
     "react-native-vision-camera": "^4.7.2",
     "react-native-worklets-core": "^1.6.2"
   },
@@ -23,7 +23,7 @@
     "@babel/core": "^7.20.0",
     "@babel/preset-env": "^7.20.0",
     "@babel/runtime": "^7.20.0",
-    "@react-native-community/cli": "^20.0.2",
+    "@react-native-community/cli": "latest",
     "@react-native/babel-preset": "0.74.85",
     "@react-native/eslint-config": "0.74.85",
     "@react-native/metro-config": "0.74.85",

@@ -16,6 +16,66 @@ using namespace facebook;
 
 @synthesize bridge = _bridge;
 
+// Event emitter support
+- (NSArray<NSString *> *)supportedEvents {
+    return @[@"PPGSample"];
+}
+
+// Global PPG buffer for frame processor data
+static NSMutableArray<NSNumber*>* globalPPGBuffer = nil;
+static dispatch_queue_t ppgBufferQueue = nil;
+
++ (void)initialize {
+    if (self == [HeartPyModule class]) {
+        globalPPGBuffer = [[NSMutableArray alloc] init];
+        ppgBufferQueue = dispatch_queue_create("heartpy.ppg.buffer", DISPATCH_QUEUE_SERIAL);
+        // Subscribe to native PPG notifications from VisionCamera frame processor
+        [[NSNotificationCenter defaultCenter] addObserverForName:@"HeartPyPPGSample"
+                                                          object:nil
+                                                           queue:nil  // Process on posting thread for speed
+                                                      usingBlock:^(__unused NSNotification * _Nonnull note) {
+            NSNumber* value = note.userInfo[@"value"];
+            if (!value) return;
+            
+            // Add to buffer on dedicated queue
+            dispatch_async(ppgBufferQueue, ^{
+                [globalPPGBuffer addObject:value];
+                // Keep last 300 samples (~10-20 seconds of data at 15-30 fps)
+                if (globalPPGBuffer.count > 300) {
+                    NSRange removeRange = NSMakeRange(0, globalPPGBuffer.count - 300);
+                    [globalPPGBuffer removeObjectsInRange:removeRange];
+                }
+                
+                // Debug log every 30 samples
+                if (globalPPGBuffer.count % 30 == 0) {
+                    NSLog(@"📦 Native PPG buffer size: %lu samples", (unsigned long)globalPPGBuffer.count);
+                }
+            });
+        }];
+    }
+}
+
+// Store PPG sample from frame processor
+RCT_EXPORT_METHOD(storePPGSample:(double)value timestamp:(double)timestamp) {
+    dispatch_async(ppgBufferQueue, ^{
+        [globalPPGBuffer addObject:@(value)];
+        // Keep last 100 samples
+        if (globalPPGBuffer.count > 100) {
+            [globalPPGBuffer removeObjectAtIndex:0];
+        }
+    });
+}
+
+// Get latest PPG samples for UI
+RCT_EXPORT_METHOD(getLatestPPGSamples:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject) {
+    dispatch_async(ppgBufferQueue, ^{
+        NSArray* samples = [globalPPGBuffer copy];
+        [globalPPGBuffer removeAllObjects]; // drain buffer on poll
+        resolve(samples ?: @[]);
+    });
+}
+
 static void installBinding(jsi::Runtime &rt) {
 	auto analyzeFunc = jsi::Function::createFromHostFunction(
 		rt,
@@ -605,27 +665,12 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(scaleData:(NSArray<NSNumber*>*)signal
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(installJSI)
 {
-	NSLog(@"[HeartPyModule] installJSI called - scheduling JSI installation");
+	NSLog(@"[HeartPyModule] installJSI called - React Native 0.74+ has JSI limitations");
 	
-	// Schedule JSI installation on the next JS thread tick
-	dispatch_async(dispatch_get_main_queue(), ^{
-		NSLog(@"[HeartPyModule] Attempting to install JSI bindings via bridge callback");
-		
-		// Try to get the bridge and install JSI
-		if (self.bridge) {
-			// In React Native 0.74+, we need to use a different approach
-			// The JSI runtime is typically available through the bridge's internal mechanisms
-			NSLog(@"[HeartPyModule] Bridge available, attempting JSI installation");
-			
-			// For now, we'll return success and let the JS side handle the fallback
-			// The real JSI installation should happen through the bridge's lifecycle
-		} else {
-			NSLog(@"[HeartPyModule] Bridge not available");
-		}
-	});
-	
-	// Return YES to indicate we've scheduled the installation
-	return @YES;
+	// In RN 0.74+, JSI runtime access is restricted
+	// For now, return NO to use NativeModule path which works perfectly
+	NSLog(@"[HeartPyModule] Using NativeModule fallback (recommended for RN 0.74+)");
+	return @NO;
 }
 
 // MARK: - Realtime Streaming (NativeModules P0)
@@ -658,7 +703,7 @@ RCT_EXPORT_METHOD(rtCreate:(double)fs
 // Push a chunk of samples (number[])
 RCT_EXPORT_METHOD(rtPush:(nonnull NSNumber*)handle
                   samples:(NSArray<NSNumber*>*)samples
-                  timestamp:(nullable NSNumber*)t0
+                  timestamp:(nonnull NSNumber*)t0
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 {
@@ -668,7 +713,7 @@ RCT_EXPORT_METHOD(rtPush:(nonnull NSNumber*)handle
         const NSUInteger n = samples.count;
         std::vector<float> x; x.reserve(n);
         for (NSNumber* v in samples) x.push_back([v floatValue]);
-        double ts0 = t0 ? [t0 doubleValue] : 0.0;
+        double ts0 = (t0 && [t0 doubleValue] != 0) ? [t0 doubleValue] : [[NSDate date] timeIntervalSince1970];
         hp_rt_push(h, x.data(), (size_t)x.size(), ts0);
         resolve(nil);
     } @catch (NSException* e) {

@@ -6,6 +6,7 @@ PODS:
   - glog (0.3.5)
   - HeartPy (0.1.0):
     - React-Core
+    - React-jsi
   - RCT-Folly (2024.01.01.00):
     - boost
     - DoubleConversion
@@ -1142,6 +1143,8 @@ PODS:
     - React-logger (= 0.74.3)
     - React-perflogger (= 0.74.3)
     - React-utils (= 0.74.3)
+  - RNCAsyncStorage (1.24.0):
+    - React-Core
   - RNReactNativeHapticFeedback (2.3.3):
     - DoubleConversion
     - glog
@@ -1163,7 +1166,7 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - Yoga
-  - RNReanimated (3.10.1):
+  - RNReanimated (3.8.1):
     - DoubleConversion
     - glog
     - RCT-Folly (= 2024.01.01.00)
@@ -1255,6 +1258,7 @@ DEPENDENCIES:
   - React-runtimescheduler (from `../node_modules/react-native/ReactCommon/react/renderer/runtimescheduler`)
   - React-utils (from `../node_modules/react-native/ReactCommon/react/utils`)
   - ReactCommon/turbomodule/core (from `../node_modules/react-native/ReactCommon`)
+  - "RNCAsyncStorage (from `../node_modules/@react-native-async-storage/async-storage`)"
   - RNReactNativeHapticFeedback (from `../node_modules/react-native-haptic-feedback`)
   - RNReanimated (from `../node_modules/react-native-reanimated`)
   - VisionCamera (from `../node_modules/react-native-vision-camera`)
@@ -1371,6 +1375,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native/ReactCommon/react/utils"
   ReactCommon:
     :path: "../node_modules/react-native/ReactCommon"
+  RNCAsyncStorage:
+    :path: "../node_modules/@react-native-async-storage/async-storage"
   RNReactNativeHapticFeedback:
     :path: "../node_modules/react-native-haptic-feedback"
   RNReanimated:
@@ -1386,7 +1392,7 @@ SPEC CHECKSUMS:
   FBLazyVector: 7e977dd099937dc5458851233141583abba49ff2
   fmt: 4c2741a687cc09f0634a2e2c72a838b99f1ff120
   glog: fdfdfe5479092de0c4bdbebedd9056951f092c4f
-  HeartPy: 7bfe97a058e7acbf92f893b99dc0fcf7ebea5697
+  HeartPy: ee98ceebd65de1c8978a086fcca7fb37e3e4bd92
   RCT-Folly: 5dc73daec3476616d19e8a53f0156176f7b55461
   RCTDeprecation: 4c7eeb42be0b2e95195563c49be08d0b839d22b4
   RCTRequired: d530a0f489699c8500e944fde963102c42dcd0c2
@@ -1434,8 +1440,9 @@ SPEC CHECKSUMS:
   React-runtimescheduler: e60345e0aaa5bd81e153f8e7b54a3f06291547cd
   React-utils: a67783311b57613c86e510e59c64cdbbf6ddedf0
   ReactCommon: 6a77ca287e42b06fcf6b123313edcea8d2ac5992
+  RNCAsyncStorage: b6410dead2732b5c72a7fdb1ecb5651bbcf4674b
   RNReactNativeHapticFeedback: 12e29a351735879f9e3c32c36a3439cdf2a49a5b
-  RNReanimated: 76f916b85bb322b7075f1f9022e4bc0c3f59b7c6
+  RNReanimated: deb12f1bd42fc63496ef626d0ccbefa9e80e5a03
   SocketRocket: abac6f5de4d4d62d24e11868d7a2f427e0ef940d
   VisionCamera: 4146fa2612c154f893a42a9b1feedf868faa6b23
   Yoga: 04f1db30bb810187397fa4c37dd1868a27af229c

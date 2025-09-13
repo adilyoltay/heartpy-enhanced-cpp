@@ -376,7 +376,7 @@ export class RealtimeAnalyzer {
             return;
         } else {
             if (!this.handle) throw new Error('RealtimeAnalyzer destroyed');
-            return rtPush(this.handle, samples, t0);
+            return rtPush(this.handle, samples, t0 ?? Date.now() / 1000);
         }
     }
 

@@ -9,6 +9,9 @@ import {
   ActivityIndicator,
   PermissionsAndroid,
   Platform,
+  DeviceEventEmitter,
+  NativeEventEmitter,
+  NativeModules,
 } from 'react-native';
 // import AsyncStorage from '@react-native-async-storage/async-storage'; // Optional - not needed for basic functionality
 // Haptics is optional; load lazily to avoid crash if native module is missing
@@ -77,10 +80,11 @@ export default function CameraPPGAnalyzer() {
   const [ppgSignal, setPpgSignal] = useState<number[]>([]);
   const [statusMessage, setStatusMessage] = useState('Kamerayı başlatmak için butona basın');
   const [lastBeatCount, setLastBeatCount] = useState(0);
-  const [hapticEnabled, setHapticEnabled] = useState(false);
+  const [hapticEnabled, setHapticEnabled] = useState(true); // Haptic feedback aktif
   const [torchOn, setTorchOn] = useState(false);
-  const [useNativePPG, setUseNativePPG] = useState(true);
+  const [useNativePPG, setUseNativePPG] = useState(true); // ONLY REAL PPG DATA - NO SIMULATION ALLOWED
   const [roi, setRoi] = useState(0.4);
+  const [ppgChannel, setPpgChannel] = useState<'green' | 'red' | 'luma'>('green');
 
   const device = useCameraDevice('back', {
     physicalDevices: ['wide-angle-camera'],
@@ -109,6 +113,7 @@ export default function CameraPPGAnalyzer() {
   const lastAnalysisTimeRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
   const torchTimerRef = useRef<any>(null);
+  const simulationTimerRef = useRef<any>(null);
   const torchOnTimeRef = useRef<number | null>(null);
   const preTorchFramesRef = useRef<number>(0);
   const smoothBufRef = useRef<number[]>([]);
@@ -201,35 +206,15 @@ export default function CameraPPGAnalyzer() {
     }
   };
 
-  // Frame tick handler: simulate PPG on JS side, keep buffer & trigger analysis
+  // Frame tick handler - NO SIMULATION, sadece frame count
   const onFrameTick = useCallback((timestamp: number) => {
-    setFrameCount(prev => prev + 1);
-
-    // Simulate PPG signal (remove once real extractor is stable)
-    const nowSec = Date.now() / 1000;
-    const hrHz = 1.2; // ~72 BPM
-    const sample =
-      512 +
-      8 * Math.sin(2 * Math.PI * hrHz * nowSec) +
-      2 * Math.sin(2 * Math.PI * hrHz * 2 * nowSec) +
-      0.5 * Math.sin(2 * Math.PI * 0.25 * nowSec) +
-      (Math.random() - 0.5) * 0.5;
-
-    frameBufferRef.current.push(sample);
-    if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
-
-    setPpgSignal(prev => {
-      const next = [...prev, sample];
-      if (next.length > 100) next.shift();
-      return next;
-    });
-
-    const now = Date.now();
-    if (now - lastAnalysisTimeRef.current > analysisInterval && frameBufferRef.current.length >= samplingRate * 3) {
-      lastAnalysisTimeRef.current = now;
-      performRealtimeAnalysis();
+    try {
+      setFrameCount(prev => prev + 1);
+      // NO SIMULATION - sadece frame counter için kullanılıyor
+    } catch (tickError) {
+      console.error('onFrameTick error:', tickError);
     }
-  }, [analysisInterval]);
+  }, []);
 
   // Real sample handler from native plugin
   const onFrameSample = useCallback((timestamp: number, sample: number) => {
@@ -294,31 +279,122 @@ export default function CameraPPGAnalyzer() {
     }
   }, [analysisInterval, samplingRate, useNativePPG]);
 
-  // Frame işleme
+  // Global communication - worklet ↔ main thread
+  const globalFrameCounter = useRef(0);
+  const ppgDataBuffer = useRef<number[]>([]);
+  
+  // Native module polling for real PPG data - practical UI solution
+  useEffect(() => {
+    if (!isActive || !useNativePPG) return;
+    
+    const pollingInterval = setInterval(async () => {
+      try {
+        // Direct native module call for PPG buffer
+        const samples = await NativeModules.HeartPyModule?.getLatestPPGSamples?.();
+        
+        if (samples && Array.isArray(samples) && samples.length > 0) {
+          // Update UI with real PPG data
+          const latestSamples = samples.slice(-10); // Last 10 samples
+          
+          latestSamples.forEach(sample => {
+            const val = typeof sample === 'number' ? sample : parseFloat(sample);
+            if (isFinite(val)) {
+              frameBufferRef.current.push(val);
+              if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
+            }
+          });
+          
+          setPpgSignal(prev => {
+            const validSamples = latestSamples.filter(s => isFinite(parseFloat(s)));
+            const next = [...prev, ...validSamples.map(s => parseFloat(s))];
+            if (next.length > 100) return next.slice(-100);
+            return next;
+          });
+          
+          console.log(`✅ Real PPG polled from native: ${latestSamples.length} samples, buffer total: ${samples.length}`);
+        } else {
+          console.log(`📊 Native PPG buffer empty, waiting...`);
+        }
+      } catch (pollError) {
+        console.error('PPG polling error:', pollError);
+      }
+    }, 300); // ~3 Hz polling for UI responsiveness
+    
+    return () => clearInterval(pollingInterval);
+  }, [isActive, useNativePPG, bufferSize]);
+
+  // Frame işleme - Debug worklet console.log test
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
     try {
-      const ts = (frame as any)?.timestamp ?? 0;
+      globalFrameCounter.current = (globalFrameCounter.current || 0) + 1;
+      
       if (useNativePPG) {
-        // Use plugin initialized on JS thread
+        // Gerçek PPG plugin - minimal runOnJS transfer
         const plugin = ppgPlugin;
-        if (plugin != null) {
-          const v = plugin.call(frame, { roi, channel: 'red', step: 2 }) as number;
-          runOnJS(onFrameSample)(ts, v);
-        } else {
-          runOnJS(onFrameError)('ppgMean plugin not available');
+        
+        if (plugin != null && frame != null) {
+          try {
+            const v = plugin.call(frame, { roi, channel: ppgChannel, step: 2 }) as number;
+            
+            if (typeof v === 'number' && isFinite(v)) {
+              // Console'da gerçek PPG değerlerini göster
+              if (globalFrameCounter.current % 60 === 0) {
+                console.log(`📊 Real PPG Value: ${v.toFixed(1)} (Frame ${globalFrameCounter.current})`);
+              }
+              
+              // Kalp atışı peak detection (basit threshold)
+              if (v > 100) {
+                console.log(`💓 Heart Beat Peak Detected: ${v.toFixed(1)} at frame ${globalFrameCounter.current}`);
+              }
+              
+              // Native-only data flow: ppgMean plugin posts NSNotification automatically
+              // No need to access NativeModules from worklet (not possible in RN 0.74+)
+            }
+          } catch (pluginError) {
+            if (globalFrameCounter.current % 120 === 0) {
+              console.log('PPG plugin error:', pluginError);
+            }
+          }
         }
-      } else {
-        // Notify JS to simulate/handle buffering
-        runOnJS(onFrameTick)(ts);
       }
-    } catch (error) {
-      // Only pass simple data across the bridge
-      // Avoid sending full error objects from worklet → JS
-      const msg = `Frame processor error: ${error}`;
-      runOnJS(onFrameError)(msg);
+      
+      // Frame count log (minimal)
+      if (globalFrameCounter.current % 120 === 0) {
+        console.log(`PPG Frames: ${globalFrameCounter.current} processed`);
+      }
+    } catch (e) {
+      console.log('Frame processor error:', e);
     }
-  }, [onFrameTick, onFrameSample, useNativePPG, roi, ppgPlugin]);
+  }, [useNativePPG, roi, ppgPlugin, ppgChannel]);
+
+  // Timer ile global frame counter'ı UI'ye yansıt
+  useEffect(() => {
+    if (!isActive) return;
+    
+    const uiUpdateTimer = setInterval(() => {
+      const count = globalFrameCounter.current || 0;
+      setFrameCount(count);
+      
+      // Gerçek PPG verisi - runOnJS transfer ile
+      const realPPGBuffer = ppgDataBuffer.current;
+      
+      // PPG data only comes from event emitter - no manual UI logic needed
+      // Event listener automatically handles frameBufferRef and setPpgSignal updates
+      
+      if (count % 60 === 0) {
+        console.log(`UI Timer: frameBuffer: ${frameBufferRef.current.length}, ppgBuffer: ${realPPGBuffer.length}`);
+      }
+
+      const now = Date.now();
+      if (now - lastAnalysisTimeRef.current > analysisInterval && frameBufferRef.current.length >= samplingRate * 3) {
+        lastAnalysisTimeRef.current = now;
+        performRealtimeAnalysis();
+      }
+    }, 1000 / 15); // 15 FPS UI update
+    
+    return () => clearInterval(uiUpdateTimer);
+  }, [isActive, analysisInterval, samplingRate, bufferSize, useNativePPG]);
 
   // Derive bad exposure badge at 2 Hz
   useEffect(() => {
@@ -354,9 +430,11 @@ export default function CameraPPGAnalyzer() {
     return () => clearInterval(id);
   }, []);
 
-  // Real-time analiz
+  // Real-time analiz - Native analyzer simulated data ile
   const performRealtimeAnalysis = async () => {
     if (!analyzerRef.current || frameBufferRef.current.length < 60) return;
+    
+    console.log(`Performing analysis with ${frameBufferRef.current.length} samples`);
 
     try {
       // Son n sample'ı al (3 saniye)
@@ -364,27 +442,47 @@ export default function CameraPPGAnalyzer() {
       const samples = frameBufferRef.current.slice(-samplesNeeded);
       const samplesArray = new Float32Array(samples);
       
-      // Streaming analyzer'a gönder
-      await analyzerRef.current.push(samplesArray);
+      // Validate samples array
+      if (samplesArray.length === 0 || !samplesArray.every(s => typeof s === 'number' && isFinite(s))) {
+        console.warn('Invalid samples for analysis');
+        return;
+      }
       
-      // Metrikleri al
-      const result = await analyzerRef.current.poll();
+      // Streaming analyzer'a gönder - defensive native call
+      try {
+        await analyzerRef.current.push(samplesArray);
+      } catch (pushError) {
+        console.error('Native analyzer push failed:', pushError);
+        setStatusMessage('❌ Native analyzer push hatası');
+        return;
+      }
       
-      if (result) {
-        const newMetrics: PPGMetrics = {
-          bpm: result.bpm,
-          confidence: (result as any).quality?.confidence ?? 0,
-          snrDb: (result as any).quality?.snrDb ?? 0,
-          rmssd: result.rmssd,
-          sdnn: result.sdnn,
-          pnn50: result.pnn50,
-          lfhf: result.lfhf,
-          breathingRate: result.breathingRate,
-          quality: result.quality,
-        };
-        
-        setMetrics(newMetrics);
-        
+      // Metrikleri al - defensive native call
+      let result;
+      try {
+        result = await analyzerRef.current.poll();
+      } catch (pollError) {
+        console.error('Native analyzer poll failed:', pollError);
+        setStatusMessage('❌ Native analyzer poll hatası');
+        return;
+      }
+      
+      if (result && typeof result === 'object') {
+        try {
+          const newMetrics: PPGMetrics = {
+            bpm: typeof result.bpm === 'number' ? result.bpm : 0,
+            confidence: (result as any).quality?.confidence ?? 0,
+            snrDb: (result as any).quality?.snrDb ?? 0,
+            rmssd: typeof result.rmssd === 'number' ? result.rmssd : 0,
+            sdnn: typeof result.sdnn === 'number' ? result.sdnn : 0,
+            pnn50: typeof result.pnn50 === 'number' ? result.pnn50 : 0,
+            lfhf: typeof result.lfhf === 'number' ? result.lfhf : 0,
+            breathingRate: typeof result.breathingRate === 'number' ? result.breathingRate : 0,
+            quality: result.quality || { goodQuality: false, totalBeats: 0, rejectedBeats: 0, rejectionRate: 0 },
+          };
+          
+          setMetrics(newMetrics);
+          
         // Check for new beats and trigger haptic feedback
         const currentBeatCount = newMetrics.quality.totalBeats;
         if (currentBeatCount > lastBeatCount && lastBeatCount > 0) {
@@ -392,23 +490,37 @@ export default function CameraPPGAnalyzer() {
           const newBeats = currentBeatCount - lastBeatCount;
           console.log(`💓 ${newBeats} new beat(s) detected! Total: ${currentBeatCount}`);
           
-          // Trigger haptic for each new beat (but limit to reasonable amount)
-          for (let i = 0; i < Math.min(newBeats, 3); i++) {
-            setTimeout(() => triggerHapticForBeat(), i * 100); // Stagger multiple beats
+          // Immediate haptic trigger for new beats
+          if (hapticEnabled) {
+            try {
+              const Haptics = getHaptics();
+              if (Haptics) {
+                Haptics.trigger('impactMedium', hapticOptions);
+                console.log(`📳 Haptic triggered for beat ${currentBeatCount}`);
+              } else {
+                console.log('📳 Haptic module not available');
+              }
+            } catch (e) {
+              console.error('Haptic error:', e);
+            }
           }
         }
         setLastBeatCount(currentBeatCount);
-        
-        // Status mesajını güncelle
-        if (newMetrics.quality.goodQuality) {
-          setStatusMessage(`✅ Kaliteli sinyal - BPM: ${newMetrics.bpm.toFixed(0)} 💓 ${currentBeatCount} beat`);
-        } else {
-          setStatusMessage(`⚠️ Zayıf sinyal - ${newMetrics.quality.qualityWarning || 'Parmağınızı kameraya daha iyi yerleştirin'}`);
+          
+          // Status mesajını güncelle
+          if (newMetrics.quality.goodQuality) {
+            setStatusMessage(`✅ Kaliteli sinyal - BPM: ${newMetrics.bpm.toFixed(0)} 💓 ${currentBeatCount} beat`);
+          } else {
+            setStatusMessage(`⚠️ Zayıf sinyal - ${newMetrics.quality.qualityWarning || 'Parmağınızı kameraya daha iyi yerleştirin'}`);
+          }
+        } catch (metricsError) {
+          console.error('Metrics processing error:', metricsError);
+          setStatusMessage('❌ Metrik işleme hatası');
         }
       }
     } catch (error) {
-      console.warn('Analysis error:', error);
-      setStatusMessage('❌ Analiz hatası');
+      console.error('Analysis error:', error);
+      setStatusMessage('❌ Analiz hatası - detay: ' + String(error));
     }
   };
 
@@ -424,14 +536,24 @@ export default function CameraPPGAnalyzer() {
       setTorchOn(false);
       preTorchFramesRef.current = 0;
       if (analyzerRef.current) {
-        await analyzerRef.current.destroy();
+        try {
+          await analyzerRef.current.destroy();
+        } catch (destroyError) {
+          console.error('Native analyzer destroy failed:', destroyError);
+        }
         analyzerRef.current = null;
       }
       if (torchTimerRef.current) {
         clearTimeout(torchTimerRef.current);
         torchTimerRef.current = null;
       }
+      if (simulationTimerRef.current) {
+        clearInterval(simulationTimerRef.current);
+        simulationTimerRef.current = null;
+      }
       frameBufferRef.current = [];
+      ppgDataBuffer.current = [];
+      globalFrameCounter.current = 0;
       setMetrics(null);
       setPpgSignal([]);
       setLastBeatCount(0);
@@ -475,32 +597,46 @@ export default function CameraPPGAnalyzer() {
             warnedJSIFallbackRef.current = true;
           }
         } catch {}
-        analyzerRef.current = await HP.RealtimeAnalyzer.create(samplingRate, {
-          bandpass: { lowHz: 0.5, highHz: 4.0, order: 2 },
-          welch: { nfft: 512, overlap: 0.5 },
-          peak: { 
-            refractoryMs: 300, 
-            thresholdScale: 0.6, 
-            bpmMin: 50, 
-            bpmMax: 150 
-          },
-          quality: {
-            cleanRR: true,
-            cleanMethod: 'quotient-filter',
-          },
-        });
+        try {
+          // Gerçek native analyzer - güvenli minimal options
+          analyzerRef.current = await HP.RealtimeAnalyzer.create(samplingRate, {
+            bandpass: { lowHz: 0.5, highHz: 4.0, order: 2 },
+            welch: { nfft: 512, overlap: 0.5 },
+            peak: { 
+              refractoryMs: 300, 
+              thresholdScale: 0.6, 
+              bpmMin: 50, 
+              bpmMax: 150 
+            }
+            // quality options removed to prevent crash
+          });
+          console.log('Real native analyzer created successfully');
+        } catch (createError) {
+          console.error('Native analyzer creation failed:', createError);
+          // NO MOCK FALLBACK - sadece gerçek analyzer
+          throw createError; // Re-throw to stop analysis
+        }
         console.log('Analyzer created successfully:', !!analyzerRef.current);
         // Kamerayı aktif et (permission granted). If device not ready, defer activation.
         if (device) {
           console.log('🟢 Setting camera active...');
           setIsActive(true);
+          
+          // Flash'ı direkt aç (PPG için gerekli)
+          setTimeout(() => {
+            if (device?.hasTorch) {
+              setTorchOn(true);
+              console.log('🔦 Flash enabled for PPG');
+            }
+          }, 500); // Kamera initialization sonrası
         } else {
           console.log('⏳ Device not ready yet; will activate when available');
           pendingActivateRef.current = true;
           setStatusMessage('Kamera hazırlanıyor...');
         }
-        setStatusMessage('Analiz başlatıldı');
-        console.log(`PPG Analysis started with ${targetFps} FPS sampling via frameProcessor`);
+        
+        setStatusMessage('🔴 Gerçek PPG analizi aktif - console\'da veriler görünür');
+        console.log(`Real PPG analysis active - check console for PPG values`);
       } catch (error) {
         console.error('Start analysis error:', error);
         try { console.error('Error type:', typeof error); } catch {}
@@ -527,11 +663,19 @@ export default function CameraPPGAnalyzer() {
   useEffect(() => {
     return () => {
       if (analyzerRef.current) {
-        analyzerRef.current.destroy();
+        try {
+          analyzerRef.current.destroy();
+        } catch (cleanupError) {
+          console.error('Cleanup analyzer destroy failed:', cleanupError);
+        }
       }
       if (torchTimerRef.current) {
         clearTimeout(torchTimerRef.current);
         torchTimerRef.current = null;
+      }
+      if (simulationTimerRef.current) {
+        clearInterval(simulationTimerRef.current);
+        simulationTimerRef.current = null;
       }
     };
   }, []);
@@ -554,7 +698,7 @@ export default function CameraPPGAnalyzer() {
             style={styles.camera}
             device={device}
             isActive={isActive}
-            frameProcessor={isActive ? frameProcessor : undefined}
+            frameProcessor={isActive ? frameProcessor : undefined} // Minimal frame processor test
             {...(Platform.OS === 'android' ? { fps: targetFps } : {})}
             torch={device?.hasTorch && torchOn ? 'on' : 'off'}
             onError={(error) => {
@@ -568,15 +712,13 @@ export default function CameraPPGAnalyzer() {
             }}
             onInitialized={() => {
               console.log('🟢 Camera initialized successfully');
-              if (Platform.OS === 'android') {
-                console.log('🟢 Setting up torch timer for Android');
-                if (torchTimerRef.current) clearTimeout(torchTimerRef.current);
-                torchTimerRef.current = setTimeout(() => {
-                  if (isActive) setTorchOn(true);
+              // Enable torch for PPG on both platforms
+              if (device?.hasTorch && isAnalyzing) {
+                setTimeout(() => {
+                  setTorchOn(true);
                   try { torchOnTimeRef.current = Date.now(); } catch {}
+                  console.log('🔦 Torch enabled for PPG measurement');
                 }, 300);
-              } else {
-                console.log('🟢 iOS: Torch will be enabled after frame processing starts');
               }
             }}
           />
@@ -651,7 +793,7 @@ export default function CameraPPGAnalyzer() {
           disabled={isAnalyzing}
         >
           <Text style={styles.hapticButtonText}>
-            {useNativePPG ? 'PPG: Native ROI' : 'PPG: Simulated'}
+            {useNativePPG ? 'PPG: Native ROI' : 'PPG: Off'}
           </Text>
         </TouchableOpacity>
 
@@ -670,15 +812,63 @@ export default function CameraPPGAnalyzer() {
             {`ROI ${roi.toFixed(1)}`}
           </Text>
         </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton]}
+          onPress={() => {
+            const order: Array<'green' | 'red' | 'luma'> = ['green', 'red', 'luma'];
+            const i = order.indexOf(ppgChannel);
+            const next = order[(i + 1) % order.length];
+            setPpgChannel(next);
+          }}
+          disabled={isAnalyzing || !useNativePPG}
+        >
+          <Text style={styles.hapticButtonText}>
+            {`CH ${ppgChannel}`}
+          </Text>
+        </TouchableOpacity>
       </View>
 
-      {/* PPG Sinyali Gösterimi */}
+      {/* PPG Sinyali Gösterimi - Kalp Grafiği */}
       {ppgSignal.length > 0 && (
         <View style={styles.signalContainer}>
-          <Text style={styles.signalTitle}>PPG Sinyali (son {ppgSignal.length} sample)</Text>
+          <Text style={styles.signalTitle}>💓 PPG Kalp Grafiği (son {ppgSignal.length} sample)</Text>
           <Text style={styles.signalText}>
             Frame: {frameCount} | Buffer: {frameBufferRef.current.length}
           </Text>
+          
+          {/* Basit PPG Waveform Grafiği */}
+          <View style={styles.waveformContainer}>
+            {ppgSignal.slice(-50).map((value, index) => {
+              // Normalize value to 0-100 height
+              const minVal = Math.min(...ppgSignal);
+              const maxVal = Math.max(...ppgSignal);
+              const normalizedHeight = maxVal > minVal 
+                ? ((value - minVal) / (maxVal - minVal)) * 100 
+                : 50;
+              
+              return (
+                <View
+                  key={index}
+                  style={[
+                    styles.waveformBar,
+                    { 
+                      height: Math.max(2, normalizedHeight),
+                      backgroundColor: normalizedHeight > 70 ? '#ff4444' : 
+                                     normalizedHeight > 40 ? '#ff8800' : '#44ff44'
+                    }
+                  ]}
+                />
+              );
+            })}
+          </View>
+          
+          {/* PPG Value Range */}
+          {ppgSignal.length > 10 && (
+            <Text style={styles.rangeText}>
+              Range: {Math.min(...ppgSignal).toFixed(0)} - {Math.max(...ppgSignal).toFixed(0)}
+            </Text>
+          )}
         </View>
       )}
 
@@ -840,6 +1030,27 @@ const styles = StyleSheet.create({
   signalText: {
     fontSize: 12,
     color: '#666',
+  },
+  waveformContainer: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    height: 100,
+    backgroundColor: '#1a1a1a',
+    borderRadius: 8,
+    marginTop: 8,
+    paddingHorizontal: 4,
+    paddingVertical: 4,
+  },
+  waveformBar: {
+    width: 3,
+    marginHorizontal: 0.5,
+    borderRadius: 1,
+  },
+  rangeText: {
+    fontSize: 11,
+    color: '#888',
+    marginTop: 4,
+    textAlign: 'center',
   },
   metricsContainer: {
     backgroundColor: 'white',
