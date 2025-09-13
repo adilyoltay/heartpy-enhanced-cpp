@@ -89,6 +89,14 @@ export default function CameraPPGAnalyzer() {
   const [ppgGrid, setPpgGrid] = useState<1 | 2 | 3>(1);
   const [pluginConfidence, setPluginConfidence] = useState<number>(0);
   const [autoSelect, setAutoSelect] = useState(true);
+  
+  // Derived: blended final confidence (0..1)
+  const finalConfidence = (() => {
+    const m = metrics?.confidence ?? 0;
+    const p = pluginConfidence ?? 0;
+    return Math.max(0, Math.min(1, 0.5 * m + 0.5 * p));
+  })();
+  const confColor = finalConfidence >= 0.7 ? '#4CAF50' : finalConfidence >= 0.4 ? '#FB8C00' : '#f44336';
 
   const device = useCameraDevice('back', {
     physicalDevices: ['wide-angle-camera'],
@@ -740,6 +748,18 @@ export default function CameraPPGAnalyzer() {
           </Text>
         </TouchableOpacity>
 
+        {device?.hasTorch && (
+          <TouchableOpacity
+            style={[styles.button, styles.hapticButton, torchOn ? styles.hapticEnabled : styles.hapticDisabled]}
+            onPress={() => setTorchOn(!torchOn)}
+            disabled={!isActive}
+          >
+            <Text style={styles.hapticButtonText}>
+              {torchOn ? '🔦 Torch ON' : '🔦 Torch OFF'}
+            </Text>
+          </TouchableOpacity>
+        )}
+
         <TouchableOpacity
           style={[styles.button, styles.hapticButton]}
           onPress={async () => {
@@ -799,6 +819,51 @@ export default function CameraPPGAnalyzer() {
           <Text style={styles.hapticButtonText}>
             {`GRID ${ppgGrid}`}
           </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Durum / Ayar Özeti */}
+      <View style={styles.infoRow}>
+        <Text style={styles.infoText}>
+          {`Mode: ${ppgMode.toUpperCase()}  •  CH: ${ppgChannel.toUpperCase()}  •  GRID: ${ppgGrid}  •  Torch: ${torchOn ? 'ON' : 'OFF'}  •  Auto: ${autoSelect ? 'ON' : 'OFF'}`}
+        </Text>
+        <View style={[styles.qualityPill, { backgroundColor: confColor }]}> 
+          <Text style={styles.qualityPillText}>{Math.round(finalConfidence * 100)}%</Text>
+        </View>
+      </View>
+
+      {/* Hızlı Modlar */}
+      <View style={styles.controlsContainer}>
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton]}
+          onPress={() => {
+            setAutoSelect(false);
+            if (device?.hasTorch) setTorchOn(true);
+            setPpgChannel('red'); setPpgMode('mean'); setPpgGrid(1);
+          }}
+          disabled={isAnalyzing}
+        >
+          <Text style={styles.hapticButtonText}>🖐️ Parmak (Torch+Red)</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton]}
+          onPress={() => {
+            setAutoSelect(false);
+            setTorchOn(false);
+            setPpgChannel('green'); setPpgMode('chrom'); setPpgGrid(2);
+          }}
+          disabled={isAnalyzing}
+        >
+          <Text style={styles.hapticButtonText}>🙂 Yüz (CHROM+Green)</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton, autoSelect ? styles.hapticEnabled : styles.hapticDisabled]}
+          onPress={() => setAutoSelect(!autoSelect)}
+          disabled={isAnalyzing}
+        >
+          <Text style={styles.hapticButtonText}>{autoSelect ? 'AUTO ON' : 'AUTO OFF'}</Text>
         </TouchableOpacity>
       </View>
 
@@ -986,6 +1051,31 @@ const styles = StyleSheet.create({
     fontSize: 18,
     color: '#666',
     marginBottom: 20,
+  },
+  infoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 8,
+    marginBottom: 8,
+  },
+  infoText: {
+    color: '#666',
+    fontSize: 12,
+    flexShrink: 1,
+    marginRight: 8,
+  },
+  qualityPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  qualityPillText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
   },
   cameraPlaceholder: {
     height: 220,
