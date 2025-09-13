@@ -288,7 +288,7 @@ export default function CameraPPGAnalyzer() {
       if (useNativePPG) {
         const plugin = (ppgPluginRef as any)?.current;
         // Call native plugin for ROI mean intensity
-        const v = plugin?.call?.(frame, { roi });
+        const v = plugin?.call?.(frame, { roi, channel: 'red', step: 2 });
         const sample = typeof v === 'number' ? v : 0;
         runOnJS(onFrameSample)(ts, sample);
       } else {
