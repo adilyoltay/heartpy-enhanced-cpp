@@ -59,11 +59,20 @@
 
   double outSample = NAN;
   double outConfidence = NAN;
+  // Rolling history for CHROM/POS (aggregated ROI means)
+  static const int HP_HIST_N = 64;
+  static double rHist[HP_HIST_N];
+  static double gHist[HP_HIST_N];
+  static double bHist[HP_HIST_N];
+  static double yHist[HP_HIST_N];
+  static int histPos = 0;
+  static int histCount = 0;
 
   // Multi-ROI aggregation with simple exposure-based weighting
   double weightedSum = 0.0;
   double weightTotal = 0.0;
   double confAccum = 0.0;
+  double wSumR = 0.0, wSumG = 0.0, wSumB = 0.0, wSumY = 0.0;
 
   if (type == kCVPixelFormatType_32BGRA) {
     uint8_t* base = (uint8_t*)CVPixelBufferGetBaseAddress(pixelBuffer);
@@ -90,15 +99,7 @@
         if (cnt == 0) continue;
         double Rm = (double)sumR / (double)cnt; double Gm = (double)sumG / (double)cnt; double Bm = (double)sumB / (double)cnt;
         double Ym = 0.114 * Bm + 0.587 * Gm + 0.299 * Rm;
-        double value = 0.0;
-        if (useCHROM) {
-          double X = 3.0 * Rm - 2.0 * Gm;
-          double Yc = 1.5 * Rm + 1.0 * Gm - 1.5 * Bm;
-          double S = X - 1.0 * Yc; // alpha=1.0
-          value = 128.0 + 0.5 * S;
-        } else {
-          if ([channel isEqualToString:@"red"]) value = Rm; else if ([channel isEqualToString:@"luma"]) value = Ym; else value = Gm;
-        }
+        double value = ([channel isEqualToString:@"red"]) ? Rm : ([channel isEqualToString:@"luma"]) ? Ym : Gm;
         if (value < 0.0) value = 0.0; if (value > 255.0) value = 255.0;
         // exposure score from luma
         double expScore = 1.0;
@@ -112,6 +113,7 @@
         double conf = fmin(1.0, fmax(0.0, 0.7 * expScore + 0.3 * ampScore));
         double w = fmax(1e-6, expScore);
         weightedSum += w * value; weightTotal += w; confAccum += w * conf;
+        wSumR += w * Rm; wSumG += w * Gm; wSumB += w * Bm; wSumY += w * Ym;
       }
     }
   } else {
@@ -148,26 +150,150 @@
         }
         if (cnt == 0) continue;
         double Rm = (double)sumR / (double)cnt; double Gm = (double)sumG / (double)cnt; double Bm = (double)sumB / (double)cnt; double Ym = (double)sumY / (double)cnt;
-        double value = 0.0;
-        if (useCHROM) {
-          double X = 3.0 * Rm - 2.0 * Gm; double Yc = 1.5 * Rm + 1.0 * Gm - 1.5 * Bm; double S = X - 1.0 * Yc;
-          value = 128.0 + 0.5 * S;
-        } else {
-          if ([channel isEqualToString:@"red"]) value = Rm; else if ([channel isEqualToString:@"luma"]) value = Ym; else value = Gm;
-        }
+        double value = ([channel isEqualToString:@"red"]) ? Rm : ([channel isEqualToString:@"luma"]) ? Ym : Gm;
         if (value < 0.0) value = 0.0; if (value > 255.0) value = 255.0;
         double expScore = 1.0; if (Ym < 15.0) expScore = fmax(0.0, Ym / 15.0); else if (Ym > 240.0) expScore = fmax(0.0, (255.0 - Ym) / 15.0);
         double ampScore = 0.0; if (useCHROM) { double Sabs = fabs((3.0 * Rm - 2.0 * Gm) - (1.5 * Rm + 1.0 * Gm - 1.5 * Bm)); ampScore = fmin(1.0, Sabs / 50.0);} 
         double conf = fmin(1.0, fmax(0.0, 0.7 * expScore + 0.3 * ampScore));
         double w = fmax(1e-6, expScore);
         weightedSum += w * value; weightTotal += w; confAccum += w * conf;
+        wSumR += w * Rm; wSumG += w * Gm; wSumB += w * Bm; wSumY += w * Ym;
       }
     }
   }
 
   double mean = (weightTotal > 0.0) ? (weightedSum / weightTotal) : NAN;
-  outSample = mean;
-  outConfidence = (weightTotal > 0.0) ? (confAccum / weightTotal) : NAN;
+  double Ragg = (weightTotal > 0.0) ? (wSumR / weightTotal) : NAN;
+  double Gagg = (weightTotal > 0.0) ? (wSumG / weightTotal) : NAN;
+  double Bagg = (weightTotal > 0.0) ? (wSumB / weightTotal) : NAN;
+  double Yagg = (weightTotal > 0.0) ? (wSumY / weightTotal) : NAN;
+
+  // Update rolling history
+  if (isfinite(Ragg) && isfinite(Gagg) && isfinite(Bagg) && isfinite(Yagg)) {
+    rHist[histPos] = Ragg; gHist[histPos] = Gagg; bHist[histPos] = Bagg; yHist[histPos] = Yagg;
+    histPos = (histPos + 1) % HP_HIST_N;
+    if (histCount < HP_HIST_N) histCount++;
+  }
+
+  // Compute outSample based on mode using rolling alpha (CHROM) or POS
+  if ([mode isEqualToString:@"mean"]) {
+    outSample = mean;
+  } else if (histCount >= 8) {
+    // Build arrays over available window
+    int N = histCount;
+    // Compute X, Y over window
+    double stdX = 0.0, stdYc = 0.0, meanX = 0.0, meanYc = 0.0;
+    for (int i = 0; i < N; ++i) {
+      int idx = (histPos - 1 - i + HP_HIST_N) % HP_HIST_N;
+      double Rv = rHist[idx], Gv = gHist[idx], Bv = bHist[idx];
+      double Xv = 3.0 * Rv - 2.0 * Gv;
+      double Ycv = 1.5 * Rv + 1.0 * Gv - 1.5 * Bv;
+      meanX += Xv; meanYc += Ycv;
+    }
+    meanX /= N; meanYc /= N;
+    for (int i = 0; i < N; ++i) {
+      int idx = (histPos - 1 - i + HP_HIST_N) % HP_HIST_N;
+      double Rv = rHist[idx], Gv = gHist[idx], Bv = bHist[idx];
+      double Xv = 3.0 * Rv - 2.0 * Gv;
+      double Ycv = 1.5 * Rv + 1.0 * Gv - 1.5 * Bv;
+      stdX += (Xv - meanX) * (Xv - meanX);
+      stdYc += (Ycv - meanYc) * (Ycv - meanYc);
+    }
+    stdX = sqrt(stdX / fmax(1, N - 1));
+    stdYc = sqrt(stdYc / fmax(1, N - 1));
+    double alpha = (stdYc > 1e-6) ? (stdX / stdYc) : 1.0;
+
+    // Current X,Y values
+    int lastIdx = (histPos - 1 + HP_HIST_N) % HP_HIST_N;
+    double Rv = rHist[lastIdx], Gv = gHist[lastIdx], Bv = bHist[lastIdx];
+    double Xcur = 3.0 * Rv - 2.0 * Gv;
+    double Ycur = 1.5 * Rv + 1.0 * Gv - 1.5 * Bv;
+
+    if ([mode isEqualToString:@"chrom"] || [mode isEqualToString:@"pos"]) {
+      double Sc = 0.0;
+      if ([mode isEqualToString:@"chrom"]) {
+        Sc = Xcur - alpha * Ycur;
+      } else {
+        // POS: normalize RGB over window, compute S1,S2; S = S1_last + alpha_pos * S2_last
+        double meanR = 0.0, meanG = 0.0, meanB = 0.0;
+        for (int i = 0; i < N; ++i) {
+          int idx = (histPos - 1 - i + HP_HIST_N) % HP_HIST_N;
+          meanR += rHist[idx]; meanG += gHist[idx]; meanB += bHist[idx];
+        }
+        meanR /= N; meanG /= N; meanB /= N;
+        double s1Mean = 0.0, s2Mean = 0.0;
+        for (int i = 0; i < N; ++i) {
+          int idx = (histPos - 1 - i + HP_HIST_N) % HP_HIST_N;
+          double rN = (rHist[idx] / fmax(1e-6, meanR)) - 1.0;
+          double gN = (gHist[idx] / fmax(1e-6, meanG)) - 1.0;
+          double bN = (bHist[idx] / fmax(1e-6, meanB)) - 1.0;
+          double s1 = 3.0 * rN - 2.0 * gN;
+          double s2 = 1.5 * rN + 1.0 * gN - 1.5 * bN;
+          s1Mean += s1; s2Mean += s2;
+        }
+        s1Mean /= N; s2Mean /= N;
+        double var1 = 0.0, var2 = 0.0;
+        for (int i = 0; i < N; ++i) {
+          int idx = (histPos - 1 - i + HP_HIST_N) % HP_HIST_N;
+          double rN = (rHist[idx] / fmax(1e-6, meanR)) - 1.0;
+          double gN = (gHist[idx] / fmax(1e-6, meanG)) - 1.0;
+          double bN = (bHist[idx] / fmax(1e-6, meanB)) - 1.0;
+          double s1 = 3.0 * rN - 2.0 * gN;
+          double s2 = 1.5 * rN + 1.0 * gN - 1.5 * bN;
+          var1 += (s1 - s1Mean) * (s1 - s1Mean);
+          var2 += (s2 - s2Mean) * (s2 - s2Mean);
+        }
+        double std1 = sqrt(var1 / fmax(1, N - 1));
+        double std2 = sqrt(var2 / fmax(1, N - 1));
+        double alphaPos = (std2 > 1e-6) ? (std1 / std2) : 1.0;
+        // current normalized values
+        double rN = (Rv / fmax(1e-6, meanR)) - 1.0;
+        double gN = (Gv / fmax(1e-6, meanG)) - 1.0;
+        double bN = (Bv / fmax(1e-6, meanB)) - 1.0;
+        double s1Last = 3.0 * rN - 2.0 * gN;
+        double s2Last = 1.5 * rN + 1.0 * gN - 1.5 * bN;
+        Sc = s1Last + alphaPos * s2Last;
+      }
+      // map to 0..255 around 128
+      double k = 0.5; // conservative scale
+      outSample = 128.0 + k * Sc;
+      if (outSample < 0.0) outSample = 0.0; if (outSample > 255.0) outSample = 255.0;
+    }
+  } else {
+    outSample = mean;
+  }
+
+  // Dynamic exposure gating via Y percentiles
+  double expoGate = 1.0;
+  if (histCount >= 16) {
+    int N = histCount;
+    double tmp[HP_HIST_N];
+    for (int i = 0; i < N; ++i) {
+      int idx = (histPos - 1 - i + HP_HIST_N) % HP_HIST_N;
+      tmp[i] = yHist[idx];
+    }
+    // simple selection sort for small N to get p10/p90
+    for (int i = 0; i < N; ++i) {
+      int m = i;
+      for (int j = i + 1; j < N; ++j) if (tmp[j] < tmp[m]) m = j;
+      double t = tmp[i]; tmp[i] = tmp[m]; tmp[m] = t;
+    }
+    int i10 = (int)floor(0.1 * (N - 1));
+    int i90 = (int)floor(0.9 * (N - 1));
+    double p10 = tmp[i10]; double p90 = tmp[i90];
+    double gDark = fmin(1.0, fmax(0.0, p10 / 20.0));
+    double gSat = fmin(1.0, fmax(0.0, (255.0 - p90) / 20.0));
+    expoGate = fmin(gDark, gSat);
+  }
+
+  // Amplitude proxy based on CHROM/POS magnitude history
+  double ampConf = 0.0;
+  if (histCount >= 8) {
+    // reuse Xcur,Ycur for CHROM; approximate magnitude as stdX
+    ampConf = fmin(1.0, (/*stdX proxy*/ 1.0) * 0.8);
+  }
+  double baseConf = (weightTotal > 0.0) ? (confAccum / weightTotal) : 0.0;
+  outConfidence = fmin(1.0, fmax(0.0, 0.5 * baseConf + 0.5 * expoGate));
 
   CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
   if (!isfinite(outSample)) outSample = NAN;

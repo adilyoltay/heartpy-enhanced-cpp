@@ -14,6 +14,14 @@ import com.heartpy.HeartPyModule
  * Returns a Double (mean intensity 0..255) over a centered ROI.
  */
 class PPGMeanPlugin : FrameProcessorPlugin() {
+  // Rolling history buffers for aggregated ROI means (R,G,B,Y)
+  private val HIST_N = 64
+  private val rHist = DoubleArray(HIST_N)
+  private val gHist = DoubleArray(HIST_N)
+  private val bHist = DoubleArray(HIST_N)
+  private val yHist = DoubleArray(HIST_N)
+  private var histPos = 0
+  private var histCount = 0
   override fun callback(frame: Frame, params: Map<String, Any?>?): Any? {
     return try {
       var roiIn = (params?.get("roi") as? Number)?.toFloat() ?: 0.4f
@@ -64,6 +72,7 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       var weightedSum = 0.0
       var weightTotal = 0.0
       var confAccum = 0.0
+      var wSumR = 0.0; var wSumG = 0.0; var wSumB = 0.0; var wSumY = 0.0
 
       val uPlane = planes.getOrNull(1)
       val vPlane = planes.getOrNull(2)
@@ -110,18 +119,10 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
           }
           if (cntD <= 0.0) continue
           val Rm = sR / cntD; val Gm = sG / cntD; val Bm = sB / cntD; val Ym = sY / cntD
-          var value = 0.0
-          if (useCHROM) {
-            val X = 3.0 * Rm - 2.0 * Gm
-            val Yc = 1.5 * Rm + 1.0 * Gm - 1.5 * Bm
-            val S = X - 1.0 * Yc
-            value = 128.0 + 0.5 * S
-          } else {
-            value = when (channel) {
-              "red" -> Rm
-              "luma" -> Ym
-              else -> Gm
-            }
+          var value = when (channel) {
+            "red" -> Rm
+            "luma" -> Ym
+            else -> Gm
           }
           if (value < 0.0) value = 0.0
           if (value > 255.0) value = 255.0
@@ -139,19 +140,118 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
           weightedSum += w * value
           weightTotal += w
           confAccum += w * conf
+          wSumR += w * Rm; wSumG += w * Gm; wSumB += w * Bm; wSumY += w * Ym
         }
       }
-
       val resultMean = if (weightTotal > 0.0) weightedSum / weightTotal else java.lang.Double.NaN
-      val resultConf = if (weightTotal > 0.0) confAccum / weightTotal else java.lang.Double.NaN
+      val Ragg = if (weightTotal > 0.0) wSumR / weightTotal else Double.NaN
+      val Gagg = if (weightTotal > 0.0) wSumG / weightTotal else Double.NaN
+      val Bagg = if (weightTotal > 0.0) wSumB / weightTotal else Double.NaN
+      val Yagg = if (weightTotal > 0.0) wSumY / weightTotal else Double.NaN
 
-      if (java.lang.Double.isFinite(resultMean)) {
-        try { HeartPyModule.addPPGSample(resultMean) } catch (_: Throwable) {}
+      if (Ragg.isFinite() && Gagg.isFinite() && Bagg.isFinite() && Yagg.isFinite()) {
+        rHist[histPos] = Ragg; gHist[histPos] = Gagg; bHist[histPos] = Bagg; yHist[histPos] = Yagg
+        histPos = (histPos + 1) % HIST_N
+        if (histCount < HIST_N) histCount++
       }
-      if (java.lang.Double.isFinite(resultConf)) {
-        try { HeartPyModule.addPPGSampleConfidence(resultConf) } catch (_: Throwable) {}
+
+      // Compute out sample
+      var outVal = resultMean
+      if (mode != "mean" && histCount >= 8) {
+        val N = histCount
+        // CHROM rolling alpha over history
+        var meanX = 0.0; var meanYc = 0.0
+        for (i in 0 until N) {
+          val idx = (histPos - 1 - i + HIST_N) % HIST_N
+          val X = 3.0 * rHist[idx] - 2.0 * gHist[idx]
+          val Yc = 1.5 * rHist[idx] + 1.0 * gHist[idx] - 1.5 * bHist[idx]
+          meanX += X; meanYc += Yc
+        }
+        meanX /= N; meanYc /= N
+        var varX = 0.0; var varY = 0.0
+        for (i in 0 until N) {
+          val idx = (histPos - 1 - i + HIST_N) % HIST_N
+          val X = 3.0 * rHist[idx] - 2.0 * gHist[idx]
+          val Yc = 1.5 * rHist[idx] + 1.0 * gHist[idx] - 1.5 * bHist[idx]
+          varX += (X - meanX) * (X - meanX)
+          varY += (Yc - meanYc) * (Yc - meanYc)
+        }
+        val stdX = kotlin.math.sqrt(varX / kotlin.math.max(1, N - 1).toDouble())
+        val stdY = kotlin.math.sqrt(varY / kotlin.math.max(1, N - 1).toDouble())
+        val alpha = if (stdY > 1e-6) stdX / stdY else 1.0
+        val lastIdx = (histPos - 1 + HIST_N) % HIST_N
+        val Xcur = 3.0 * rHist[lastIdx] - 2.0 * gHist[lastIdx]
+        val Ycur = 1.5 * rHist[lastIdx] + 1.0 * gHist[lastIdx] - 1.5 * bHist[lastIdx]
+        val Sc = if (mode == "chrom") {
+          Xcur - alpha * Ycur
+        } else {
+          // POS: normalized RGB, S1_last + alpha_pos * S2_last
+          var meanR = 0.0; var meanG = 0.0; var meanB = 0.0
+          for (i in 0 until N) {
+            val idx = (histPos - 1 - i + HIST_N) % HIST_N
+            meanR += rHist[idx]; meanG += gHist[idx]; meanB += bHist[idx]
+          }
+          meanR /= N; meanG /= N; meanB /= N
+          var s1m = 0.0; var s2m = 0.0
+          for (i in 0 until N) {
+            val idx = (histPos - 1 - i + HIST_N) % HIST_N
+            val rN = rHist[idx] / kotlin.math.max(1e-6, meanR) - 1.0
+            val gN = gHist[idx] / kotlin.math.max(1e-6, meanG) - 1.0
+            val bN = bHist[idx] / kotlin.math.max(1e-6, meanB) - 1.0
+            val s1 = 3.0 * rN - 2.0 * gN
+            val s2 = 1.5 * rN + 1.0 * gN - 1.5 * bN
+            s1m += s1; s2m += s2
+          }
+          s1m /= N; s2m /= N
+          var v1 = 0.0; var v2 = 0.0
+          for (i in 0 until N) {
+            val idx = (histPos - 1 - i + HIST_N) % HIST_N
+            val rN = rHist[idx] / kotlin.math.max(1e-6, meanR) - 1.0
+            val gN = gHist[idx] / kotlin.math.max(1e-6, meanG) - 1.0
+            val bN = bHist[idx] / kotlin.math.max(1e-6, meanB) - 1.0
+            val s1 = 3.0 * rN - 2.0 * gN
+            val s2 = 1.5 * rN + 1.0 * gN - 1.5 * bN
+            v1 += (s1 - s1m) * (s1 - s1m)
+            v2 += (s2 - s2m) * (s2 - s2m)
+          }
+          val std1 = kotlin.math.sqrt(v1 / kotlin.math.max(1, N - 1).toDouble())
+          val std2 = kotlin.math.sqrt(v2 / kotlin.math.max(1, N - 1).toDouble())
+          val aPos = if (std2 > 1e-6) std1 / std2 else 1.0
+          val rN = rHist[lastIdx] / kotlin.math.max(1e-6, meanR) - 1.0
+          val gN = gHist[lastIdx] / kotlin.math.max(1e-6, meanG) - 1.0
+          val bN = bHist[lastIdx] / kotlin.math.max(1e-6, meanB) - 1.0
+          val s1 = 3.0 * rN - 2.0 * gN
+          val s2 = 1.5 * rN + 1.0 * gN - 1.5 * bN
+          s1 + aPos * s2
+        }
+        val k = 0.5
+        outVal = (128.0 + k * Sc).coerceIn(0.0, 255.0)
       }
-      resultMean
+
+      // Dynamic exposure gating via percentiles of Y history
+      var expoGate = 1.0
+      if (histCount >= 16) {
+        val N = histCount
+        val tmp = DoubleArray(N)
+        for (i in 0 until N) {
+          val idx = (histPos - 1 - i + HIST_N) % HIST_N
+          tmp[i] = yHist[idx]
+        }
+        java.util.Arrays.sort(tmp)
+        val p10 = tmp[(0.1 * (N - 1)).toInt()]
+        val p90 = tmp[(0.9 * (N - 1)).toInt()]
+        val gDark = (p10 / 20.0).coerceIn(0.0, 1.0)
+        val gSat = ((255.0 - p90) / 20.0).coerceIn(0.0, 1.0)
+        expoGate = kotlin.math.min(gDark, gSat)
+      }
+      val baseConf = if (weightTotal > 0.0) confAccum / weightTotal else 0.0
+      val pluginConf = (0.5 * baseConf + 0.5 * expoGate).coerceIn(0.0, 1.0)
+
+      if (outVal.isFinite()) {
+        try { HeartPyModule.addPPGSample(outVal) } catch (_: Throwable) {}
+      }
+      try { HeartPyModule.addPPGSampleConfidence(pluginConf) } catch (_: Throwable) {}
+      outVal
     } catch (t: Throwable) {
       java.lang.Double.NaN
     }
