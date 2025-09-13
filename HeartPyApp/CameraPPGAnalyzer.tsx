@@ -98,6 +98,7 @@ export default function CameraPPGAnalyzer() {
   const startTimeRef = useRef<number>(0);
   const torchTimerRef = useRef<any>(null);
   const torchOnTimeRef = useRef<number | null>(null);
+  const preTorchFramesRef = useRef<number>(0);
   const smoothBufRef = useRef<number[]>([]);
   const skipWindowRef = useRef<number[]>([]); // 1 = skipped, 0 = accepted
   const brightWindowRef = useRef<number[]>([]); // recent brightness samples
@@ -225,6 +226,15 @@ export default function CameraPPGAnalyzer() {
     if (sw.length > 30) sw.shift();
 
     if (skip) return;
+
+    // iOS-only torch gating: enable torch after a few stable frames
+    if (Platform.OS === 'ios' && isActive && !torchOn && useNativePPG) {
+      preTorchFramesRef.current += 1;
+      if (preTorchFramesRef.current >= 3) {
+        setTorchOn(true);
+        try { torchOnTimeRef.current = Date.now(); } catch {}
+      }
+    }
 
     // Smoothing: simple moving average over last N values (including this one)
     const N = 5; // ~150–250 ms at 15–30 FPS
@@ -383,6 +393,7 @@ export default function CameraPPGAnalyzer() {
       setIsAnalyzing(false);
       setIsActive(false);
       setTorchOn(false);
+      preTorchFramesRef.current = 0;
       if (analyzerRef.current) {
         await analyzerRef.current.destroy();
         analyzerRef.current = null;
@@ -504,12 +515,13 @@ export default function CameraPPGAnalyzer() {
       
       {/* Kamera Görünümü */}
       <View style={styles.cameraContainer}>
+        {/* Spread fps prop conditionally to avoid iOS format reconfig issues */}
         <Camera
           style={styles.camera}
           device={device}
           isActive={isActive}
           frameProcessor={isActive ? frameProcessor : undefined}
-          fps={targetFps}
+          {...(Platform.OS === 'android' ? { fps: targetFps } : {})}
           torch={device?.hasTorch && torchOn ? 'on' : 'off'} // Torch enabled after init delay
           onError={(error) => {
             console.error('Camera error:', error);
@@ -521,12 +533,14 @@ export default function CameraPPGAnalyzer() {
             setStatusMessage('❌ Kamera hatası: ' + error.message);
           }}
           onInitialized={() => {
-            // Delay torch enable to avoid crash on some devices
-            if (torchTimerRef.current) clearTimeout(torchTimerRef.current);
-            torchTimerRef.current = setTimeout(() => {
-              if (isActive) setTorchOn(true);
-              try { torchOnTimeRef.current = Date.now(); } catch {}
-            }, 300);
+        // Delay torch enable (Android only). On iOS, gate by processed frames in onFrameSample.
+        if (Platform.OS === 'android') {
+          if (torchTimerRef.current) clearTimeout(torchTimerRef.current);
+          torchTimerRef.current = setTimeout(() => {
+            if (isActive) setTorchOn(true);
+            try { torchOnTimeRef.current = Date.now(); } catch {}
+          }, 300);
+        }
           }}
         />
         {isActive && badExposure && (
