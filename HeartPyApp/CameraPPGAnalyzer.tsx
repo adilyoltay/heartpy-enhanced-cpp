@@ -10,7 +10,7 @@ import {
   PermissionsAndroid,
   Platform,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+// import AsyncStorage from '@react-native-async-storage/async-storage'; // Optional - not needed for basic functionality
 // Haptics is optional; load lazily to avoid crash if native module is missing
 let OptionalHaptics: any | null = null;
 function getHaptics(): any | null {
@@ -99,44 +99,16 @@ export default function CameraPPGAnalyzer() {
   const torchTimerRef = useRef<any>(null);
   const torchOnTimeRef = useRef<number | null>(null);
   const smoothBufRef = useRef<number[]>([]);
-  const ppgPluginRef = React.useRef<any | null>(null);
   const skipWindowRef = useRef<number[]>([]); // 1 = skipped, 0 = accepted
   const brightWindowRef = useRef<number[]>([]); // recent brightness samples
   const [badExposure, setBadExposure] = useState(false);
   const [badExposureReason, setBadExposureReason] = useState<'dark' | 'saturated' | null>(null);
 
-  // Initialize native ROI plugin (respect current ROI)
-  useEffect(() => {
-    try {
-      ppgPluginRef.current = VisionCameraProxy.initFrameProcessorPlugin('ppgMean', { roi });
-      console.log('ppgMean plugin initialized:', !!ppgPluginRef.current);
-    } catch (e) {
-      console.warn('ppgMean plugin init failed:', e);
-      ppgPluginRef.current = null;
-    }
-  }, [roi]);
+  // (iOS stability) Do NOT initialize plugins on JS thread.
+  // Plugins are initialized inside the worklet to avoid invalid handles.
 
   // Load persisted settings on mount
-  useEffect(() => {
-    (async () => {
-      try {
-        const [m, f, r, h] = await Promise.all([
-          AsyncStorage.getItem('ppg.mode'),
-          AsyncStorage.getItem('ppg.fps'),
-          AsyncStorage.getItem('ppg.roi'),
-          AsyncStorage.getItem('ppg.haptics'),
-        ]);
-        if (m === 'native' || m === 'sim') setUseNativePPG(m === 'native');
-        const fi = parseInt(f ?? '', 10);
-        if (fi === 15 || fi === 30) setTargetFps(fi);
-        const rv = parseFloat(r ?? '');
-        if (!Number.isNaN(rv) && rv >= 0.2 && rv <= 0.6) setRoi(rv);
-        if (h === 'true' || h === 'false') setHapticEnabled(h === 'true');
-      } catch (e) {
-        console.warn('Settings load failed:', e);
-      }
-    })();
-  }, []);
+  // Settings are now handled in-memory only (no AsyncStorage dependency)
 
   // Haptic feedback configuration
   const hapticOptions = {
@@ -286,11 +258,20 @@ export default function CameraPPGAnalyzer() {
     try {
       const ts = (frame as any)?.timestamp ?? 0;
       if (useNativePPG) {
-        const plugin = (ppgPluginRef as any)?.current;
-        // Call native plugin for ROI mean intensity
-        const v = plugin?.call?.(frame, { roi, channel: 'red', step: 2 });
-        const sample = typeof v === 'number' ? v : 0;
-        runOnJS(onFrameSample)(ts, sample);
+        // Initialize plugin inside worklet (once), then call per frame
+        // @ts-ignore
+        if (!(globalThis as any).__ppg) {
+          // @ts-ignore
+          (globalThis as any).__ppg = VisionCameraProxy.initFrameProcessorPlugin('ppgMean', {});
+        }
+        // @ts-ignore
+        const plugin = (globalThis as any).__ppg;
+        if (plugin != null) {
+          const v = plugin.call(frame, { roi, channel: 'red', step: 2 }) as number;
+          runOnJS(onFrameSample)(ts, v);
+        } else {
+          runOnJS(onFrameError)('ppgMean plugin not available');
+        }
       } else {
         // Notify JS to simulate/handle buffering
         runOnJS(onFrameTick)(ts);
@@ -584,10 +565,8 @@ export default function CameraPPGAnalyzer() {
 
         <TouchableOpacity 
           style={[styles.button, styles.hapticButton, hapticEnabled ? styles.hapticEnabled : styles.hapticDisabled]} 
-          onPress={async () => { 
-            const next = !hapticEnabled; 
-            setHapticEnabled(next); 
-            try { await AsyncStorage.setItem('ppg.haptics', String(next)); } catch {}
+          onPress={() => { 
+            setHapticEnabled(!hapticEnabled); 
           }}
         >
           <Text style={styles.hapticButtonText}>
@@ -597,10 +576,8 @@ export default function CameraPPGAnalyzer() {
 
         <TouchableOpacity
           style={[styles.button, styles.hapticButton]}
-          onPress={async () => {
-            const next = targetFps === 15 ? 30 : 15;
-            setTargetFps(next);
-            try { await AsyncStorage.setItem('ppg.fps', String(next)); } catch {}
+          onPress={() => {
+            setTargetFps(targetFps === 15 ? 30 : 15);
           }}
           disabled={isAnalyzing}
         >
@@ -611,10 +588,8 @@ export default function CameraPPGAnalyzer() {
 
         <TouchableOpacity
           style={[styles.button, styles.hapticButton, useNativePPG ? styles.hapticEnabled : styles.hapticDisabled]}
-          onPress={async () => {
-            const next = !useNativePPG;
-            setUseNativePPG(next);
-            try { await AsyncStorage.setItem('ppg.mode', next ? 'native' : 'sim'); } catch {}
+          onPress={() => {
+            setUseNativePPG(!useNativePPG);
           }}
           disabled={isAnalyzing}
         >
@@ -630,7 +605,7 @@ export default function CameraPPGAnalyzer() {
             const idx = steps.indexOf(Number(roi.toFixed(1)));
             const next = steps[(idx + 1) % steps.length];
             setRoi(next);
-            try { await AsyncStorage.setItem('ppg.roi', String(next)); } catch {}
+            // ROI setting saved in memory only
           }}
           disabled={isAnalyzing || !useNativePPG}
         >
