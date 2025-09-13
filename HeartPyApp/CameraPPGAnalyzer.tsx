@@ -85,6 +85,9 @@ export default function CameraPPGAnalyzer() {
   const [useNativePPG, setUseNativePPG] = useState(true); // ONLY REAL PPG DATA - NO SIMULATION ALLOWED
   const [roi, setRoi] = useState(0.4);
   const [ppgChannel, setPpgChannel] = useState<'green' | 'red' | 'luma'>('green');
+  const [ppgMode, setPpgMode] = useState<'mean' | 'chrom' | 'pos'>('mean');
+  const [ppgGrid, setPpgGrid] = useState<1 | 2 | 3>(1);
+  const [pluginConfidence, setPluginConfidence] = useState<number>(0);
 
   const device = useCameraDevice('back', {
     physicalDevices: ['wide-angle-camera'],
@@ -270,7 +273,7 @@ export default function CameraPPGAnalyzer() {
         
         if (plugin != null && frame != null) {
           try {
-            const v = plugin.call(frame, { roi, channel: ppgChannel, step: 2 }) as number;
+            const v = plugin.call(frame, { roi, channel: ppgChannel, step: 2, mode: ppgMode, grid: ppgGrid }) as number;
             // Native data flow handled in-platform; no per-frame logs
           } catch (pluginError) {
             if (globalFrameCounter.current % 240 === 0) {
@@ -289,7 +292,44 @@ export default function CameraPPGAnalyzer() {
         console.log('Frame processor error:', e);
       }
     }
-  }, [useNativePPG, roi, ppgPlugin, ppgChannel]);
+  }, [useNativePPG, roi, ppgPlugin, ppgChannel, ppgMode, ppgGrid]);
+
+  // Native module polling for real PPG data + plugin confidence
+  useEffect(() => {
+    if (!isActive || !useNativePPG) return;
+    const pollingInterval = setInterval(async () => {
+      try {
+        const [samples, conf] = await Promise.all([
+          NativeModules.HeartPyModule?.getLatestPPGSamples?.(),
+          NativeModules.HeartPyModule?.getLastPPGConfidence?.(),
+        ]);
+        if (typeof conf === 'number' && isFinite(conf)) setPluginConfidence(conf);
+        if (samples && Array.isArray(samples) && samples.length > 0) {
+          const latestSamples = samples.slice(-10);
+          latestSamples.forEach(sample => {
+            const val = typeof sample === 'number' ? sample : parseFloat(sample);
+            if (isFinite(val)) {
+              frameBufferRef.current.push(val);
+              if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
+              pendingSamplesRef.current.push(val);
+              if (pendingSamplesRef.current.length > bufferSize) {
+                pendingSamplesRef.current.splice(0, pendingSamplesRef.current.length - bufferSize);
+              }
+            }
+          });
+          setPpgSignal(prev => {
+            const validSamples = latestSamples.map(s => (typeof s === 'number' ? s : parseFloat(s))).filter((v) => isFinite(v));
+            const next = [...prev, ...validSamples];
+            if (next.length > 100) return next.slice(-100);
+            return next;
+          });
+        }
+      } catch (e) {
+        // occasional polling errors are non-fatal
+      }
+    }, 300);
+    return () => clearInterval(pollingInterval);
+  }, [isActive, useNativePPG, bufferSize]);
 
   // Timer ile global frame counter'ı UI'ye yansıt
   useEffect(() => {
@@ -719,6 +759,36 @@ export default function CameraPPGAnalyzer() {
             {`CH ${ppgChannel}`}
           </Text>
         </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton]}
+          onPress={() => {
+            const order: Array<'mean' | 'chrom' | 'pos'> = ['mean', 'chrom', 'pos'];
+            const i = order.indexOf(ppgMode);
+            const next = order[(i + 1) % order.length];
+            setPpgMode(next);
+          }}
+          disabled={isAnalyzing || !useNativePPG}
+        >
+          <Text style={styles.hapticButtonText}>
+            {`MODE ${ppgMode}`}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, styles.hapticButton]}
+          onPress={() => {
+            const order: Array<1 | 2 | 3> = [1, 2, 3];
+            const i = order.indexOf(ppgGrid);
+            const next = order[(i + 1) % order.length];
+            setPpgGrid(next);
+          }}
+          disabled={isAnalyzing || !useNativePPG}
+        >
+          <Text style={styles.hapticButtonText}>
+            {`GRID ${ppgGrid}`}
+          </Text>
+        </TouchableOpacity>
       </View>
 
       {/* PPG Sinyali Gösterimi - Kalp Grafiği */}
@@ -792,6 +862,12 @@ export default function CameraPPGAnalyzer() {
             <Text style={styles.detailText}>pNN50: {(metrics.pnn50 * 100).toFixed(1)}%</Text>
             <Text style={styles.detailText}>LF/HF: {metrics.lfhf.toFixed(2)}</Text>
             <Text style={styles.detailText}>Nefes: {metrics.breathingRate.toFixed(2)} Hz</Text>
+            <Text style={styles.detailText}>PPG Conf (plugin): {(pluginConfidence * 100).toFixed(0)}%</Text>
+            <Text style={styles.detailText}>
+              Final Güven: {(
+                (0.5 * (metrics.confidence ?? 0) + 0.5 * (pluginConfidence ?? 0)) * 100
+              ).toFixed(0)}%
+            </Text>
             <Text style={styles.detailText}>
               Kalite: {metrics.quality.totalBeats} atış, 
               {metrics.quality.rejectedBeats} reddedilen 

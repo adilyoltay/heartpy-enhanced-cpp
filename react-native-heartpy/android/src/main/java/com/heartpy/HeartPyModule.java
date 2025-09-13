@@ -166,6 +166,16 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         } catch (Throwable ignore) {}
     }
 
+    // Last confidence value (0..1)
+    private static volatile double LAST_PPG_CONF = 0.0;
+    public static void addPPGSampleConfidence(double confidence) {
+        try {
+            if (Double.isNaN(confidence) || Double.isInfinite(confidence)) return;
+            if (confidence < 0.0) confidence = 0.0; if (confidence > 1.0) confidence = 1.0;
+            LAST_PPG_CONF = confidence;
+        } catch (Throwable ignore) {}
+    }
+
     @ReactMethod
     public void getLatestPPGSamples(Promise promise) {
         final WritableArray out = Arguments.createArray();
@@ -181,6 +191,15 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             promise.resolve(out);
         } catch (Throwable t) {
             promise.reject("ppg_buffer_error", t);
+        }
+    }
+
+    @ReactMethod
+    public void getLastPPGConfidence(Promise promise) {
+        try {
+            promise.resolve(LAST_PPG_CONF);
+        } catch (Throwable t) {
+            promise.reject("ppg_conf_error", t);
         }
     }
 
@@ -658,4 +677,3 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         }
     }
 }
-

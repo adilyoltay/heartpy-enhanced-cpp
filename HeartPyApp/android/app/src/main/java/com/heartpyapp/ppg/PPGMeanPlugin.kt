@@ -18,6 +18,10 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
     return try {
       var roiIn = (params?.get("roi") as? Number)?.toFloat() ?: 0.4f
       val channel = (params?.get("channel") as? String) ?: "green"
+      val mode = (params?.get("mode") as? String) ?: "mean" // mean | chrom | pos
+      val useCHROM = (mode == "chrom" || mode == "pos")
+      val gridIn = (params?.get("grid") as? Number)?.toInt() ?: 1
+      val grid = gridIn.coerceIn(1, 3)
       val stepIn = (params?.get("step") as? Number)?.toInt() ?: 2
       val step = stepIn.coerceIn(1, 8)
       // Clamp ROI to sane bounds
@@ -56,62 +60,96 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       val yStep = step
 
       val useRedOrGreen = (channel == "red" || channel == "green") && planes.size >= 3
-      val resultMean = if (useRedOrGreen) {
-        // U/Cb plane at index 1, V/Cr at index 2
-        val uPlane = planes[1]
-        val vPlane = planes[2]
-        val uBuffer: ByteBuffer = uPlane.buffer
-        val vBuffer: ByteBuffer = vPlane.buffer
-        val uRowStride = uPlane.rowStride
-        val uPixStride = uPlane.pixelStride
-        val vRowStride = vPlane.rowStride
-        val vPixStride = vPlane.pixelStride
+      // Multi-ROI aggregation across grid x grid patches
+      var weightedSum = 0.0
+      var weightTotal = 0.0
+      var confAccum = 0.0
 
-        for (y in startY until (startY + roiH) step yStep) {
-          val yRow = y * yRowStride
-          val uvY = y shr 1
-          val uRow = uvY * uRowStride
-          val vRow = uvY * vRowStride
-          for (x in startX until (startX + roiW) step xStep) {
-            val yIdx = yRow + x * yPixStride
-            val uvX = x shr 1
-            val uIdx = uRow + uvX * uPixStride
-            val vIdx = vRow + uvX * vPixStride
-            val Y = (yBuffer.get(yIdx).toInt() and 0xFF).toDouble()
-            val Cb = (uBuffer.get(uIdx).toInt() and 0xFF).toDouble()
-            val Cr = (vBuffer.get(vIdx).toInt() and 0xFF).toDouble()
-            val cb = Cb - 128.0
-            val cr = Cr - 128.0
-            var comp = if (channel == "red") {
-              // R ≈ Y + 1.402 * (Cr-128)
-              Y + 1.402 * cr
-            } else {
-              // G ≈ Y − 0.344*(Cb-128) − 0.714*(Cr-128)
-              Y - 0.344 * cb - 0.714 * cr
+      val uPlane = planes.getOrNull(1)
+      val vPlane = planes.getOrNull(2)
+      val uBuffer: ByteBuffer? = uPlane?.buffer
+      val vBuffer: ByteBuffer? = vPlane?.buffer
+      val uRowStride = uPlane?.rowStride ?: 0
+      val uPixStride = uPlane?.pixelStride ?: 0
+      val vRowStride = vPlane?.rowStride ?: 0
+      val vPixStride = vPlane?.pixelStride ?: 0
+
+      val patchW = (roiW / grid).coerceAtLeast(1)
+      val patchH = (roiH / grid).coerceAtLeast(1)
+      for (gy in 0 until grid) {
+        for (gx in 0 until grid) {
+          val px0 = startX + gx * patchW
+          val py0 = startY + gy * patchH
+          val px1 = if (gx == grid - 1) startX + roiH else px0 + patchW // note: roiH vs roiW bug guard below
+          val py1 = if (gy == grid - 1) startY + roiH else py0 + patchH
+          var sR = 0.0; var sG = 0.0; var sB = 0.0; var sY = 0.0; var cntD = 0.0
+          val px1c = (startX + roiW).coerceAtMost(px1)
+          for (y in py0 until py1 step yStep) {
+            val yRow = y * yRowStride
+            val uvY = y shr 1
+            val uRow = uvY * uRowStride
+            val vRow = uvY * vRowStride
+            for (x in px0 until px1c step xStep) {
+              val yIdx = yRow + x * yPixStride
+              val Y = (yBuffer.get(yIdx).toInt() and 0xFF).toDouble()
+              val uvX = x shr 1
+              val uIdx = uRow + uvX * uPixStride
+              val vIdx = vRow + uvX * vPixStride
+              val Cb = (uBuffer?.get(uIdx)?.toInt() ?: 128) and 0xFF
+              val Cr = (vBuffer?.get(vIdx)?.toInt() ?: 128) and 0xFF
+              val cb = Cb.toDouble() - 128.0
+              val cr = Cr.toDouble() - 128.0
+              var R = Y + 1.402 * cr
+              var G = Y - 0.344 * cb - 0.714 * cr
+              var B = Y + 1.772 * cb
+              if (R < 0.0) R = 0.0; if (R > 255.0) R = 255.0
+              if (G < 0.0) G = 0.0; if (G > 255.0) G = 255.0
+              if (B < 0.0) B = 0.0; if (B > 255.0) B = 255.0
+              sR += R; sG += G; sB += B; sY += Y; cntD += 1.0
             }
-            if (comp < 0.0) comp = 0.0
-            if (comp > 255.0) comp = 255.0
-            sum += comp.toLong()
-            count++
           }
-        }
-        if (count <= 0) java.lang.Double.NaN else sum.toDouble() / count.toDouble()
-      } else {
-        // Luma default
-        for (y in startY until (startY + roiH) step yStep) {
-          val yRow = y * yRowStride
-          for (x in startX until (startX + roiW) step xStep) {
-            val v: Int = yBuffer.get(yRow + x * yPixStride).toInt() and 0xFF
-            sum += v
-            count++
+          if (cntD <= 0.0) continue
+          val Rm = sR / cntD; val Gm = sG / cntD; val Bm = sB / cntD; val Ym = sY / cntD
+          var value = 0.0
+          if (useCHROM) {
+            val X = 3.0 * Rm - 2.0 * Gm
+            val Yc = 1.5 * Rm + 1.0 * Gm - 1.5 * Bm
+            val S = X - 1.0 * Yc
+            value = 128.0 + 0.5 * S
+          } else {
+            value = when (channel) {
+              "red" -> Rm
+              "luma" -> Ym
+              else -> Gm
+            }
           }
+          if (value < 0.0) value = 0.0
+          if (value > 255.0) value = 255.0
+          val expScore = when {
+            Ym < 15.0 -> (Ym / 15.0).coerceIn(0.0, 1.0)
+            Ym > 240.0 -> ((255.0 - Ym) / 15.0).coerceIn(0.0, 1.0)
+            else -> 1.0
+          }
+          val ampScore = if (useCHROM) {
+            val Sabs = kotlin.math.abs((3.0 * Rm - 2.0 * Gm) - (1.5 * Rm + 1.0 * Gm - 1.5 * Bm))
+            (Sabs / 50.0).coerceIn(0.0, 1.0)
+          } else 0.0
+          val conf = (0.7 * expScore + 0.3 * ampScore).coerceIn(0.0, 1.0)
+          val w = expScore.coerceAtLeast(1e-6)
+          weightedSum += w * value
+          weightTotal += w
+          confAccum += w * conf
         }
-        if (count <= 0) java.lang.Double.NaN else sum.toDouble() / count.toDouble()
       }
 
-      // Push to cross-platform native buffer for JS polling
+      val resultMean = if (weightTotal > 0.0) weightedSum / weightTotal else java.lang.Double.NaN
+      val resultConf = if (weightTotal > 0.0) confAccum / weightTotal else java.lang.Double.NaN
+
       if (java.lang.Double.isFinite(resultMean)) {
         try { HeartPyModule.addPPGSample(resultMean) } catch (_: Throwable) {}
+      }
+      if (java.lang.Double.isFinite(resultConf)) {
+        try { HeartPyModule.addPPGSampleConfidence(resultConf) } catch (_: Throwable) {}
       }
       resultMean
     } catch (t: Throwable) {

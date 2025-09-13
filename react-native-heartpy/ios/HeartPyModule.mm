@@ -24,6 +24,7 @@ using namespace facebook;
 // Global PPG buffer for frame processor data
 static NSMutableArray<NSNumber*>* globalPPGBuffer = nil;
 static dispatch_queue_t ppgBufferQueue = nil;
+static double lastPPGConfidence = 0.0;
 
 + (void)initialize {
     if (self == [HeartPyModule class]) {
@@ -36,6 +37,11 @@ static dispatch_queue_t ppgBufferQueue = nil;
                                                       usingBlock:^(__unused NSNotification * _Nonnull note) {
             NSNumber* value = note.userInfo[@"value"];
             if (!value) return;
+            NSNumber* confNum = note.userInfo[@"confidence"];
+            if (confNum) {
+                double c = [confNum doubleValue];
+                if (isfinite(c)) lastPPGConfidence = fmax(0.0, fmin(1.0, c));
+            }
             
             // Add to buffer on dedicated queue
             dispatch_async(ppgBufferQueue, ^{
@@ -74,6 +80,12 @@ RCT_EXPORT_METHOD(getLatestPPGSamples:(RCTPromiseResolveBlock)resolve
         [globalPPGBuffer removeAllObjects]; // drain buffer on poll
         resolve(samples ?: @[]);
     });
+}
+
+RCT_EXPORT_METHOD(getLastPPGConfidence:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject) {
+    // Return last confidence as a simple value (no need for queue)
+    resolve(@(lastPPGConfidence));
 }
 
 static void installBinding(jsi::Runtime &rt) {
@@ -835,4 +847,3 @@ RCT_EXPORT_METHOD(rtDestroy:(nonnull NSNumber*)handle
 }
 
 @end
-
