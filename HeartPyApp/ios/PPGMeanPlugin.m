@@ -134,8 +134,8 @@
                                                         object:nil
                                                       userInfo:userInfo];
     
-    // Debug log every 30 frames
-    if (notificationCount % 30 == 0) {
+    // Debug log periodically
+    if (notificationCount % 120 == 0) {
       NSLog(@"📸 PPGMeanPlugin posted notification #%d with value: %.1f", notificationCount, mean);
     }
   } @catch (__unused id e) {}

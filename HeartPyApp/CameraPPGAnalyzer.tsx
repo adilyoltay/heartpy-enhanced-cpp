@@ -118,11 +118,6 @@ export default function CameraPPGAnalyzer() {
   const simulationTimerRef = useRef<any>(null);
   const torchOnTimeRef = useRef<number | null>(null);
   const preTorchFramesRef = useRef<number>(0);
-  const smoothBufRef = useRef<number[]>([]);
-  const skipWindowRef = useRef<number[]>([]); // 1 = skipped, 0 = accepted
-  const brightWindowRef = useRef<number[]>([]); // recent brightness samples
-  const [badExposure, setBadExposure] = useState(false);
-  const [badExposureReason, setBadExposureReason] = useState<'dark' | 'saturated' | null>(null);
   const warnedJSIFallbackRef = useRef(false);
 
   // VisionCamera frame processor plugin initialized on JS thread
@@ -208,82 +203,12 @@ export default function CameraPPGAnalyzer() {
     }
   };
 
-  // Frame tick handler - NO SIMULATION, sadece frame count
-  const onFrameTick = useCallback((timestamp: number) => {
-    try {
-      setFrameCount(prev => prev + 1);
-      // NO SIMULATION - sadece frame counter için kullanılıyor
-    } catch (tickError) {
-      console.error('onFrameTick error:', tickError);
-    }
-  }, []);
+  // (removed) onFrameTick path was unused
 
-  // Real sample handler from native plugin
-  const onFrameSample = useCallback((timestamp: number, sample: number) => {
-    // Update brightness window
-    const bw = brightWindowRef.current;
-    bw.push(sample);
-    if (bw.length > 30) bw.shift(); // last ~2s at 15 FPS
-
-    // Determine skip decision
-    let skip = false;
-    if (!Number.isFinite(sample)) skip = true;
-    if (sample < 15 || sample > 240) skip = true; // too dark/bright
-
-    // Outlier guard vs recent smoothed history
-    const recent = smoothBufRef.current;
-    if (!skip && recent.length >= 3) {
-      const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
-      const varc = recent.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / recent.length;
-      const std = Math.sqrt(varc);
-      if (std > 0 && Math.abs(sample - mean) > 3 * std) skip = true;
-    }
-
-    // Update skip window (1 skipped, 0 accepted)
-    const sw = skipWindowRef.current;
-    sw.push(skip ? 1 : 0);
-    if (sw.length > 30) sw.shift();
-
-    if (skip) return;
-
-    // iOS-only torch gating: enable torch after a few stable frames
-    if (Platform.OS === 'ios' && isActive && !torchOn && useNativePPG) {
-      preTorchFramesRef.current += 1;
-      if (preTorchFramesRef.current >= 3) {
-        setTorchOn(true);
-        try { torchOnTimeRef.current = Date.now(); } catch {}
-      }
-    }
-
-    // Smoothing: simple moving average over last N values (including this one)
-    const N = 5; // ~150–250 ms at 15–30 FPS
-    const nextRecent = [...recent, sample];
-    if (nextRecent.length > N) nextRecent.shift();
-    smoothBufRef.current = nextRecent;
-    const smoothed = nextRecent.reduce((a, b) => a + b, 0) / nextRecent.length;
-
-    setFrameCount(prev => prev + 1);
-    frameBufferRef.current.push(smoothed);
-    if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
-    setPpgSignal(prev => {
-      const next = [...prev, smoothed];
-      if (next.length > 100) next.shift();
-      return next;
-    });
-    const now = Date.now();
-    // Delay analysis start for 500ms after torch turns on (exposure settle)
-    if (useNativePPG) {
-      if (!torchOnTimeRef.current || now - torchOnTimeRef.current < 500) return;
-    }
-    if (now - lastAnalysisTimeRef.current > analysisInterval && frameBufferRef.current.length >= samplingRate * 3) {
-      lastAnalysisTimeRef.current = now;
-      performRealtimeAnalysis();
-    }
-  }, [analysisInterval, samplingRate, useNativePPG]);
+  // (removed) onFrameSample path; we rely on native buffer polling
 
   // Global communication - worklet ↔ main thread
   const globalFrameCounter = useRef(0);
-  const ppgDataBuffer = useRef<number[]>([]);
   
   // Native module polling for real PPG data - practical UI solution
   useEffect(() => {
@@ -318,19 +243,22 @@ export default function CameraPPGAnalyzer() {
             return next;
           });
           
-          console.log(`✅ Real PPG polled from native: ${latestSamples.length} samples, buffer total: ${samples.length}`);
+          // Periodic log only
+          if ((globalFrameCounter.current || 0) % 120 === 0) {
+            console.log(`PPG poll: +${latestSamples.length}, frameBuf=${frameBufferRef.current.length}`);
+          }
         } else {
-          console.log(`📊 Native PPG buffer empty, waiting...`);
+          // Quiet when empty
         }
       } catch (pollError) {
-        console.error('PPG polling error:', pollError);
+        if ((globalFrameCounter.current || 0) % 240 === 0) console.error('PPG polling error:', pollError);
       }
     }, 300); // ~3 Hz polling for UI responsiveness
     
     return () => clearInterval(pollingInterval);
   }, [isActive, useNativePPG, bufferSize]);
 
-  // Frame işleme - Debug worklet console.log test
+  // Frame işleme - minimal logs
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
     try {
@@ -343,23 +271,9 @@ export default function CameraPPGAnalyzer() {
         if (plugin != null && frame != null) {
           try {
             const v = plugin.call(frame, { roi, channel: ppgChannel, step: 2 }) as number;
-            
-            if (typeof v === 'number' && isFinite(v)) {
-              // Console'da gerçek PPG değerlerini göster
-              if (globalFrameCounter.current % 60 === 0) {
-                console.log(`📊 Real PPG Value: ${v.toFixed(1)} (Frame ${globalFrameCounter.current})`);
-              }
-              
-              // Kalp atışı peak detection (basit threshold)
-              if (v > 100) {
-                console.log(`💓 Heart Beat Peak Detected: ${v.toFixed(1)} at frame ${globalFrameCounter.current}`);
-              }
-              
-              // Native-only data flow: ppgMean plugin posts NSNotification automatically
-              // No need to access NativeModules from worklet (not possible in RN 0.74+)
-            }
+            // Native data flow handled in-platform; no per-frame logs
           } catch (pluginError) {
-            if (globalFrameCounter.current % 120 === 0) {
+            if (globalFrameCounter.current % 240 === 0) {
               console.log('PPG plugin error:', pluginError);
             }
           }
@@ -371,7 +285,9 @@ export default function CameraPPGAnalyzer() {
         console.log(`PPG Frames: ${globalFrameCounter.current} processed`);
       }
     } catch (e) {
-      console.log('Frame processor error:', e);
+      if ((globalFrameCounter.current || 0) % 240 === 0) {
+        console.log('Frame processor error:', e);
+      }
     }
   }, [useNativePPG, roi, ppgPlugin, ppgChannel]);
 
@@ -382,15 +298,10 @@ export default function CameraPPGAnalyzer() {
     const uiUpdateTimer = setInterval(() => {
       const count = globalFrameCounter.current || 0;
       setFrameCount(count);
-      
-      // Gerçek PPG verisi - runOnJS transfer ile
-      const realPPGBuffer = ppgDataBuffer.current;
-      
-      // PPG data only comes from event emitter - no manual UI logic needed
-      // Event listener automatically handles frameBufferRef and setPpgSignal updates
-      
-      if (count % 60 === 0) {
-        console.log(`UI Timer: frameBuffer: ${frameBufferRef.current.length}, ppgBuffer: ${realPPGBuffer.length}`);
+
+      // Periodic lightweight log
+      if (count % 120 === 0) {
+        console.log(`UI Timer: frameBuffer=${frameBufferRef.current.length}`);
       }
 
       const now = Date.now();
@@ -403,39 +314,7 @@ export default function CameraPPGAnalyzer() {
     return () => clearInterval(uiUpdateTimer);
   }, [isActive, analysisInterval, samplingRate, bufferSize, useNativePPG]);
 
-  // Derive bad exposure badge at 2 Hz
-  useEffect(() => {
-    const id = setInterval(() => {
-      const sw = skipWindowRef.current;
-      const bw = brightWindowRef.current;
-      const n = sw.length;
-      if (n === 0) {
-        setBadExposure(false);
-        setBadExposureReason(null);
-        return;
-      }
-      const skipRate = sw.reduce((a, b) => a + b, 0) / n;
-      // Check last 5 brightness samples for saturation/darkness trend
-      const lastK = bw.slice(-5);
-      let darkCount = 0;
-      let satCount = 0;
-      for (const v of lastK) {
-        if (!Number.isFinite(v)) continue;
-        if (v < 15) darkCount++;
-        if (v > 240) satCount++;
-      }
-      const flag = skipRate > 0.3 || darkCount >= 5 || satCount >= 5;
-      setBadExposure(flag);
-      if (!flag) {
-        setBadExposureReason(null);
-      } else {
-        if (satCount >= darkCount && satCount >= 3) setBadExposureReason('saturated');
-        else if (darkCount >= 3) setBadExposureReason('dark');
-        else setBadExposureReason(null);
-      }
-    }, 500);
-    return () => clearInterval(id);
-  }, []);
+  // (removed) exposure badge derivation; consider dynamic gate later
 
   // Real-time analiz - incremental streaming push + metric poll
   const performRealtimeAnalysis = async () => {
@@ -558,7 +437,6 @@ export default function CameraPPGAnalyzer() {
       }
       frameBufferRef.current = [];
       pendingSamplesRef.current = [];
-      ppgDataBuffer.current = [];
       globalFrameCounter.current = 0;
       setMetrics(null);
       setPpgSignal([]);
@@ -749,13 +627,7 @@ export default function CameraPPGAnalyzer() {
             </Text>
           </View>
         )}
-        {isActive && badExposure && (
-          <View style={styles.badBadge}>
-            <Text style={styles.badBadgeText}>
-              {badExposureReason === 'dark' ? 'Too dark' : badExposureReason === 'saturated' ? 'Saturated' : 'Bad exposure'}
-            </Text>
-          </View>
-        )}
+        {/* Exposure badge removed in this pass */}
         {!isActive && (
           <View style={styles.cameraOverlay}>
             <Text style={styles.overlayText}>Kamera Hazır</Text>
