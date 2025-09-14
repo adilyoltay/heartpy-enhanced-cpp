@@ -147,6 +147,7 @@ export default function CameraPPGAnalyzer() {
   const coverStableCountRef = useRef(0);
   const uncoverStableCountRef = useRef(0);
   const lastAutoToggleAtRef = useRef(0);
+  const analyzeStartTsRef = useRef(0);
   // Removed UI control states
 
   // Load/save persistent settings (best-effort)
@@ -412,19 +413,23 @@ export default function CameraPPGAnalyzer() {
             coverStableCountRef.current = 0;
             setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
             const now = Date.now();
-            if (now - (lastAutoToggleAtRef.current || 0) > 1000) {
+            if (now - (lastAutoToggleAtRef.current || 0) > 3000) {
               lastAutoToggleAtRef.current = now;
               toggleAnalysis();
+              analyzeStartTsRef.current = now;
             }
           }
           // Durdur: ardışık 4 ölçüm düşük güven
           if (isAnalyzing && uncoverStableCountRef.current >= 4) {
             uncoverStableCountRef.current = 0;
-            setStatusMessage('⏹️ Parmak kaldırıldı / kapama yetersiz, analiz duruyor');
             const now = Date.now();
-            if (now - (lastAutoToggleAtRef.current || 0) > 1000) {
+            // En az 4 saniye çalıştıysa durdur (dwell)
+            const ranMs = now - (analyzeStartTsRef.current || 0);
+            if (ranMs >= 4000 && now - (lastAutoToggleAtRef.current || 0) > 3000) {
+              setStatusMessage('⏹️ Parmak kaldırıldı / kapama yetersiz, analiz duruyor');
               lastAutoToggleAtRef.current = now;
               toggleAnalysis();
+              analyzeStartTsRef.current = 0;
             }
           }
         } catch {}
@@ -550,9 +555,11 @@ export default function CameraPPGAnalyzer() {
           
           setMetrics(newMetrics as PPGMetrics);
           
-        // C++ analizindeki beat artışına göre haptic feedback
+        // C++ analizindeki beat artışına göre haptic feedback (kalite koşulu ile)
         const currentBeatCount = (newMetrics as any).quality?.totalBeats ?? 0;
-        if (currentBeatCount > lastBeatCount) {
+        const cppConf = (newMetrics as any).quality?.confidence ?? 0;
+        const goodQ = !!(newMetrics as any).quality?.goodQuality;
+        if (currentBeatCount > lastBeatCount && goodQ && cppConf >= 0.5) {
           const now = Date.now();
           const refractoryMs = 250; // darbeler arası min süre
           if (!lastHapticTimeRef.current || now - lastHapticTimeRef.current >= refractoryMs) {
@@ -802,14 +809,6 @@ export default function CameraPPGAnalyzer() {
             }}
             onInitialized={() => {
               console.log('🟢 Camera initialized successfully');
-              // Enable torch for PPG on both platforms
-              if (device?.hasTorch && isAnalyzing) {
-                setTimeout(() => {
-                  setTorchOn(true);
-                  try { torchOnTimeRef.current = Date.now(); } catch {}
-                  console.log('🔦 Torch enabled for PPG measurement');
-                }, 300);
-              }
             }}
           />
         ) : (
