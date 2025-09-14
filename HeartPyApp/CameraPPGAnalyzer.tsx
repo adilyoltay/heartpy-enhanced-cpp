@@ -346,8 +346,10 @@ export default function CameraPPGAnalyzer() {
     setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
     resetStabilityCounters();
     
-    // ✅ CRITICAL: Lock camera settings for stable SNR (BEFORE torch!)
-    await lockCameraSettings();
+    // ✅ CRITICAL: iOS-only camera settings lock for stable SNR
+    if (Platform.OS === 'ios') {
+      await lockCameraSettings();
+    }
     
     // ✅ P1 FIX: Torch guarantee - ALWAYS ensure torch is ON during analysis
     try {
@@ -355,12 +357,12 @@ export default function CameraPPGAnalyzer() {
         setTorchOn(true);
         torchDutyStartRef.current = now;  // ✅ Torch duty tracking
         
-        // ✅ P1 FIX: Double-check torch level through camera manager
-        if (cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
+        // ✅ CRITICAL: iOS-only torch control via PPGCameraManager
+        if (Platform.OS === 'ios' && cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
           await NativeModules.PPGCameraManager.setTorchLevel(torchLevel);
-          console.log(`🔦 Torch GUARANTEED ON - level: ${torchLevel}`);
+          console.log(`🔦 iOS Torch GUARANTEED ON - level: ${torchLevel}`);
         } else {
-          console.log('🔦 Torch ON - parmak algılandı');
+          console.log('🔦 Torch ON (VisionCamera managed)');
         }
         
         // ✅ P1 FIX: Set pretorch drop period when torch turns on
@@ -389,24 +391,10 @@ export default function CameraPPGAnalyzer() {
         throw new Error('HeartPy RealtimeAnalyzer not available');
       }
       
-      analyzerRef.current = await HP.RealtimeAnalyzer.create(analyzerFs, {
-        bandpass: { lowHz: 0.4, highHz: 4.5, order: 2 },  // ✅ Çok geniş frekans range
-        welch: { nfft: 512, overlap: 0.7 },                // ✅ Daha tolerant spectral analysis
-        peak: { 
-          refractoryMs: 200,    // ✅ Çok kısa refractory - maksimum peak detection
-          thresholdScale: 0.2,  // ✅ Çok düşük threshold - çok esnek peak detection
-          bpmMin: 30,           // ✅ C++ validation: 30 ≤ min
-          bpmMax: 240           // ✅ C++ validation: max ≤ 240
-        },
-        preprocessing: { 
-          removeBaselineWander: false,  // ✅ Minimum preprocessing
-          smoothingWindowMs: 20         // ✅ Minimum smoothing - raw detail
-        },
-        quality: {
-          cleanRR: false,         // ✅ RR temizleme kapalı - tamamen esnek
-          cleanMethod: 'none'     // ✅ Hiç müdahale yapma
-        }
-      });
+      const analyzerConfig = getAnalyzerConfig();
+      console.log(`🔧 Creating ${ANALYZER_PROFILE} analyzer with config:`, analyzerConfig);
+      
+      analyzerRef.current = await HP.RealtimeAnalyzer.create(analyzerFs, analyzerConfig);
       
       console.log('✅ FSM analyzer created successfully');
       // starting state'inde kal, warmup süresi kontrolü performRealtimeAnalysis'de yapılıyor
@@ -474,8 +462,10 @@ export default function CameraPPGAnalyzer() {
     } finally {
       try { 
         setTorchOn(false); 
-        // ✅ CRITICAL: Unlock camera settings when stopping
-        await unlockCameraSettings();
+        // ✅ CRITICAL: iOS-only camera unlock when stopping
+        if (Platform.OS === 'ios') {
+          await unlockCameraSettings();
+        }
       } catch {}
       // sayaç reset & idle
       resetStabilityCounters();
@@ -541,6 +531,53 @@ export default function CameraPPGAnalyzer() {
   const DEBUG_HEAVY = false; // ✅ Default OFF for production
   const HEAVY_LOG_THROTTLE = 10; // Log every 10th call
   const heavyLogCountRef = useRef(0);
+  
+  // ✅ CRITICAL: DEV/PROD Analyzer Presets
+  const ANALYZER_PROFILE = 'PROD'; // 'DEV' | 'PROD'
+  
+  const getAnalyzerConfig = useCallback(() => {
+    if (ANALYZER_PROFILE === 'DEV') {
+      // DEV: Very permissive for testing/debugging
+      return {
+        bandpass: { lowHz: 0.4, highHz: 4.5, order: 2 },  
+        welch: { nfft: 512, overlap: 0.7 },                
+        peak: { 
+          refractoryMs: 200,    // Very permissive
+          thresholdScale: 0.2,  // Very low threshold
+          bpmMin: 30,           
+          bpmMax: 240           
+        },
+        preprocessing: { 
+          removeBaselineWander: false,  
+          smoothingWindowMs: 20         
+        },
+        quality: {
+          cleanRR: false,         
+          cleanMethod: 'none'     
+        }
+      };
+    } else {
+      // PROD: Conservative, stable settings
+      return {
+        bandpass: { lowHz: 0.5, highHz: 3.5, order: 3 },  // ✅ Narrower, more stable
+        welch: { nfft: 1024, overlap: 0.5 },              // ✅ Higher resolution
+        peak: { 
+          refractoryMs: 350,    // ✅ Conservative refractory
+          thresholdScale: 0.6,  // ✅ Higher threshold for reliability
+          bpmMin: 40,           // ✅ Realistic range
+          bpmMax: 180           // ✅ Realistic range
+        },
+        preprocessing: { 
+          removeBaselineWander: true,   // ✅ Clean signal
+          smoothingWindowMs: 100        // ✅ Stable smoothing
+        },
+        quality: {
+          cleanRR: true,         // ✅ Clean outliers
+          cleanMethod: 'iqr'     // ✅ Conservative cleaning
+        }
+      };
+    }
+  }, []);
   
   const logHeavy = useCallback((tag: string, obj: any) => {
     if (!DEBUG_HEAVY) return;
@@ -1130,11 +1167,13 @@ export default function CameraPPGAnalyzer() {
     }
   }
   
-  // Update stability counters for auto-start logic
+  // ✅ CRITICAL: Plugin confidence ONLY for auto-start trigger, NOT for auto-stop
+  // Update stability counters for auto-start logic only
   const nowTs = Date.now();
   const dt = lastPollTsRef.current ? Math.max(1, nowTs - lastPollTsRef.current) : 200;
   lastPollTsRef.current = nowTs;
   
+  // ✅ Only track plugin confidence for START trigger (not STOP)
   if (confVal >= CFG.CONF_HIGH) {
     coverStableMsRef.current += dt;
     uncoverStableMsRef.current = 0;
@@ -1147,7 +1186,7 @@ export default function CameraPPGAnalyzer() {
     uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - dt/2);
   }
   
-  // Auto-start triggering based on plugin confidence
+  // Auto-start triggering based on plugin confidence (START only!)
   const coolOK = Date.now() - lastAutoToggleAtRef.current >= CFG.COOLDOWN_MS;
   
   // START: high confidence + debounce + cooldown
@@ -1155,6 +1194,8 @@ export default function CameraPPGAnalyzer() {
     console.log(`🟢 Auto-start triggered: conf=${confVal.toFixed(3)}, coverMs=${coverStableMsRef.current}, coolOK=${coolOK}`);
     await startAnalysisFSM();
   }
+  
+  // ✅ STOP decisions moved entirely to C++ quality processing (below in performRealtimeAnalysis)
         // ✅ GATE kaldırıldı - etkisizdi (latestSamples.length > 0 varsa her zaman true)
         if (latestSamples.length > 0) {
           // ✅ Watchdog: Data received, update timestamp
@@ -1273,15 +1314,19 @@ export default function CameraPPGAnalyzer() {
       // Push only new samples accumulated since last call
       const pending = pendingSamplesRef.current;
       
-      // ✅ P1 FIX: Skip push during pretorch period (torch/AE ramp-up noise)
+      // ✅ CRITICAL: Pretorch improvement - accumulate but don't push until stable
       const now = Date.now();
       const inPretorch = now < pretorchUntilRef.current;
       
       if (inPretorch) {
-        console.log(`⏳ Pretorch period: Skipping ${pending.length} samples (${pretorchUntilRef.current - now}ms remaining)`);
-        // Clear pending samples during pretorch but keep UI flowing
-        pendingSamplesRef.current = [];
-        return; // Skip C++ analysis during ramp-up
+        console.log(`⏳ Pretorch period: Accumulating ${pending.length} samples (${pretorchUntilRef.current - now}ms remaining)`);
+        // ✅ DON'T clear pending - let them accumulate for better batch push
+        return; // Skip C++ analysis during ramp-up but keep samples
+      }
+      
+      // ✅ Post-pretorch: If we have accumulated samples, do enhanced batch push
+      if (pending.length > 60) { // Large batch after pretorch
+        console.log(`📦 Post-pretorch batch: Pushing ${pending.length} accumulated samples`);
       }
       
       console.log(`📥 Pushing ${pending.length} samples to C++ analyzer`);
@@ -1336,8 +1381,8 @@ export default function CameraPPGAnalyzer() {
       if (result && typeof result === 'object') {
         try { setRawResult(result as any); } catch {}
         
-        // Debug: Native analyzer sonuçlarını logla
-        console.log('🔥 NATIVE C++ ANALYZER RESULT:', {
+        // ✅ CRITICAL: Heavy log throttling - default OFF for production performance
+        logHeavy('🔥 NATIVE C++ ANALYZER RESULT:', {
           'C++ BPM': result.bpm,
           'RR Count': Array.isArray(result.rrList) ? result.rrList.length : 0,
           'Peak Count': Array.isArray(result.peakList) ? result.peakList.length : 0,
@@ -1517,41 +1562,43 @@ export default function CameraPPGAnalyzer() {
           const nowTs = Date.now();
           const inWarmup = nowTs < (warmupUntilRef.current || 0);
           
-          // FSM: Warmup bitiminde parmak/konf tekrar doğrulaması
+          // ✅ CRITICAL: Warmup completion using C++ quality (ground truth), not unified
           if (!inWarmup && fsmRef.current === 'starting') {
-            const baseConf = (newMetrics as any)?.quality?.confidence ?? 0;
-            const effectiveConf = getEffectiveConfidence((newMetrics as any)?.quality);
+            const cppConf = (newMetrics as any)?.quality?.confidence ?? 0;
+            const cppGoodQuality = (newMetrics as any)?.quality?.goodQuality ?? false;
+            const cppSnr = (newMetrics as any)?.quality?.snrDb ?? 0;
             const bpmNow = newMetrics.bpm ?? 0;
             const peaksNow = (newMetrics as any)?.quality?.totalBeats ?? 0;
-            console.log(`🟡 Warmup complete - Base: ${baseConf.toFixed(2)}, Unified: ${effectiveConf.toFixed(2)}, BPM: ${bpmNow.toFixed(1)}, Peaks: ${peaksNow}`);
+            console.log(`🟡 Warmup complete - C++ Conf: ${cppConf.toFixed(3)}, GoodQ: ${cppGoodQuality}, SNR: ${cppSnr.toFixed(1)}, BPM: ${bpmNow.toFixed(1)}, Peaks: ${peaksNow}`);
             
-            // ✅ İyileştirilmiş warmup kontrolü: Unified confidence veya valid BPM/peaks
-            const hasValidData = effectiveConf >= CFG.CONF_HIGH || (bpmNow > 40 && bpmNow < 200) || peaksNow > 3;
+            // ✅ CRITICAL: C++ quality-based warmup validation (ground truth)
+            const hasValidData = (cppGoodQuality && cppConf >= 0.3) || (cppSnr > 5 && peaksNow > 3) || (bpmNow > 40 && bpmNow < 180 && peaksNow > 5);
             
             if (hasValidData) {
-              console.log('🟡 Warmup OK → running (conf OR valid BPM/peaks)');
+              console.log('🟡 Warmup OK → running (C++ quality validated)');
               fsmRef.current = 'running';
             } else {
-              console.log(`🔴 Warmup failed - Conf: ${effectiveConf.toFixed(2)}, BPM: ${bpmNow}, Peaks: ${peaksNow} → extending warmup`);
+              console.log(`🔴 Warmup failed - C++ Conf: ${cppConf.toFixed(3)}, GoodQ: ${cppGoodQuality}, SNR: ${cppSnr.toFixed(1)} → extending warmup`);
               // ✅ Warmup'ı uzat, hemen durdurmak yerine
               warmupUntilRef.current = Date.now() + 2000; // 2s ek süre
               
-              // ✅ P1 FIX: Torch boost when warmup extends and fallback is active
-              if (enableFallback && cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
+              // ✅ iOS-only: Torch boost when warmup extends and fallback is active
+              if (Platform.OS === 'ios' && enableFallback && cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
                 const nextIdx = Math.min(currentTorchLevelIndex + 1, torchLevels.length - 1);
                 if (nextIdx !== currentTorchLevelIndex) {
                   setCurrentTorchLevelIndex(nextIdx);
                   setTorchLevel(torchLevels[nextIdx]);
                   
                   NativeModules.PPGCameraManager.setTorchLevel(torchLevels[nextIdx]).then(() => {
-                    console.log(`🔥 Torch boost on warmup extend: ${torchLevels[nextIdx]}`);
+                    console.log(`🔥 iOS Torch boost on warmup extend: ${torchLevels[nextIdx]}`);
                     logTelemetryEvent('torch_boost_on_warmup_extend', { 
+                      platform: 'ios',
                       oldLevel: torchLevels[currentTorchLevelIndex],
                       newLevel: torchLevels[nextIdx],
                       fallbackActive: enableFallback 
                     });
                   }).catch((e) => {
-                    console.warn('Torch boost failed:', e);
+                    console.warn('iOS Torch boost failed:', e);
                   });
                 }
               }
@@ -1620,16 +1667,21 @@ export default function CameraPPGAnalyzer() {
         console.log('✅ App returning to foreground - re-priming torch and camera');
         
         try {
-          // Re-apply camera locks
-          await lockCameraSettings();
+          // ✅ iOS-only: Re-apply camera locks on foreground
+          if (Platform.OS === 'ios') {
+            await lockCameraSettings();
+          }
           
           // Guarantee torch is ON
           if (device?.hasTorch && torchOn) {
             setTorchOn(true); // Re-trigger
             
-            if (cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
+            // ✅ iOS-only: Torch guarantee via PPGCameraManager
+            if (Platform.OS === 'ios' && cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
               await NativeModules.PPGCameraManager.setTorchLevel(torchLevel);
-              console.log(`🔦 Torch RE-GUARANTEED ON after foreground - level: ${torchLevel}`);
+              console.log(`🔦 iOS Torch RE-GUARANTEED ON after foreground - level: ${torchLevel}`);
+            } else {
+              console.log('🔦 Torch re-enabled (VisionCamera managed)');
             }
             
             logTelemetryEvent('torch_foreground_guarantee', { 
