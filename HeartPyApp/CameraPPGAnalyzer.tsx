@@ -1424,7 +1424,7 @@ export default function CameraPPGAnalyzer() {
           // ✅ P2 FIX: HRV Quality Gate - validate metrics before display
           const qualityMetrics = (newMetrics as any)?.quality;
           if (qualityMetrics) {
-            const snr = qualityMetrics.snrDb ?? 0;
+            const cppSnr = qualityMetrics.snrDb ?? 0;  // ✅ FIXED: Consistent cppSnr naming
             const confidence = qualityMetrics.confidence ?? 0;
             const rejectionRate = qualityMetrics.rejectionRate ?? 0;
             const pHalfOverFund = qualityMetrics.pHalfOverFund ?? 0;
@@ -1439,7 +1439,7 @@ export default function CameraPPGAnalyzer() {
               rrCount >= 15                 // ✅ At least 15 RR intervals (gevşetildi)
             );
             
-            // ✅ P2 FIX: Mask invalid HRV metrics
+            // ✅ CRITICAL FIX: Use local cppSnr variable (scope fix)
             if (!hrvQualityGate) {
               console.log(`⚠️ HRV quality gate FAILED - masking HRV metrics (C++ SNR: ${cppSnr.toFixed(1)}, Conf: ${confidence.toFixed(2)}, RejRate: ${rejectionRate.toFixed(2)}, RR count: ${rrCount})`);
               
