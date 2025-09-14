@@ -755,6 +755,35 @@ RCT_EXPORT_METHOD(rtPush:(nonnull NSNumber*)handle
     }
 }
 
+// ✅ CRITICAL P0 FIX: Push samples with per-sample timestamps
+RCT_EXPORT_METHOD(rtPushTs:(nonnull NSNumber*)handle
+                  samples:(NSArray<NSNumber*>*)xs
+                  timestamps:(NSArray<NSNumber*>*)ts
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    @try {
+        if (handle == nil || xs == nil || ts == nil || xs.count != ts.count || xs.count == 0) {
+            reject(@"rt_push_ts_invalid_args", @"Invalid handle or mismatched arrays", nil);
+            return;
+        }
+        
+        void* h = (void*)[handle longValue];
+        const NSUInteger n = xs.count;
+        
+        std::vector<float> samples; samples.reserve(n);
+        for (NSNumber* v in xs) samples.push_back([v floatValue]);
+        
+        std::vector<double> timestamps; timestamps.reserve(n);
+        for (NSNumber* t in ts) timestamps.push_back([t doubleValue]);
+        
+        hp_rt_push_ts(h, samples.data(), timestamps.data(), (size_t)n);
+        resolve(nil);
+    } @catch (NSException* e) {
+        reject(@"rt_push_ts_exception", e.reason, nil);
+    }
+}
+
 // Poll for latest metrics; returns object or null
 RCT_EXPORT_METHOD(rtPoll:(nonnull NSNumber*)handle
                   resolver:(RCTPromiseResolveBlock)resolve

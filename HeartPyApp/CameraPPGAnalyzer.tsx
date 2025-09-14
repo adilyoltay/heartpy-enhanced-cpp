@@ -526,8 +526,17 @@ export default function CameraPPGAnalyzer() {
   // ✅ PHASE 1.4: Unified Confidence Score Calculator
   const [useUnifiedConfidence, setUseUnifiedConfidence] = useState(true); // ✅ Start enabled for testing
   
+  // ✅ P1 FIX: EMA smoothing for stable confidence
+  const prevFinalConfidenceRef = useRef<number>(0);
+  const lastConfidenceMethodRef = useRef<string>('base_fallback');
+  const methodHoldoffUntilRef = useRef<number>(0);
+  
   const calculateUnifiedConfidence = useCallback((qualityMetrics: any): number => {
-    if (!qualityMetrics) return 0;
+    if (!qualityMetrics) return prevFinalConfidenceRef.current * 0.9; // ✅ P1 FIX: Decay if no data
+    
+    const now = Date.now();
+    const EMA_ALPHA = 0.7; // 70% history, 30% current
+    const METHOD_HOLDOFF_MS = 2000; // Hold method for 2s to prevent flicker
     
     // Extract AVAILABLE metrics from C++ interface
     const snrDb = typeof qualityMetrics.snrDb === 'number' ? qualityMetrics.snrDb : 0;
@@ -541,31 +550,46 @@ export default function CameraPPGAnalyzer() {
       return Math.max(0, Math.min(1, (value - min) / (max - min)));
     };
     
-    // ✅ Normalize AVAILABLE C++ components to [0,1]
-    const snrNorm = normalize(snrDb, 0, 12);            // 0-12 dB range
-    const f0Norm = normalize(f0Hz, 0.5, 3.0);           // 0.5-3.0 Hz heart rate range
-    const maPercNorm = Math.max(0, Math.min(1, maPercActive / 100)); // 0-100% → 0-1
-    const pHalfNorm = Math.max(0, Math.min(1, pHalfOverFund)); // Already 0-1 ratio
+    // ✅ P1 FIX: Graceful degrade - Use available components with re-weighted formula
+    const components = [];
+    if (snrDb > 0) components.push({ weight: 0.4, value: normalize(snrDb, 0, 12), name: 'snr' });
+    if (f0Hz > 0) components.push({ weight: 0.3, value: normalize(f0Hz, 0.5, 3.0), name: 'f0' });
+    if (maPercActive > 0) components.push({ weight: 0.2, value: normalize(maPercActive, 0, 100), name: 'ma' });
+    if (pHalfOverFund > 0) components.push({ weight: 0.1, value: Math.max(0, Math.min(1, pHalfOverFund)), name: 'phalf' });
     
-    // ✅ Weighted combination using AVAILABLE metrics
-    const unifiedScore = 0.4 * snrNorm + 0.3 * f0Norm + 0.2 * maPercNorm + 0.1 * pHalfNorm;
+    let instantScore = 0;
+    let currentMethod = 'base_fallback';
     
-    // ✅ Component availability check using actual C++ metrics
-    const hasFullComponents = snrDb > 0 && f0Hz > 0 && (maPercActive > 0 || pHalfOverFund > 0);
-    const hasPartialComponents = snrDb > 0 || f0Hz > 0;
-    
-    let finalScore;
-    if (hasFullComponents) {
-      // Full unified score
-      finalScore = unifiedScore;
-    } else if (hasPartialComponents) {
-      // Hybrid: SNR component + base confidence weighted
-      const snrWeight = 0.6; // Give more weight to SNR when it's the only component
-      finalScore = snrWeight * snrNorm + (1 - snrWeight) * baseConfidence;
+    if (components.length >= 2) {
+      // ✅ Graceful unified: Re-normalize weights for available components
+      const totalWeight = components.reduce((sum, c) => sum + c.weight, 0);
+      instantScore = components.reduce((sum, c) => sum + (c.weight / totalWeight) * c.value, 0);
+      currentMethod = components.length >= 3 ? 'full_unified_cpp' : 'partial_unified_cpp';
+    } else if (components.length === 1) {
+      // ✅ Single component available (usually SNR)
+      instantScore = (components[0].value * 0.7) + (baseConfidence * 0.3);
+      currentMethod = 'snr_base_hybrid';
     } else {
-      // Fallback to base confidence
-      finalScore = baseConfidence;
+      // ✅ Pure fallback: Only base confidence
+      instantScore = Math.max(0, Math.min(1, baseConfidence));
+      currentMethod = 'base_fallback';
     }
+    
+    // ✅ P1 FIX: Method stability - Hold method for 2s to prevent flicker
+    const canChangeMethod = now >= methodHoldoffUntilRef.current;
+    const finalMethod = canChangeMethod ? currentMethod : lastConfidenceMethodRef.current;
+    
+    if (canChangeMethod && currentMethod !== lastConfidenceMethodRef.current) {
+      lastConfidenceMethodRef.current = currentMethod;
+      methodHoldoffUntilRef.current = now + METHOD_HOLDOFF_MS;
+    }
+    
+    // ✅ P1 FIX: EMA temporal smoothing - prevent confidence flicker
+    const smoothedScore = EMA_ALPHA * prevFinalConfidenceRef.current + (1 - EMA_ALPHA) * instantScore;
+    const finalScore = Math.max(0, Math.min(1, smoothedScore));
+    
+    // ✅ Save smoothed result for next iteration
+    prevFinalConfidenceRef.current = finalScore;
     
     // ✅ Throttled telemetry (every 10th call to avoid spam)
     unifiedConfCallCountRef.current++;
@@ -573,20 +597,23 @@ export default function CameraPPGAnalyzer() {
     if (unifiedConfCallCountRef.current % 10 === 1) {
       logTelemetryEvent('unified_confidence_debug', {
         // ✅ Available C++ metrics
-        snrDb, snrNorm,
-        f0Hz, f0Norm,
-        maPercActive, maPercNorm,
-        pHalfOverFund, pHalfNorm,
+        snrDb, snrNorm: normalize(snrDb, 0, 12),
+        f0Hz, f0Norm: normalize(f0Hz, 0.5, 3.0),
+        maPercActive, maPercNorm: normalize(maPercActive, 0, 100),
+        pHalfOverFund, pHalfNorm: Math.max(0, Math.min(1, pHalfOverFund)),
         baseConfidence,
-        unifiedScore,
+        instantScore,
         finalScore,
-        hasFullComponents,
-        hasPartialComponents,
-        method: hasFullComponents ? 'full_unified_cpp' : hasPartialComponents ? 'snr_f0_hybrid' : 'base_fallback'
+        componentsAvailable: components.length,
+        hasFullComponents: components.length >= 3,
+        hasPartialComponents: components.length >= 1,
+        method: finalMethod,
+        emaAlpha: EMA_ALPHA,
+        methodStable: finalMethod === currentMethod
       });
     }
     
-    return Math.max(0, Math.min(1, finalScore));
+    return finalScore;
   }, [logTelemetryEvent]);
 
   const getEffectiveConfidence = useCallback((qualityMetrics: any): number => {
@@ -614,8 +641,9 @@ export default function CameraPPGAnalyzer() {
       Math.min(1, maPerc / 100)
     ) / 4);
     
-    // ✅ Track signal quality history with available metrics
-    const qualityEntry = { timestamp: now, confidence, snr, acDc: f0Hz, gridQuality };
+    // ✅ P1 FIX: Correct telemetry mapping - acDc should use acDcRatio, not f0Hz
+    const acDc = qualityMetrics?.acDcRatio ?? 0; // ✅ CORRECT field mapping
+    const qualityEntry = { timestamp: now, confidence, snr, acDc, gridQuality };
     signalQualityHistoryRef.current.push(qualityEntry);
     
     // Keep only last 10 entries
@@ -1134,6 +1162,52 @@ export default function CameraPPGAnalyzer() {
             
             if (correction.outlierCount > 0) {
               console.log(`🔧 RR Correction: ${correction.outlierCount}/${originalRR.length} outliers (${(correction.correctionRatio * 100).toFixed(1)}%)`);
+            }
+          }
+          
+          // ✅ P2 FIX: HRV Quality Gate - validate metrics before display
+          const qualityMetrics = (newMetrics as any)?.quality;
+          if (qualityMetrics) {
+            const snr = qualityMetrics.snrDb ?? 0;
+            const confidence = qualityMetrics.confidence ?? 0;
+            const rejectionRate = qualityMetrics.rejectionRate ?? 0;
+            const pHalfOverFund = qualityMetrics.pHalfOverFund ?? 0;
+            const rrCount = Array.isArray(qualityMetrics.rrList) ? qualityMetrics.rrList.length : 0;
+            
+            // ✅ P2 FIX: HRV quality criteria
+            const hrvQualityGate = (
+              snr > 8 &&                    // SNR > 8 dB
+              confidence > 0.6 &&           // Confidence > 0.6  
+              rejectionRate < 0.2 &&        // Rejection rate < 20%
+              pHalfOverFund < 0.3 &&        // No significant doubling/halving
+              rrCount >= 30                 // At least 30 RR intervals for reliable HRV
+            );
+            
+            // ✅ P2 FIX: Mask invalid HRV metrics
+            if (!hrvQualityGate) {
+              console.log(`⚠️ HRV quality gate FAILED - masking HRV metrics (SNR: ${snr.toFixed(1)}, Conf: ${confidence.toFixed(2)}, RejRate: ${rejectionRate.toFixed(2)}, RR count: ${rrCount})`);
+              
+              // Mask HRV metrics when quality is insufficient
+              (newMetrics as any).rmssd = null;
+              (newMetrics as any).sdnn = null;
+              (newMetrics as any).pnn50 = null;
+              (newMetrics as any).pnn20 = null;
+              (newMetrics as any).nn50 = null;
+              (newMetrics as any).nn20 = null;
+              (newMetrics as any).sd1 = null;
+              (newMetrics as any).sd2 = null;
+              (newMetrics as any).lf = null;
+              (newMetrics as any).hf = null;
+              (newMetrics as any).lfhf = null;
+              
+              // Add quality warning
+              if (qualityMetrics.qualityWarning) {
+                qualityMetrics.qualityWarning += ' | HRV metrics masked due to insufficient quality';
+              } else {
+                qualityMetrics.qualityWarning = 'HRV metrics masked due to insufficient quality';
+              }
+            } else {
+              console.log(`✅ HRV quality gate PASSED - metrics reliable`);
             }
           }
           
