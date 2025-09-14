@@ -108,6 +108,8 @@ interface PPGMetrics {
     rejectionRate: number;
     confidence?: number;  // C++ quality confidence
     snrDb?: number;       // C++ quality SNR
+    acDcRatio?: number;   // ✅ PHASE 1: AC/DC ratio for unified confidence
+    periodicity?: number; // ✅ PHASE 1: Periodicity score for unified confidence
     qualityWarning?: string;
     doublingFlag?: boolean;
     softDoublingFlag?: boolean;
@@ -195,6 +197,9 @@ export default function CameraPPGAnalyzer() {
   const device = useCameraDevice('back', {
     physicalDevices: ['wide-angle-camera'],
   });
+  
+  // ✅ PHASE 1: Camera format (simplified for compatibility)
+  // const [cameraFormat, setCameraFormat] = useState<any>(null); // Disabled for now
   const { hasPermission, requestPermission } = useCameraPermission();
 
   const analyzerRef = useRef<any | null>(null);
@@ -212,6 +217,11 @@ export default function CameraPPGAnalyzer() {
   const sessionStartRef = useRef<number>(0);
   const torchDutyStartRef = useRef<number>(0);
   const torchTotalDutyRef = useRef<number>(0);
+  
+  // ✅ PHASE 1: Progressive Torch Control
+  const [torchLevel, setTorchLevel] = useState<number>(0.6); // Start with medium
+  const torchLevels = [0.3, 0.6, 1.0]; // Progressive levels
+  const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(1); // Start with 0.6
   const samplingRate = analyzerFs; // keep analyzer in sync with actual fps
   const bufferSize = samplingRate * 15; // 15 saniye buffer - daha stabil BPM için
   const analysisInterval = 1000; // 1000ms'de bir analiz - STABİL sonuçlar için
@@ -430,6 +440,55 @@ export default function CameraPPGAnalyzer() {
       metrics: metrics || null
     });
   }, [logTelemetryEvent]);
+
+  // ✅ PHASE 1.4: Unified Confidence Score Calculator
+  const [useUnifiedConfidence, setUseUnifiedConfidence] = useState(true); // ✅ Start enabled for testing
+  
+  const calculateUnifiedConfidence = useCallback((qualityMetrics: any): number => {
+    if (!qualityMetrics) return 0;
+    
+    // Extract metrics with fallbacks
+    const snrDb = typeof qualityMetrics.snrDb === 'number' ? qualityMetrics.snrDb : 0;
+    const acDcRatio = typeof qualityMetrics.acDcRatio === 'number' ? qualityMetrics.acDcRatio : 0;
+    const periodicity = typeof qualityMetrics.periodicity === 'number' ? qualityMetrics.periodicity : 0;
+    const baseConfidence = typeof qualityMetrics.confidence === 'number' ? qualityMetrics.confidence : 0;
+    
+    // Normalization functions
+    const normalize = (value: number, min: number, max: number): number => {
+      return Math.max(0, Math.min(1, (value - min) / (max - min)));
+    };
+    
+    // Normalize components to [0,1]
+    const snrNorm = normalize(snrDb, 0, 12);        // 0-12 dB range
+    const acDcNorm = normalize(acDcRatio, 0.002, 0.02); // 0.2%-2% range  
+    const perNorm = Math.max(0, Math.min(1, periodicity)); // Already 0-1
+    
+    // Weighted combination (as per user spec)
+    const unifiedScore = 0.5 * snrNorm + 0.3 * acDcNorm + 0.2 * perNorm;
+    
+    // Fallback blending if unified components are unavailable
+    const hasValidComponents = snrDb > 0 || acDcRatio > 0 || periodicity > 0;
+    const finalScore = hasValidComponents ? unifiedScore : baseConfidence;
+    
+    logTelemetryEvent('unified_confidence_debug', {
+      snrDb, snrNorm,
+      acDcRatio, acDcNorm,
+      periodicity, perNorm,
+      baseConfidence,
+      unifiedScore,
+      finalScore,
+      hasValidComponents
+    });
+    
+    return Math.max(0, Math.min(1, finalScore));
+  }, [logTelemetryEvent]);
+
+  const getEffectiveConfidence = useCallback((qualityMetrics: any): number => {
+    if (useUnifiedConfidence) {
+      return calculateUnifiedConfidence(qualityMetrics);
+    }
+    return Math.max(0, Math.min(1, qualityMetrics?.confidence ?? 0));
+  }, [useUnifiedConfidence, calculateUnifiedConfidence]);
 
   // VisionCamera frame processor plugin initialized on JS thread
   const ppgPluginRef = useRef<any>(null);
@@ -779,10 +838,10 @@ export default function CameraPPGAnalyzer() {
           
         // C++ analizindeki beat artışına göre haptic feedback (kalite koşulu ile)
         const currentBeatCount = (newMetrics as any).quality?.totalBeats ?? 0;
-        const cppConf = (newMetrics as any).quality?.confidence ?? 0;
+        const effectiveConf = getEffectiveConfidence((newMetrics as any)?.quality);
         const goodQ = !!(newMetrics as any).quality?.goodQuality;
-        // ✅ İyileştirilmiş haptic: running durumu + daha esnek confidence threshold
-        if (currentBeatCount > lastBeatCount && fsmRef.current === 'running' && goodQ && cppConf >= 0.3) {
+        // ✅ İyileştirilmiş haptic: running durumu + unified confidence
+        if (currentBeatCount > lastBeatCount && fsmRef.current === 'running' && goodQ && effectiveConf >= 0.3) {
           const now = Date.now();
           const refractoryMs = 250; // darbeler arası min süre
           if (!lastHapticTimeRef.current || now - lastHapticTimeRef.current >= refractoryMs) {
@@ -816,19 +875,20 @@ export default function CameraPPGAnalyzer() {
           
           // FSM: Warmup bitiminde parmak/konf tekrar doğrulaması
           if (!inWarmup && fsmRef.current === 'starting') {
-            const confNow = (newMetrics as any)?.quality?.confidence ?? 0;
+            const baseConf = (newMetrics as any)?.quality?.confidence ?? 0;
+            const effectiveConf = getEffectiveConfidence((newMetrics as any)?.quality);
             const bpmNow = newMetrics.bpm ?? 0;
             const peaksNow = (newMetrics as any)?.quality?.totalBeats ?? 0;
-            console.log(`🟡 Warmup complete - Conf: ${confNow.toFixed(2)}, BPM: ${bpmNow.toFixed(1)}, Peaks: ${peaksNow}`);
+            console.log(`🟡 Warmup complete - Base: ${baseConf.toFixed(2)}, Unified: ${effectiveConf.toFixed(2)}, BPM: ${bpmNow.toFixed(1)}, Peaks: ${peaksNow}`);
             
-            // ✅ İyileştirilmiş warmup kontrolü: BPM veya peak varsa geçer
-            const hasValidData = confNow >= CFG.CONF_HIGH || (bpmNow > 40 && bpmNow < 200) || peaksNow > 3;
+            // ✅ İyileştirilmiş warmup kontrolü: Unified confidence veya valid BPM/peaks
+            const hasValidData = effectiveConf >= CFG.CONF_HIGH || (bpmNow > 40 && bpmNow < 200) || peaksNow > 3;
             
             if (hasValidData) {
               console.log('🟡 Warmup OK → running (conf OR valid BPM/peaks)');
               fsmRef.current = 'running';
             } else {
-              console.log(`🔴 Warmup failed - Conf: ${confNow}, BPM: ${bpmNow}, Peaks: ${peaksNow} → extending warmup`);
+              console.log(`🔴 Warmup failed - Conf: ${effectiveConf.toFixed(2)}, BPM: ${bpmNow}, Peaks: ${peaksNow} → extending warmup`);
               // ✅ Warmup'ı uzat, hemen durdurmak yerine
               warmupUntilRef.current = Date.now() + 2000; // 2s ek süre
             }
@@ -965,7 +1025,7 @@ export default function CameraPPGAnalyzer() {
             {...(cameraLockEnabled && lockIso ? { 
               iso: lockIso 
             } : {})}
-            // Note: whiteBalance not available in current VisionCamera version
+            // Note: whiteBalance, focus not available in current VisionCamera version
             onError={(error) => {
               console.error('🔴 Camera error:', error);
               console.error('🔴 Camera error code:', error.code);
@@ -1001,10 +1061,15 @@ export default function CameraPPGAnalyzer() {
       {/* Durum Özeti - FSM State + Güven Skoru */}
       <View style={styles.infoRow}>
         <Text style={styles.infoText}>
-          📊 PPG: {useNativePPG ? 'ON' : 'OFF'} • FPS: {targetFps} • FSM: {fsmRef.current} • 📳: ON
+          📊 PPG: {useNativePPG ? 'ON' : 'OFF'} • FPS: {targetFps} • FSM: {fsmRef.current} • 📳: ON • 
+          Conf: {useUnifiedConfidence ? 'UNIFIED' : 'BASE'}
         </Text>
         <View style={[styles.qualityPill, { backgroundColor: confColor }]}> 
-          <Text numberOfLines={1} style={styles.qualityPillText}>{Math.round((metrics?.quality?.confidence ?? 0) * 100)}%</Text>
+          <Text numberOfLines={1} style={styles.qualityPillText}>
+            {useUnifiedConfidence ? 
+              `${Math.round(getEffectiveConfidence(metrics?.quality) * 100)}%ᵁ` : 
+              `${Math.round((metrics?.quality?.confidence ?? 0) * 100)}%`}
+          </Text>
         </View>
       </View>
 
@@ -1096,8 +1161,14 @@ export default function CameraPPGAnalyzer() {
                   <Text style={styles.metricLabel}>BPM</Text>
                 </View>
                 <View style={styles.metricBox}>
-                  <Text style={styles.metricValue}>{String(((metrics.quality?.confidence ?? 0) * 100).toFixed(0))}%</Text>
-                  <Text style={styles.metricLabel}>Güven</Text>
+                  <Text style={styles.metricValue}>
+                    {useUnifiedConfidence ? 
+                      `${String((getEffectiveConfidence(metrics.quality) * 100).toFixed(0))}%ᵁ` :
+                      `${String(((metrics.quality?.confidence ?? 0) * 100).toFixed(0))}%`}
+                  </Text>
+                  <Text style={styles.metricLabel}>
+                    {useUnifiedConfidence ? 'Unified Güven' : 'Base Güven'}
+                  </Text>
                 </View>
                 <View style={styles.metricBox}>
                   <Text style={styles.metricValue}>{String(metrics.quality?.snrDb?.toFixed?.(1) ?? '—')}</Text>
@@ -1142,7 +1213,22 @@ export default function CameraPPGAnalyzer() {
               <Text style={styles.detailItem}><Text style={styles.detailKey}>Toplam Atış:</Text> {String(metrics.quality?.totalBeats ?? 0)}</Text>
               <Text style={styles.detailItem}><Text style={styles.detailKey}>Reddedilen:</Text> {String(metrics.quality?.rejectedBeats ?? 0)}</Text>
               <Text style={styles.detailItem}><Text style={styles.detailKey}>Red Oranı:</Text> {String(((metrics.quality?.rejectionRate ?? 0) * 100).toFixed(0))}%</Text>
-              <Text style={styles.detailItem}><Text style={styles.detailKey}>Confidence:</Text> {String(((metrics.quality?.confidence ?? 0) * 100).toFixed(0))}%</Text>
+              <Text style={styles.detailItem}>
+                <Text style={styles.detailKey}>Base Confidence:</Text> {String(((metrics.quality?.confidence ?? 0) * 100).toFixed(0))}%
+              </Text>
+              {useUnifiedConfidence && (
+                <>
+                  <Text style={styles.detailItem}>
+                    <Text style={styles.detailKey}>Unified Confidence:</Text> {String((getEffectiveConfidence(metrics.quality) * 100).toFixed(0))}%
+                  </Text>
+                  <Text style={styles.detailItem}>
+                    <Text style={styles.detailKey}>AC/DC Ratio:</Text> {String(metrics.quality?.acDcRatio?.toFixed?.(4) ?? '—')}
+                  </Text>
+                  <Text style={styles.detailItem}>
+                    <Text style={styles.detailKey}>Periodicity:</Text> {String(metrics.quality?.periodicity?.toFixed?.(2) ?? '—')}
+                  </Text>
+                </>
+              )}
               <Text style={styles.detailItem}><Text style={styles.detailKey}>SNR dB:</Text> {String(metrics.quality?.snrDb?.toFixed?.(1) ?? '—')}</Text>
               <Text style={styles.detailItem}><Text style={styles.detailKey}>f0 Hz:</Text> {String((metrics as any)?.quality?.f0Hz?.toFixed?.(2) ?? '—')}</Text>
               <Text style={styles.detailItem}><Text style={styles.detailKey}>Uyarı:</Text> {String(metrics.quality?.qualityWarning ?? '—')}</Text>
@@ -1376,6 +1462,23 @@ const styles = StyleSheet.create({
   },
   tabTextActive: {
     color: '#333',
+  },
+  smallButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  activeSmallButton: {
+    backgroundColor: '#4CAF50',
+  },
+  inactiveSmallButton: {
+    backgroundColor: '#757575',
+  },
+  smallButtonText: {
+    color: 'white',
+    fontSize: 11,
+    fontWeight: '600',
   },
   metricsTitle: {
     fontSize: 18,
