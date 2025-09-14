@@ -679,8 +679,7 @@ export default function CameraPPGAnalyzer() {
           setStatusMessage('Kalibrasyon: FPS ölçülüyor...');
           // Small delay for camera warm-up
           await new Promise(res => setTimeout(res, 300));
-          // Try to enable torch quickly for finger PPG
-          if (device?.hasTorch) setTorchOn(true);
+          // Torch kullanımını kapattık (enerji ve thrash önlemek için)
           // Fixed optimal FPS - no calibration needed
           const fsForAnalyzer = targetFps; // Use fixed 30 FPS
           console.log(`📏 Using fixed optimal FPS: ${fsForAnalyzer}`);
