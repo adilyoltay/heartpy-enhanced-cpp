@@ -156,7 +156,7 @@ export default function CameraPPGAnalyzer() {
   const lastAutoToggleAtRef = useRef(0);
   const analyzeStartTsRef = useRef(0);
   const warmupUntilRef = useRef(0);
-  const fsmRef = useRef<'idle'|'starting'|'warmup'|'running'|'stopping'|'cooldown'>('idle');
+  const fsmRef = useRef<'idle'|'starting'|'running'|'stopping'>('idle');  // ✅ Sadeleştirildi
   // Removed UI control states
 
   // Load/save persistent settings (best-effort)
@@ -200,6 +200,18 @@ export default function CameraPPGAnalyzer() {
   const analyzerRef = useRef<any | null>(null);
   const [targetFps, setTargetFps] = useState(30); // Optimal FPS for PPG
   const [analyzerFs, setAnalyzerFs] = useState(30); // matched to targetFps
+  
+  // ✅ PHASE 1: Camera Lock Settings
+  const [cameraLockEnabled, setCameraLockEnabled] = useState(true);
+  const [lockExposure, setLockExposure] = useState<number | undefined>(1/120); // 1/120s
+  const [lockIso, setLockIso] = useState<number | undefined>(200); // ISO 200
+  const [lockWhiteBalance, setLockWhiteBalance] = useState<'auto' | 'sunny' | 'cloudy' | 'fluorescent'>('auto');
+  const [lockFocus, setLockFocus] = useState<'auto' | 'manual'>('manual');
+  
+  // ✅ PHASE 1: Telemetry Events
+  const sessionStartRef = useRef<number>(0);
+  const torchDutyStartRef = useRef<number>(0);
+  const torchTotalDutyRef = useRef<number>(0);
   const samplingRate = analyzerFs; // keep analyzer in sync with actual fps
   const bufferSize = samplingRate * 15; // 15 saniye buffer - daha stabil BPM için
   const analysisInterval = 1000; // 1000ms'de bir analiz - STABİL sonuçlar için
@@ -207,8 +219,8 @@ export default function CameraPPGAnalyzer() {
   // FSM kontrollü başlat/durdur yardımcıları
   // Konfig (tek noktadan)
   const CFG = {
-    CONF_HIGH: 0.35,  // ✅ Gerçekçi yüksek threshold  
-    CONF_LOW: 0.15,   // ✅ Gerçekçi düşük threshold
+    CONF_HIGH: 0.25,  // ✅ Daha düşük - C++ confidence 0 sorunu için
+    CONF_LOW: 0.10,   // ✅ Daha düşük - daha kolay başlatma
     HIGH_DEBOUNCE_MS: 800,   // ✅ Biraz daha uzun start koruması
     LOW_DEBOUNCE_MS: 1200,   // ✅ Premature stop önleme
     WARMUP_MS: 3000,         // ✅ 3s warmup uygun
@@ -230,6 +242,8 @@ export default function CameraPPGAnalyzer() {
     if (fsmRef.current !== 'idle' || isAnalyzing) return;
     
     console.log('🟢 FSM Start: idle → starting');
+    sessionStartRef.current = now;  // ✅ Session tracking
+    logFSMTransition('idle', 'starting', 'auto_or_manual_trigger');
     fsmRef.current = 'starting';
     lastAutoToggleAtRef.current = now;
     analyzeStartTsRef.current = now;
@@ -241,6 +255,7 @@ export default function CameraPPGAnalyzer() {
     try {
       if (device?.hasTorch) {
         setTorchOn(true);
+        torchDutyStartRef.current = now;  // ✅ Torch duty tracking
         console.log('🔦 Torch ON - parmak algılandı');
       }
     } catch (e) {
@@ -259,21 +274,21 @@ export default function CameraPPGAnalyzer() {
       }
       
       analyzerRef.current = await HP.RealtimeAnalyzer.create(analyzerFs, {
-        bandpass: { lowHz: 0.4, highHz: 3.5, order: 2 },
-        welch: { nfft: 2048, overlap: 0.75 },
+        bandpass: { lowHz: 0.5, highHz: 4.0, order: 2 },  // ✅ Daha esnek frekans range
+        welch: { nfft: 1024, overlap: 0.5 },               // ✅ Hızlı hesap, daha tolerant
         peak: { 
-          refractoryMs: 450,
-          thresholdScale: 0.6,
-          bpmMin: 50,
-          bpmMax: 120
+          refractoryMs: 300,    // ✅ Daha kısa refractory - daha fazla peak
+          thresholdScale: 0.4,  // ✅ Daha düşük threshold - daha esnek peak
+          bpmMin: 40,           // ✅ Daha geniş BPM range
+          bpmMax: 180           // ✅ Daha geniş BPM range
         },
         preprocessing: { 
           removeBaselineWander: true,
-          smoothingWindowMs: 100
+          smoothingWindowMs: 50   // ✅ Daha az smoothing - daha çok detay
         },
         quality: {
-          cleanRR: true,
-          cleanMethod: 'iqr'
+          cleanRR: false,         // ✅ RR temizleme kapalı - daha esnek  
+          cleanMethod: 'none'     // ✅ Hiç temizleme yapma
         }
       });
       
@@ -294,7 +309,14 @@ export default function CameraPPGAnalyzer() {
     const now = Date.now();
     if (fsmRef.current === 'idle' || fsmRef.current === 'stopping') return;
     
+    // ✅ Torch duty calculation
+    if (torchDutyStartRef.current > 0) {
+      torchTotalDutyRef.current += now - torchDutyStartRef.current;
+      torchDutyStartRef.current = 0;
+    }
+    
     console.log('🔴 FSM Stop:', fsmRef.current, '→ stopping', 'reason=', reason);
+    logFSMTransition(fsmRef.current, 'stopping', reason);
     fsmRef.current = 'stopping';
     lastAutoToggleAtRef.current = now;
     setStatusMessage('⏹️ Analiz durduruluyor...');
@@ -339,6 +361,8 @@ export default function CameraPPGAnalyzer() {
       resetStabilityCounters();
       analyzeStartTsRef.current = 0; 
       warmupUntilRef.current = 0;
+      logFSMTransition('stopping', 'idle', 'cleanup_complete');
+      logSessionOutcome('success', reason, metrics || null);
       fsmRef.current = 'idle';
       setStatusMessage('📷 Parmağınızı kamerayı tamamen kapatacak şekilde yerleştirin');
     }
@@ -369,6 +393,43 @@ export default function CameraPPGAnalyzer() {
   const warnedJSIFallbackRef = useRef(false);
   const lastHapticTimeRef = useRef<number>(0);  // Haptic feedback zamanlaması için
   // const testHapticIntervalRef = useRef<any>(null);  // ✅ Kaldırıldı - kullanılmıyor
+  const isAnalyzingRef = useRef(isAnalyzing);  // ✅ Poll interval staleness önleme
+  const lastDataAtRef = useRef(Date.now());    // ✅ Watchdog timer için
+  
+  // ✅ isAnalyzingRef'i güncel tut
+  useEffect(() => { 
+    isAnalyzingRef.current = isAnalyzing; 
+  }, [isAnalyzing]);
+
+  // ✅ PHASE 1: Telemetry Functions
+  const logTelemetryEvent = useCallback((eventName: string, data: Record<string, any>) => {
+    const timestamp = new Date().toISOString();
+    console.log(`📊 TELEMETRY [${timestamp}] ${eventName}:`, JSON.stringify(data, null, 2));
+    
+    // TODO: Send to analytics service in production
+    // Analytics.track(eventName, { ...data, timestamp, deviceId, appVersion });
+  }, []);
+
+  const logFSMTransition = useCallback((fromState: string, toState: string, reason: string) => {
+    logTelemetryEvent('ppg_fsm_transition', {
+      fromState,
+      toState,
+      reason,
+      sessionDuration: sessionStartRef.current ? Date.now() - sessionStartRef.current : 0,
+      torchDuty: torchTotalDutyRef.current
+    });
+  }, [logTelemetryEvent]);
+
+  const logSessionOutcome = useCallback((outcome: 'success' | 'error' | 'cancelled', reason: string, metrics?: any) => {
+    const sessionDuration = sessionStartRef.current ? Date.now() - sessionStartRef.current : 0;
+    logTelemetryEvent('ppg_session_outcome', {
+      outcome,
+      reason,
+      sessionDuration,
+      torchDutyTotal: torchTotalDutyRef.current,
+      metrics: metrics || null
+    });
+  }, [logTelemetryEvent]);
 
   // VisionCamera frame processor plugin initialized on JS thread
   const ppgPluginRef = useRef<any>(null);
@@ -534,9 +595,11 @@ export default function CameraPPGAnalyzer() {
           coverStableMsRef.current = Math.max(0, coverStableMsRef.current - dt/2);
           uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - dt/2);
         }
-        const GATE = 0.05;  // örnek akışını kesmeyelim
-        const gateOK = confVal >= GATE || latestSamples.length > 0;
-        if (latestSamples.length > 0 && gateOK) {
+        // ✅ GATE kaldırıldı - etkisizdi (latestSamples.length > 0 varsa her zaman true)
+        if (latestSamples.length > 0) {
+          // ✅ Watchdog: Data received, update timestamp
+          lastDataAtRef.current = Date.now();
+          
           // ✅ Warmup'ta da tüm veriler işlenir, hiç veri atılmaz
           
           // Update UI and incremental queue
@@ -555,7 +618,7 @@ export default function CameraPPGAnalyzer() {
           });
           // If timestamps available and analyzer supports, push with timestamps now (optional)
           try {
-            if (latestTs && latestTs.length === latestSamples.length && analyzerRef.current?.pushWithTimestamps && gateOK) {
+            if (latestTs && latestTs.length === latestSamples.length && analyzerRef.current?.pushWithTimestamps) {
               const xs = new Float32Array(latestSamples);
               const ts = new Float64Array(latestTs);
               await analyzerRef.current.pushWithTimestamps(xs, ts);
@@ -564,6 +627,7 @@ export default function CameraPPGAnalyzer() {
             }
           } catch (e) {
             console.warn('pushWithTimestamps failed, will use regular push:', e);
+            // ✅ Bu normal - rtPushTs mevcut değilse regular push kullanır
             // Hata durumunda pendingSamplesRef dolu kalır, normal push kullanılır
           }
         }
@@ -572,16 +636,19 @@ export default function CameraPPGAnalyzer() {
           const now = Date.now();
           const ranMs = now - (analyzeStartTsRef.current || 0);
           const coolOK = now - (lastAutoToggleAtRef.current || 0) >= CFG.COOLDOWN_MS;
+          // ✅ Güncel analyzing durumu için ref kullan (staleness önleme)
+          const analyzingNow = isAnalyzingRef.current;
+          
           // IDLE → STARTING: high debounce sağlandıysa ve cooldown geçtiyse
-          if (!isAnalyzing && fsmRef.current === 'idle' && coverStableMsRef.current >= CFG.HIGH_DEBOUNCE_MS && coolOK) {
+          if (!analyzingNow && fsmRef.current === 'idle' && coverStableMsRef.current >= CFG.HIGH_DEBOUNCE_MS && coolOK) {
             await startAnalysisFSM();
           }
           // RUNNING → STOPPING: low debounce + min run + cooldown
-          if (isAnalyzing && fsmRef.current === 'running' && uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS && ranMs >= CFG.MIN_RUN_MS && coolOK) {
+          if (analyzingNow && fsmRef.current === 'running' && uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS && ranMs >= CFG.MIN_RUN_MS && coolOK) {
             await stopAnalysisFSM('auto');
           }
-          // ✅ STARTING (warmup) → STOPPING: erken parmak kalkması (daha kısa süre)
-          if (isAnalyzing && fsmRef.current === 'starting' && uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS && ranMs >= 2000 && coolOK) {
+          // ✅ STARTING (warmup) → STOPPING: erken parmak kalkması (cooldown'sız!)
+          if (analyzingNow && fsmRef.current === 'starting' && uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS && ranMs >= 2000) {
             await stopAnalysisFSM('early_stop_warmup');
           }
         } catch {}
@@ -750,14 +817,20 @@ export default function CameraPPGAnalyzer() {
           // FSM: Warmup bitiminde parmak/konf tekrar doğrulaması
           if (!inWarmup && fsmRef.current === 'starting') {
             const confNow = (newMetrics as any)?.quality?.confidence ?? 0;
-            console.log(`🟡 Warmup complete, checking confidence: ${confNow.toFixed(2)} vs ${CFG.CONF_HIGH}`);
-            if (confNow >= CFG.CONF_HIGH) {
-              console.log('🟡 Warmup OK → running');
+            const bpmNow = newMetrics.bpm ?? 0;
+            const peaksNow = (newMetrics as any)?.quality?.totalBeats ?? 0;
+            console.log(`🟡 Warmup complete - Conf: ${confNow.toFixed(2)}, BPM: ${bpmNow.toFixed(1)}, Peaks: ${peaksNow}`);
+            
+            // ✅ İyileştirilmiş warmup kontrolü: BPM veya peak varsa geçer
+            const hasValidData = confNow >= CFG.CONF_HIGH || (bpmNow > 40 && bpmNow < 200) || peaksNow > 3;
+            
+            if (hasValidData) {
+              console.log('🟡 Warmup OK → running (conf OR valid BPM/peaks)');
               fsmRef.current = 'running';
             } else {
-              console.log('🔴 Warmup bitti ama conf düşük → stop');
-              await stopAnalysisFSM('no_finger_after_warmup');
-              return;
+              console.log(`🔴 Warmup failed - Conf: ${confNow}, BPM: ${bpmNow}, Peaks: ${peaksNow} → extending warmup`);
+              // ✅ Warmup'ı uzat, hemen durdurmak yerine
+              warmupUntilRef.current = Date.now() + 2000; // 2s ek süre
             }
           }
           
@@ -788,157 +861,16 @@ export default function CameraPPGAnalyzer() {
   // Analizi başlat/durdur - FSM state'ini güncelle
   const toggleAnalysis = async () => {
     console.log('🔵 toggleAnalysis called, isAnalyzing:', isAnalyzing, 'FSM:', fsmRef.current);
-    if (isAnalyzing) {
-      // Durdur - FSM state'ini idle'a çevir
-      console.log('🔴 Stopping analysis, FSM: running → idle');
-      fsmRef.current = 'idle';
-      setIsAnalyzing(false);
-      setIsActive(false);
-      setTorchOn(false);
-      // preTorchFramesRef.current = 0; // ✅ Kaldırıldı - artık kullanılmıyor
-      if (analyzerRef.current) {
-        try {
-          await analyzerRef.current.destroy();
-        } catch (destroyError) {
-          console.error('Native analyzer destroy failed:', destroyError);
-        }
-        analyzerRef.current = null;
-      }
-      if (torchTimerRef.current) {
-        clearTimeout(torchTimerRef.current);
-        torchTimerRef.current = null;
-      }
-      if (simulationTimerRef.current) {
-        clearInterval(simulationTimerRef.current);
-        simulationTimerRef.current = null;
-      }
-      frameBufferRef.current = [];
-      pendingSamplesRef.current = [];
-      globalFrameCounter.current = 0;
-      setMetrics(null);
-      setPpgSignal([]);
-      setLastBeatCount(0);
-      setFrameCount(0);
-      setHapticPeakCount(0);
-      setMissedPeakCount(0);
-      setStatusMessage('Analiz durduruldu');
-    } else {
-      // Başlat - FSM state kontrolü
-      console.log('🟢 Starting analysis...');
-      
-      // Eğer FSM idle ise starting'e çevir, değilse mevcut state'i koru
-      if (fsmRef.current === 'idle') {
-        console.log('🟢 FSM: idle → starting (manual)');
-        fsmRef.current = 'starting';
-      }
-      
-      try {
-        console.log('🟢 Setting isAnalyzing to true');
-        setIsAnalyzing(true);
-        setStatusMessage('⏳ Analiz başlatılıyor...');
-        startTimeRef.current = Date.now();
-        setLastBeatCount(0);
-        setFrameCount(0);
-        setPpgSignal([]);
-        setHapticPeakCount(0);
-        setMissedPeakCount(0);
-        setTorchOn(false);
-
-        // Ensure permission first
-        if (!hasPermission) {
-          console.log('Requesting camera permission before activation...');
-          const ok = await requestCameraPermission();
-          if (!ok) {
-            setIsAnalyzing(false);
-            setStatusMessage('Kamera izni gerekiyor');
-            return;
-          }
-        }
-        
-        // Camera activation & FS calibration before analyzer create
-        let fsForAnalyzer = analyzerFs;
-        if (device) {
-          console.log('🟢 Activating camera for FS calibration...');
-          setIsActive(true);
-          setStatusMessage('Kalibrasyon: FPS ölçülüyor...');
-          // Small delay for camera warm-up
-          await new Promise(res => setTimeout(res, 300));
-          // Torch kullanımını kapattık (enerji ve thrash önlemek için)
-          // Fixed optimal FPS - no calibration needed
-          const fsForAnalyzer = targetFps; // Use fixed 30 FPS
-          console.log(`📏 Using fixed optimal FPS: ${fsForAnalyzer}`);
-        } else {
-          console.log('⏳ Device not ready; skipping FS calibration, using analyzerFs');
-          pendingActivateRef.current = true;
-          setStatusMessage('Kamera hazırlanıyor...');
-        }
-
-        // RealtimeAnalyzer oluştur
-        console.log('🟢 Getting HeartPy module...');
-        const HP = getHeartPy();
-        console.log('🟢 HeartPy module available:', !!HP);
-        if (!HP?.RealtimeAnalyzer?.create) throw new Error('HeartPy RealtimeAnalyzer not available');
-        console.log('Creating analyzer with samplingRate:', fsForAnalyzer);
-        try {
-          const g: any = global as any;
-          if (!warnedJSIFallbackRef.current && !(g && typeof g.__hpRtCreate === 'function')) {
-            console.warn('HeartPy JSI not available; using NativeModule for streaming');
-            warnedJSIFallbackRef.current = true;
-          }
-        } catch {}
-        try {
-          // PPG sinyali için STABİL parametreler
-          analyzerRef.current = await HP.RealtimeAnalyzer.create(fsForAnalyzer, {
-            // Daha geniş bandpass - stabil sonuçlar için
-            bandpass: { lowHz: 0.4, highHz: 3.5, order: 2 },
-            // Daha büyük FFT - daha stabil frekans analizi
-            welch: { nfft: 2048, overlap: 0.75 },
-            // STABİL peak detection parametreleri
-            peak: { 
-              refractoryMs: 450,      // Daha konservatif - yanlış peak'leri önler
-              thresholdScale: 0.6,    // Daha yüksek threshold - stabil peak'ler
-              bpmMin: 50,             // Daha dar aralık - stabil BPM
-              bpmMax: 120             // Çok yüksek BPM'leri önle
-            },
-            preprocessing: { 
-              removeBaselineWander: true,
-              smoothingWindowMs: 100   // Daha fazla smoothing - stabil sinyal
-            },
-            // RR Temizleme - stabilite için kritik
-            quality: {
-              cleanRR: true,          // RR interval temizleme aktif
-              cleanMethod: 'iqr'      // IQR outlier removal
-            }
-          });
-          console.log('Real native analyzer created with optimized PPG parameters');
-        } catch (createError) {
-          console.error('Native analyzer creation failed:', createError);
-          throw createError;
-        }
-        console.log('Analyzer created successfully:', !!analyzerRef.current);
-        
-        // FSM: starting → running + warmup ayarla
-        console.log('🟢 Analysis started, FSM: starting → running');
-        fsmRef.current = 'running';
-        
-        // Warmup süresini ayarla (manual veya auto start için)
-        if (!warmupUntilRef.current || warmupUntilRef.current < Date.now()) {
-          warmupUntilRef.current = Date.now() + 3000; // 3 saniye warmup
-        }
-        setStatusMessage('⏳ Isınma: pozlama/sinyal oturuyor...');
-      } catch (error) {
-        console.error('Start analysis error:', error);
-        try { console.error('Error type:', typeof error); } catch {}
-        // Avoid accessing non-standard properties on unknown error
-        try { console.error('Error string:', String(error)); } catch {}
-        // Başlatma hatası - FSM'i idle'a çevir
-        console.log('🔴 Start error, FSM: starting → idle');
-        fsmRef.current = 'idle';
-        setIsAnalyzing(false);
-        setIsActive(false); // Kamerayı da kapat
-        setStatusMessage('❌ Başlatma hatası');
-      }
+    
+    // ✅ FSM tek kapı - tüm start/stop FSM üzerinden
+    if (fsmRef.current !== 'idle') {
+      // Tek kapıdan durdur
+      await stopAnalysisFSM('manual');
+      return;
     }
+    
+    // Tek kapıdan başlat  
+    await startAnalysisFSM();
   };
 
   // Activate camera once device becomes available after permission
@@ -950,6 +882,38 @@ export default function CameraPPGAnalyzer() {
       setStatusMessage('Analiz başlatıldı');
     }
   }, [isAnalyzing, hasPermission, device]);
+
+  // ✅ PHASE 1: AppState listener - background handling
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      if (nextAppState !== 'active' && isAnalyzingRef.current) {
+        console.log('⚠️ App going to background - stopping analysis for safety');
+        stopAnalysisFSM('app_background').catch(() => {
+          console.error('Failed to stop analysis on background');
+        });
+      }
+    });
+
+    return () => subscription?.remove();
+  }, [stopAnalysisFSM]);
+
+  // ✅ PHASE 1: Watchdog timer - stall detection
+  useEffect(() => {
+    const watchdogInterval = setInterval(() => {
+      if (isAnalyzingRef.current) {
+        const timeSinceLastData = Date.now() - lastDataAtRef.current;
+        if (timeSinceLastData > 5000) { // 5 seconds stall
+          console.warn('⛑️ PPG data stall detected - stopping analysis');
+          console.warn(`⛑️ Time since last data: ${timeSinceLastData}ms`);
+          stopAnalysisFSM('stall_watchdog').catch(() => {
+            console.error('Failed to stop analysis on stall');
+          });
+        }
+      }
+    }, 1000); // Check every second
+
+    return () => clearInterval(watchdogInterval);
+  }, [stopAnalysisFSM]);
 
   // Component unmount temizleme
   useEffect(() => {
@@ -990,9 +954,18 @@ export default function CameraPPGAnalyzer() {
             style={styles.camera}
             device={device}
             isActive={isActive}
-            frameProcessor={isActive ? frameProcessor : undefined} // Minimal frame processor test
-            {...(Platform.OS === 'android' ? { fps: targetFps } : {})}
+            frameProcessor={isActive ? frameProcessor : undefined}
+            // ✅ PHASE 1: Enhanced Camera Controls
+            fps={targetFps}  // FPS lock for both platforms
             torch={device?.hasTorch && torchOn ? 'on' : 'off'}
+            // ✅ Manual exposure & ISO for stable lighting (VisionCamera v4+ format)
+            {...(cameraLockEnabled && lockExposure ? { 
+              exposure: lockExposure 
+            } : {})}
+            {...(cameraLockEnabled && lockIso ? { 
+              iso: lockIso 
+            } : {})}
+            // Note: whiteBalance not available in current VisionCamera version
             onError={(error) => {
               console.error('🔴 Camera error:', error);
               console.error('🔴 Camera error code:', error.code);
@@ -1003,7 +976,8 @@ export default function CameraPPGAnalyzer() {
               setStatusMessage('❌ Kamera hatası: ' + error.message);
             }}
             onInitialized={() => {
-              console.log('🟢 Camera initialized successfully');
+              console.log('🟢 Camera initialized with locked settings');
+              console.log('🔐 Camera locks - FPS:', targetFps, 'Exposure:', lockExposure, 'ISO:', lockIso, 'Focus:', lockFocus);
             }}
           />
         ) : (
