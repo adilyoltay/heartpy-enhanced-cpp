@@ -111,6 +111,11 @@ interface PPGMetrics {
     acDcRatio?: number;   // ✅ PHASE 1: AC/DC ratio for unified confidence
     periodicity?: number; // ✅ PHASE 1: Periodicity score for unified confidence
     qualityWarning?: string;
+    // ✅ PHASE 2: RR Artifact Correction
+    correctedRRList?: number[];
+    rrOutlierCount?: number;
+    rrCorrectionRatio?: number;
+    rrCorrectionMethod?: string;
     doublingFlag?: boolean;
     softDoublingFlag?: boolean;
     doublingHintFlag?: boolean;
@@ -144,7 +149,7 @@ export default function CameraPPGAnalyzer() {
   // Use green + chrom for improved SNR and robustness
   const [ppgChannel, setPpgChannel] = useState<'green' | 'red' | 'luma'>('green');
   const [ppgMode, setPpgMode] = useState<'mean' | 'chrom' | 'pos'>('chrom');
-  const [ppgGrid, setPpgGrid] = useState<1 | 2 | 3>(1); // Fixed optimal
+  const [ppgGrid, setPpgGrid] = useState<1 | 2 | 3>(3); // ✅ PHASE 2: 3x3 grid for robust multi-ROI
   const [pluginConfidence, setPluginConfidence] = useState<number>(0);
   const [autoSelect, setAutoSelect] = useState(false); // Face mode disabled; keep blend OFF
   const [metricsTab, setMetricsTab] = useState<'Özet' | 'Zaman' | 'Frekans' | 'Kalite' | 'Ham'>('Özet');
@@ -222,6 +227,28 @@ export default function CameraPPGAnalyzer() {
   const [torchLevel, setTorchLevel] = useState<number>(0.6); // Start with medium
   const torchLevels = [0.3, 0.6, 1.0]; // Progressive levels
   const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(1); // Start with 0.6
+  
+  // ✅ PHASE 2: Multi-ROI Adaptive Management
+  const roiQualityHistoryRef = useRef<number[]>([]);
+  const [adaptiveROI, setAdaptiveROI] = useState(false); // Enable adaptive ROI sizing
+  const [lastROIAdjustment, setLastROIAdjustment] = useState(Date.now());
+  
+  // ✅ PHASE 2: Signal Quality Tracking
+  const signalQualityHistoryRef = useRef<Array<{
+    timestamp: number,
+    confidence: number,
+    snr: number,
+    acDc: number,
+    gridQuality: number
+  }>>([]);
+  
+  // ✅ PHASE 2: RR Correction State
+  const [rrCorrectionEnabled, setRRCorrectionEnabled] = useState(true);
+  const [lastRRCorrection, setLastRRCorrection] = useState<{
+    outlierCount: number,
+    correctionRatio: number,
+    method: string
+  }>({ outlierCount: 0, correctionRatio: 0, method: 'none' });
   const samplingRate = analyzerFs; // keep analyzer in sync with actual fps
   const bufferSize = samplingRate * 15; // 15 saniye buffer - daha stabil BPM için
   const analysisInterval = 1000; // 1000ms'de bir analiz - STABİL sonuçlar için
@@ -489,6 +516,142 @@ export default function CameraPPGAnalyzer() {
     }
     return Math.max(0, Math.min(1, qualityMetrics?.confidence ?? 0));
   }, [useUnifiedConfidence, calculateUnifiedConfidence]);
+
+  // ✅ PHASE 2: Enhanced Multi-ROI Quality Analysis  
+  const analyzeSignalQuality = useCallback((qualityMetrics: any) => {
+    if (!qualityMetrics) return;
+    
+    const now = Date.now();
+    const confidence = getEffectiveConfidence(qualityMetrics);
+    const snr = qualityMetrics.snrDb || 0;
+    const acDc = qualityMetrics.acDcRatio || 0;
+    
+    // Grid quality estimate (based on plugin confidence and multi-patch consistency)
+    const gridQuality = Math.min(1, (confidence + Math.min(1, snr / 10)) / 2);
+    
+    // Track signal quality history
+    const qualityEntry = { timestamp: now, confidence, snr, acDc, gridQuality };
+    signalQualityHistoryRef.current.push(qualityEntry);
+    
+    // Keep only last 10 entries
+    if (signalQualityHistoryRef.current.length > 10) {
+      signalQualityHistoryRef.current.shift();
+    }
+    
+    logTelemetryEvent('signal_quality_analysis', qualityEntry);
+    
+    return gridQuality;
+  }, [getEffectiveConfidence, logTelemetryEvent]);
+
+  // ✅ PHASE 2: Adaptive ROI Management
+  const adjustROIIfNeeded = useCallback(() => {
+    const now = Date.now();
+    if (now - lastROIAdjustment < 3000) return; // Max once per 3s
+    
+    const history = signalQualityHistoryRef.current;
+    if (history.length < 5) return;
+    
+    // Calculate recent signal quality trend
+    const recentQualities = history.slice(-5).map(h => h.gridQuality);
+    const avgQuality = recentQualities.reduce((a, b) => a + b, 0) / recentQualities.length;
+    const qualityTrend = recentQualities[recentQualities.length - 1] - recentQualities[0];
+    
+    // Adaptive ROI sizing based on quality
+    let newROI = roi;
+    if (avgQuality < 0.3 && qualityTrend < -0.1) {
+      // Quality dropping - try larger ROI
+      newROI = Math.min(0.6, roi + 0.05);
+    } else if (avgQuality > 0.7 && qualityTrend > 0.1) {
+      // Quality good and improving - optimize ROI size
+      newROI = Math.max(0.3, roi - 0.02);
+    }
+    
+    if (Math.abs(newROI - roi) > 0.01) {
+      setRoi(newROI);
+      setLastROIAdjustment(now);
+      logTelemetryEvent('adaptive_roi_adjustment', {
+        oldROI: roi,
+        newROI,
+        avgQuality,
+        qualityTrend,
+        reason: avgQuality < 0.3 ? 'quality_drop' : 'quality_optimization'
+      });
+      console.log(`🎯 Adaptive ROI: ${roi.toFixed(2)} → ${newROI.toFixed(2)} (quality: ${avgQuality.toFixed(2)}, trend: ${qualityTrend.toFixed(2)})`);
+    }
+  }, [roi, lastROIAdjustment, logTelemetryEvent]);
+
+  // ✅ PHASE 2: Advanced RR Artifact Correction (Kubios-inspired)
+  const correctRRIntervals = useCallback((rrIntervals: number[]): {
+    correctedRR: number[],
+    outlierCount: number,
+    correctionRatio: number,
+    method: string
+  } => {
+    if (!rrIntervals || rrIntervals.length < 3) {
+      return { correctedRR: rrIntervals || [], outlierCount: 0, correctionRatio: 0, method: 'none' };
+    }
+    
+    // MAD-based outlier detection (robust to skewed distributions)
+    const computeMedian = (arr: number[]): number => {
+      const sorted = [...arr].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+    };
+    
+    const computeMAD = (arr: number[], median: number): number => {
+      const deviations = arr.map(x => Math.abs(x - median));
+      return computeMedian(deviations);
+    };
+    
+    const median = computeMedian(rrIntervals);
+    const mad = computeMAD(rrIntervals, median);
+    const threshold = 3.0 * mad; // 3-MAD threshold (conservative)
+    
+    const correctedRR: number[] = [];
+    let outlierCount = 0;
+    
+    for (let i = 0; i < rrIntervals.length; i++) {
+      const rr = rrIntervals[i];
+      const deviation = Math.abs(rr - median);
+      
+      if (deviation > threshold) {
+        // Outlier detected - apply correction
+        outlierCount++;
+        
+        if (i === 0 || i === rrIntervals.length - 1) {
+          // Edge outliers - use median
+          correctedRR.push(median);
+        } else {
+          // Internal outliers - cubic spline interpolation (simplified)
+          const prev = rrIntervals[i - 1];
+          const next = rrIntervals[i + 1];
+          const interpolated = (prev + next) / 2; // Linear for simplicity
+          correctedRR.push(interpolated);
+        }
+      } else {
+        correctedRR.push(rr);
+      }
+    }
+    
+    const correctionRatio = rrIntervals.length > 0 ? outlierCount / rrIntervals.length : 0;
+    
+    logTelemetryEvent('rr_artifact_correction', {
+      originalCount: rrIntervals.length,
+      outlierCount,
+      correctionRatio,
+      median,
+      mad,
+      threshold,
+      method: 'mad_spline'
+    });
+    
+    return {
+      correctedRR,
+      outlierCount,
+      correctionRatio,
+      method: 'mad_spline'
+    };
+  }, [logTelemetryEvent]);
 
   // VisionCamera frame processor plugin initialized on JS thread
   const ppgPluginRef = useRef<any>(null);
@@ -834,6 +997,36 @@ export default function CameraPPGAnalyzer() {
           // C++ BPM AYNEN KULLANILIYOR - HİÇ DEĞİŞİKLİK YOK
           console.log(`✅ UI'da gösterilecek BPM: ${calculatedBpm.toFixed(1)} (C++ orijinal değeri)`);
           
+          // ✅ PHASE 2: Enhanced signal quality analysis
+          const gridQuality = analyzeSignalQuality((newMetrics as any)?.quality);
+          
+          // ✅ PHASE 2: Adaptive ROI adjustment (if enabled)
+          if (adaptiveROI && fsmRef.current === 'running') {
+            adjustROIIfNeeded();
+          }
+          
+          // ✅ PHASE 2: RR Artifact Correction (if enabled and RR data available)
+          if (rrCorrectionEnabled && (newMetrics as any)?.quality?.rrList) {
+            const originalRR = (newMetrics as any).quality.rrList;
+            const correction = correctRRIntervals(originalRR);
+            
+            // Store corrected RR back to metrics for UI display
+            (newMetrics as any).quality.correctedRRList = correction.correctedRR;
+            (newMetrics as any).quality.rrOutlierCount = correction.outlierCount;
+            (newMetrics as any).quality.rrCorrectionRatio = correction.correctionRatio;
+            (newMetrics as any).quality.rrCorrectionMethod = correction.method;
+            
+            setLastRRCorrection({
+              outlierCount: correction.outlierCount,
+              correctionRatio: correction.correctionRatio,
+              method: correction.method
+            });
+            
+            if (correction.outlierCount > 0) {
+              console.log(`🔧 RR Correction: ${correction.outlierCount}/${originalRR.length} outliers (${(correction.correctionRatio * 100).toFixed(1)}%)`);
+            }
+          }
+          
           setMetrics(newMetrics as PPGMetrics);
           
         // C++ analizindeki beat artışına göre haptic feedback (kalite koşulu ile)
@@ -1061,8 +1254,8 @@ export default function CameraPPGAnalyzer() {
       {/* Durum Özeti - FSM State + Güven Skoru */}
       <View style={styles.infoRow}>
         <Text style={styles.infoText}>
-          📊 PPG: {useNativePPG ? 'ON' : 'OFF'} • FPS: {targetFps} • FSM: {fsmRef.current} • 📳: ON • 
-          Conf: {useUnifiedConfidence ? 'UNIFIED' : 'BASE'}
+          📊 PPG: {useNativePPG ? 'ON' : 'OFF'} • FPS: {targetFps} • Grid: {ppgGrid}x{ppgGrid} • FSM: {fsmRef.current} • 
+          Conf: {useUnifiedConfidence ? 'UNI' : 'BASE'} • RR: {rrCorrectionEnabled ? 'COR' : 'RAW'}
         </Text>
         <View style={[styles.qualityPill, { backgroundColor: confColor }]}> 
           <Text numberOfLines={1} style={styles.qualityPillText}>
@@ -1229,6 +1422,19 @@ export default function CameraPPGAnalyzer() {
                   </Text>
                 </>
               )}
+              {rrCorrectionEnabled && metrics.quality?.correctedRRList && (
+                <>
+                  <Text style={styles.detailItem}>
+                    <Text style={styles.detailKey}>RR Outliers:</Text> {String(metrics.quality?.rrOutlierCount ?? 0)}
+                  </Text>
+                  <Text style={styles.detailItem}>
+                    <Text style={styles.detailKey}>RR Correction:</Text> {String(((metrics.quality?.rrCorrectionRatio ?? 0) * 100).toFixed(1))}%
+                  </Text>
+                  <Text style={styles.detailItem}>
+                    <Text style={styles.detailKey}>RR Method:</Text> {String(metrics.quality?.rrCorrectionMethod ?? '—')}
+                  </Text>
+                </>
+              )}
               <Text style={styles.detailItem}><Text style={styles.detailKey}>SNR dB:</Text> {String(metrics.quality?.snrDb?.toFixed?.(1) ?? '—')}</Text>
               <Text style={styles.detailItem}><Text style={styles.detailKey}>f0 Hz:</Text> {String((metrics as any)?.quality?.f0Hz?.toFixed?.(2) ?? '—')}</Text>
               <Text style={styles.detailItem}><Text style={styles.detailKey}>Uyarı:</Text> {String(metrics.quality?.qualityWarning ?? '—')}</Text>
@@ -1236,9 +1442,87 @@ export default function CameraPPGAnalyzer() {
           )}
 
           {metricsTab === 'Ham' && (
-            <View style={styles.grid2col}>
-              <Text style={styles.detailItem}><Text style={styles.detailKey}>RR Sayısı:</Text> {String(Array.isArray((metrics as any)?.rrList) ? (metrics as any).rrList.length : 0)}</Text>
-              <Text style={styles.detailItem}><Text style={styles.detailKey}>Peak Sayısı:</Text> {String(Array.isArray((metrics as any)?.peakList) ? (metrics as any).peakList.length : 0)}</Text>
+            <View>
+              {/* Phase 2 Feature Controls */}
+              <View style={[styles.grid2col, { marginBottom: 16 }]}>
+                <TouchableOpacity 
+                  style={[styles.featureButton, adaptiveROI ? styles.featureButtonActive : styles.featureButtonInactive]}
+                  onPress={() => {
+                    setAdaptiveROI(!adaptiveROI);
+                    logTelemetryEvent('adaptive_roi_toggle', { enabled: !adaptiveROI });
+                  }}
+                >
+                  <Text style={styles.featureButtonText}>Adaptive ROI</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity 
+                  style={[styles.featureButton, rrCorrectionEnabled ? styles.featureButtonActive : styles.featureButtonInactive]}
+                  onPress={() => {
+                    setRRCorrectionEnabled(!rrCorrectionEnabled);
+                    logTelemetryEvent('rr_correction_toggle', { enabled: !rrCorrectionEnabled });
+                  }}
+                >
+                  <Text style={styles.featureButtonText}>RR Correction</Text>
+                </TouchableOpacity>
+              </View>
+              
+              {/* Grid Size Control */}
+              <View style={[styles.grid2col, { marginBottom: 16 }]}>
+                <Text style={styles.detailKey}>Grid Size:</Text>
+                <View style={{ flexDirection: 'row' }}>
+                  {([1, 2, 3] as const).map(size => (
+                    <TouchableOpacity 
+                      key={size}
+                      style={[
+                        styles.gridButton, 
+                        ppgGrid === size ? styles.gridButtonActive : styles.gridButtonInactive
+                      ]}
+                      onPress={() => {
+                        setPpgGrid(size);
+                        logTelemetryEvent('grid_size_change', { newSize: size });
+                      }}
+                    >
+                      <Text style={styles.gridButtonText}>{size}x{size}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+              
+              {/* Base Metrics */}
+              <View style={styles.grid2col}>
+                <Text style={styles.detailItem}><Text style={styles.detailKey}>RR Sayısı:</Text> {String(Array.isArray((metrics as any)?.rrList) ? (metrics as any).rrList.length : 0)}</Text>
+                <Text style={styles.detailItem}><Text style={styles.detailKey}>Peak Sayısı:</Text> {String(Array.isArray((metrics as any)?.peakList) ? (metrics as any).peakList.length : 0)}</Text>
+                
+                {/* RR Correction Stats */}
+                {rrCorrectionEnabled && metrics?.quality?.correctedRRList && (
+                  <>
+                    <Text style={styles.detailItem}>
+                      <Text style={styles.detailKey}>Corrected RR:</Text> {String(metrics.quality.correctedRRList.length)}
+                    </Text>
+                    <Text style={styles.detailItem}>
+                      <Text style={styles.detailKey}>RR Outliers:</Text> {String(metrics.quality?.rrOutlierCount ?? 0)}
+                    </Text>
+                    <Text style={styles.detailItem}>
+                      <Text style={styles.detailKey}>Correction Rate:</Text> {String(((metrics.quality?.rrCorrectionRatio ?? 0) * 100).toFixed(1))}%
+                    </Text>
+                    <Text style={styles.detailItem}>
+                      <Text style={styles.detailKey}>Method:</Text> {String(metrics.quality?.rrCorrectionMethod ?? '—')}
+                    </Text>
+                  </>
+                )}
+                
+                {/* Adaptive ROI Stats */}
+                {adaptiveROI && (
+                  <>
+                    <Text style={styles.detailItem}>
+                      <Text style={styles.detailKey}>Current ROI:</Text> {roi.toFixed(2)}
+                    </Text>
+                    <Text style={styles.detailItem}>
+                      <Text style={styles.detailKey}>Signal History:</Text> {signalQualityHistoryRef.current.length}
+                    </Text>
+                  </>
+                )}
+              </View>
             </View>
           )}
         </View>
@@ -1479,6 +1763,45 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 11,
     fontWeight: '600',
+  },
+  // ✅ PHASE 2: New UI element styles
+  featureButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 6,
+    marginRight: 8,
+    flex: 1,
+  },
+  featureButtonActive: {
+    backgroundColor: '#4CAF50',
+  },
+  featureButtonInactive: {
+    backgroundColor: '#757575',
+  },
+  featureButtonText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  gridButton: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+    marginRight: 4,
+    minWidth: 35,
+  },
+  gridButtonActive: {
+    backgroundColor: '#2196F3',
+  },
+  gridButtonInactive: {
+    backgroundColor: '#E0E0E0',
+  },
+  gridButtonText: {
+    fontSize: 10,
+    fontWeight: '600',
+    textAlign: 'center',
+    color: '#333',
   },
   metricsTitle: {
     fontSize: 18,
