@@ -395,8 +395,8 @@ export default function CameraPPGAnalyzer() {
         peak: { 
           refractoryMs: 200,    // ✅ Çok kısa refractory - maksimum peak detection
           thresholdScale: 0.2,  // ✅ Çok düşük threshold - çok esnek peak detection
-          bpmMin: 8,            // ✅ Çok geniş BPM range (test için)
-          bpmMax: 200           // ✅ Çok geniş BPM range
+          bpmMin: 30,           // ✅ C++ validation: 30 ≤ min
+          bpmMax: 240           // ✅ C++ validation: max ≤ 240
         },
         preprocessing: { 
           removeBaselineWander: false,  // ✅ Minimum preprocessing
