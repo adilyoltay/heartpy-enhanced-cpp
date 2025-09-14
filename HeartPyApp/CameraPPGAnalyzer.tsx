@@ -9,8 +9,6 @@ import {
   ActivityIndicator,
   PermissionsAndroid,
   Platform,
-  DeviceEventEmitter,
-  NativeEventEmitter,
   NativeModules,
   ScrollView,
   AppState,
@@ -74,7 +72,7 @@ function getHeartPy(): HeartPyExports | null {
   }
 }
 
-const { width, height } = Dimensions.get('window');
+// const { width, height } = Dimensions.get('window'); // ✅ P1 FIX: Unused - removed
 
 interface PPGMetrics {
   bpm: number;
@@ -101,22 +99,31 @@ interface PPGMetrics {
   sd1sd2Ratio?: number;
   ellipseArea?: number;
   f0Hz?: number;
+  
+  // ✅ P1 FIX: C++ top-level arrays 
+  rrList?: number[];     // Top-level RR intervals from C++
+  peakList?: number[];   // Top-level peak indices from C++
+  
   quality: {
     goodQuality: boolean;
     totalBeats: number;
     rejectedBeats: number;
     rejectionRate: number;
-    confidence?: number;  // C++ quality confidence
-    snrDb?: number;       // C++ quality SNR
-    f0Hz?: number;        // ✅ PHASE 2: Fundamental frequency (actual C++ metric)
-    maPercActive?: number; // ✅ PHASE 2: Moving average percentage (actual C++ metric)
-    pHalfOverFund?: number; // ✅ PHASE 2: P half over fundamental (actual C++ metric)
+    confidence?: number;    // C++ quality confidence
+    snrDb?: number;         // C++ quality SNR
+    f0Hz?: number;          // C++ fundamental frequency 
+    maPercActive?: number;  // C++ moving average percentage
+    pHalfOverFund?: number; // C++ P half over fundamental
+    acDcRatio?: number;     // ✅ P1 FIX: AC/DC ratio for telemetry
     qualityWarning?: string;
-    // ✅ PHASE 2: RR Artifact Correction
+    
+    // ✅ PHASE 2: RR Artifact Correction results
     correctedRRList?: number[];
     rrOutlierCount?: number;
     rrCorrectionRatio?: number;
     rrCorrectionMethod?: string;
+    
+    // ✅ C++ advanced flags
     doublingFlag?: boolean;
     softDoublingFlag?: boolean;
     doublingHintFlag?: boolean;
@@ -127,7 +134,6 @@ interface PPGMetrics {
     pairFrac?: number;
     rrShortFrac?: number;
     rrLongMs?: number;
-    pHalfOverFund?: number;
   };
 }
 
@@ -938,7 +944,7 @@ export default function CameraPPGAnalyzer() {
     return [];
   }, []);
 
-  // ✅ P1 FIX: Fallback ingest when producer stalls
+  // ✅ P0 FIX: Fallback ingest MUST be defined BEFORE useFrameProcessor 
   const ingestSample = useCallback((val: number) => {
     const v = Number(val);
     if (!isFinite(v)) return;
@@ -1283,9 +1289,10 @@ export default function CameraPPGAnalyzer() {
             adjustROIIfNeeded();
           }
           
-          // ✅ PHASE 2: RR Artifact Correction (if enabled and RR data available)
-          if (rrCorrectionEnabled && (newMetrics as any)?.quality?.rrList) {
-            const originalRR = (newMetrics as any).quality.rrList;
+          // ✅ P0 FIX: RR Artifact Correction - use top-level rrList from C++ result
+          const rrListTop = Array.isArray((newMetrics as any)?.rrList) ? (newMetrics as any).rrList : null;
+          if (rrCorrectionEnabled && rrListTop && rrListTop.length > 2) {
+            const originalRR = rrListTop;
             const correction = correctRRIntervals(originalRR);
             
             // Store corrected RR back to metrics for UI display
@@ -1408,6 +1415,26 @@ export default function CameraPPGAnalyzer() {
               console.log(`🔴 Warmup failed - Conf: ${effectiveConf.toFixed(2)}, BPM: ${bpmNow}, Peaks: ${peaksNow} → extending warmup`);
               // ✅ Warmup'ı uzat, hemen durdurmak yerine
               warmupUntilRef.current = Date.now() + 2000; // 2s ek süre
+              
+              // ✅ P1 FIX: Torch boost when warmup extends and fallback is active
+              if (enableFallback && cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
+                const nextIdx = Math.min(currentTorchLevelIndex + 1, torchLevels.length - 1);
+                if (nextIdx !== currentTorchLevelIndex) {
+                  setCurrentTorchLevelIndex(nextIdx);
+                  setTorchLevel(torchLevels[nextIdx]);
+                  
+                  NativeModules.PPGCameraManager.setTorchLevel(torchLevels[nextIdx]).then(() => {
+                    console.log(`🔥 Torch boost on warmup extend: ${torchLevels[nextIdx]}`);
+                    logTelemetryEvent('torch_boost_on_warmup_extend', { 
+                      oldLevel: torchLevels[currentTorchLevelIndex],
+                      newLevel: torchLevels[nextIdx],
+                      fallbackActive: enableFallback 
+                    });
+                  }).catch((e) => {
+                    console.warn('Torch boost failed:', e);
+                  });
+                }
+              }
             }
           }
           
@@ -1557,17 +1584,17 @@ export default function CameraPPGAnalyzer() {
             device={device}
             isActive={isActive}
             frameProcessor={isActive ? frameProcessor : undefined}
-            // ✅ PHASE 1: Enhanced Camera Controls
-            fps={targetFps}  // FPS lock for both platforms
+            // ✅ P1 FIX: Single camera authority - only Android uses VisionCamera props
+            {...(Platform.OS === 'android' ? { fps: targetFps } : {})}
             torch={device?.hasTorch && torchOn ? 'on' : 'off'}
-            // ✅ Manual exposure & ISO for stable lighting (VisionCamera v4+ format)
-            {...(cameraLockEnabled && lockExposure ? { 
+            // ✅ iOS: PPGCameraManager controls everything, Android: VisionCamera props
+            {...(Platform.OS === 'android' && cameraLockEnabled && lockExposure ? { 
               exposure: lockExposure 
             } : {})}
-            {...(cameraLockEnabled && lockIso ? { 
+            {...(Platform.OS === 'android' && cameraLockEnabled && lockIso ? { 
               iso: lockIso 
             } : {})}
-            // Note: whiteBalance, focus not available in current VisionCamera version
+            // Note: iOS camera controls handled by PPGCameraManager.lockCameraSettings()
             onError={(error) => {
               console.error('🔴 Camera error:', error);
               console.error('🔴 Camera error code:', error.code);
