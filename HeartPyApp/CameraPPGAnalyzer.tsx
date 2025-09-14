@@ -1646,18 +1646,26 @@ export default function CameraPPGAnalyzer() {
     return () => subscription?.remove();
   }, [stopAnalysisFSM, lockCameraSettings, device, torchOn, torchLevel, cameraLockEnabled, logTelemetryEvent]);
 
-  // ✅ P1 FIX: Unmount safety - guarantee proper cleanup
+  // ✅ P1 FIX: Unmount safety - but prevent premature unmount during normal operation
   useEffect(() => {
     return () => {
-      // ✅ Ensure clean stop on unmount (torch/camera/analyzer cleanup)
-      if (fsmRef.current !== 'idle') {
-        console.log('🔴 Component unmounting - forcing clean stop');
-        stopAnalysisFSM('unmount').catch(() => {
-          console.error('Failed to stop FSM on unmount');
-        });
+      // ✅ Only cleanup if component actually unmounting (not just re-rendering)
+      const shouldCleanup = fsmRef.current !== 'idle';
+      if (shouldCleanup) {
+        console.log('🔴 Component ACTUALLY unmounting - forcing clean stop');
+        console.log(`   📊 FSM State: ${fsmRef.current}, Analyzing: ${isAnalyzingRef.current}`);
+        
+        // Add delay to distinguish from re-render
+        setTimeout(() => {
+          if (fsmRef.current !== 'idle') {
+            stopAnalysisFSM('unmount').catch(() => {
+              console.error('Failed to stop FSM on unmount');
+            });
+          }
+        }, 100); // 100ms delay to avoid re-render conflicts
       }
     };
-  }, [stopAnalysisFSM]);
+  }, []); // ✅ Empty deps to prevent re-running on every state change
 
   // ✅ PHASE 1: Watchdog timer - stall detection
   useEffect(() => {
