@@ -105,6 +105,8 @@ interface PPGMetrics {
     totalBeats: number;
     rejectedBeats: number;
     rejectionRate: number;
+    confidence?: number;  // C++ quality confidence
+    snrDb?: number;       // C++ quality SNR
     qualityWarning?: string;
     doublingFlag?: boolean;
     softDoublingFlag?: boolean;
@@ -185,34 +187,135 @@ export default function CameraPPGAnalyzer() {
   const cppConfidence = Math.max(0, Math.min(1, metrics?.quality?.confidence ?? 0));
   const confColor = cppConfidence >= 0.7 ? '#4CAF50' : cppConfidence >= 0.4 ? '#FB8C00' : '#f44336';
 
+  const device = useCameraDevice('back', {
+    physicalDevices: ['wide-angle-camera'],
+  });
+  const { hasPermission, requestPermission } = useCameraPermission();
+
+  const analyzerRef = useRef<any | null>(null);
+  const [targetFps, setTargetFps] = useState(30); // Optimal FPS for PPG
+  const [analyzerFs, setAnalyzerFs] = useState(30); // matched to targetFps
+  const samplingRate = analyzerFs; // keep analyzer in sync with actual fps
+  const bufferSize = samplingRate * 15; // 15 saniye buffer - daha stabil BPM için
+  const analysisInterval = 1000; // 1000ms'de bir analiz - STABİL sonuçlar için
+
   // FSM kontrollü başlat/durdur yardımcıları
-  const startAnalysisFSM = useCallback(() => {
+  const startAnalysisFSM = useCallback(async () => {
     const now = Date.now();
     if (fsmRef.current !== 'idle' || isAnalyzing) return;
-    try { if (device?.hasTorch) setTorchOn(true); } catch {}
+    
+    console.log('🟢 FSM Start: idle → starting');
     fsmRef.current = 'starting';
     lastAutoToggleAtRef.current = now;
     analyzeStartTsRef.current = now;
     warmupUntilRef.current = now + 3000;
     setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
-    toggleAnalysis();
-  }, [device, isAnalyzing, toggleAnalysis]);
+    
+    try { 
+      if (device?.hasTorch) {
+        setTorchOn(true);
+        console.log('🔦 Torch ON (FSM start)');
+      }
+    } catch {}
+    
+    // Doğrudan analyzer'ı başlat (clean FSM - no toggleAnalysis dependency)
+    try {
+      setIsAnalyzing(true);
+      setIsActive(true);
+      
+      console.log('🔄 FSM creating analyzer...');
+      const HP = getHeartPy();
+      if (!HP?.RealtimeAnalyzer?.create) {
+        throw new Error('HeartPy RealtimeAnalyzer not available');
+      }
+      
+      analyzerRef.current = await HP.RealtimeAnalyzer.create(analyzerFs, {
+        bandpass: { lowHz: 0.4, highHz: 3.5, order: 2 },
+        welch: { nfft: 2048, overlap: 0.75 },
+        peak: { 
+          refractoryMs: 450,
+          thresholdScale: 0.6,
+          bpmMin: 50,
+          bpmMax: 120
+        },
+        preprocessing: { 
+          removeBaselineWander: true,
+          smoothingWindowMs: 100
+        },
+        quality: {
+          cleanRR: true,
+          cleanMethod: 'iqr'
+        }
+      });
+      
+      console.log('✅ FSM analyzer created successfully');
+      
+    } catch (error) {
+      console.error('Start FSM error:', error);
+      fsmRef.current = 'idle';
+      setIsAnalyzing(false);
+      setIsActive(false);
+      setStatusMessage('❌ Başlatma hatası');
+    }
+  }, [device, isAnalyzing, analyzerFs]);
 
-  const stopAnalysisFSM = useCallback(() => {
+  const stopAnalysisFSM = useCallback(async () => {
     const now = Date.now();
     if (fsmRef.current !== 'running' || !isAnalyzing) return;
+    
+    console.log('🔴 FSM Stop: running → stopping');
     fsmRef.current = 'stopping';
     lastAutoToggleAtRef.current = now;
-    setStatusMessage('⏹️ Parmak kaldırıldı / kapama yetersiz, analiz duruyor');
-    toggleAnalysis();
+    setStatusMessage('⏹️ Parmak kaldırıldı, analiz duruyor...');
+    
     try { setTorchOn(false); } catch {}
-    analyzeStartTsRef.current = 0; warmupUntilRef.current = 0;
-  }, [isAnalyzing, toggleAnalysis]);
-
-  const device = useCameraDevice('back', {
-    physicalDevices: ['wide-angle-camera'],
-  });
-  const { hasPermission, requestPermission } = useCameraPermission();
+    
+    // Doğrudan analyzer'ı durdur (clean FSM implementation)
+    try {
+      setIsAnalyzing(false);
+      setIsActive(false);
+      
+      if (analyzerRef.current) {
+        await analyzerRef.current.destroy();
+        analyzerRef.current = null;
+        console.log('🔴 Analyzer destroyed');
+      }
+      
+      // Clean all timers
+      if (torchTimerRef.current) {
+        clearTimeout(torchTimerRef.current);
+        torchTimerRef.current = null;
+      }
+      if (simulationTimerRef.current) {
+        clearInterval(simulationTimerRef.current);
+        simulationTimerRef.current = null;
+      }
+      
+      // Cleanup state
+      frameBufferRef.current = [];
+      pendingSamplesRef.current = [];
+      globalFrameCounter.current = 0;
+      setMetrics(null);
+      setPpgSignal([]);
+      setLastBeatCount(0);
+      setFrameCount(0);
+      setHapticPeakCount(0);
+      setMissedPeakCount(0);
+      
+      // FSM: stopping → idle
+      console.log('✅ FSM Stop complete: stopping → idle');
+      fsmRef.current = 'idle';
+      setStatusMessage('📷 Parmağınızı kamerayı tamamen kapatacak şekilde yerleştirin');
+      
+    } catch (error) {
+      console.error('Stop FSM error:', error);
+      fsmRef.current = 'idle';
+      setStatusMessage('❌ Durdurma hatası');
+    }
+    
+    analyzeStartTsRef.current = 0; 
+    warmupUntilRef.current = 0;
+  }, [isAnalyzing]);
 
   // Debug camera state (logs only; avoid alerts on UI)
   useEffect(() => {
@@ -226,12 +329,7 @@ export default function CameraPPGAnalyzer() {
     } catch {}
   }, [hasPermission, device]);
 
-  const analyzerRef = useRef<any | null>(null);
-  const [targetFps, setTargetFps] = useState(30); // Optimal FPS for PPG
-  const [analyzerFs, setAnalyzerFs] = useState(30); // matched to targetFps
-  const samplingRate = analyzerFs; // keep analyzer in sync with actual fps
-  const bufferSize = samplingRate * 15; // 15 saniye buffer - daha stabil BPM için
-  const analysisInterval = 1000; // 1000ms'de bir analiz - STABİL sonuçlar için
+  // Analyzer parameters moved up to FSM section - duplicate removed
   
   const frameBufferRef = useRef<number[]>([]);
   const lastAnalysisTimeRef = useRef<number>(0);
@@ -422,17 +520,24 @@ export default function CameraPPGAnalyzer() {
             }
           } catch {}
         }
-        // Otomatik başlat/durdur: parmakla kapama tespiti (confidence tabanlı)
-        try {
-          const START_THR = 0.25; // pulsesiz başlatmayı kolaylaştırmak için düşürüldü
-          const STOP_THR = 0.15;
-          if (confVal >= START_THR) {
-            coverStableCountRef.current += 1;
-            uncoverStableCountRef.current = 0;
-          } else if (confVal > 0) {
-            uncoverStableCountRef.current += 1;
-            coverStableCountRef.current = 0;
-          }
+         // Otomatik başlat/durdur: parmakla kapama tespiti (confidence tabanlı)
+         try {
+           const START_THR = 0.30; // Güvenilir başlangıç için
+           const STOP_THR = 0.20;  // Premature stop'u önlemek için
+           
+           console.log(`🎯 FSM Confidence Check: ${confVal.toFixed(2)} (start>${START_THR}, stop<${STOP_THR})`);
+           
+           if (confVal >= START_THR) {
+             coverStableCountRef.current += 1;
+             uncoverStableCountRef.current = 0;
+           } else if (confVal <= STOP_THR) {
+             uncoverStableCountRef.current += 1;
+             coverStableCountRef.current = 0;
+           } else {
+             // Orta aralık - sayaçları sıfırla
+             coverStableCountRef.current = 0;
+             uncoverStableCountRef.current = 0;
+           }
 
           // Başlat koşulu: ardışık 3 ölçüm yüksek güven + cooldown
           if (!isAnalyzing && fsmRef.current === 'idle' && coverStableCountRef.current >= 3) {
@@ -443,20 +548,34 @@ export default function CameraPPGAnalyzer() {
               uncoverStableCountRef.current = 0;
             }
           }
-          // Durdur koşulu: ardışık 6 ölçüm düşük güven + min çalışma + cooldown
-          if (isAnalyzing && fsmRef.current === 'running' && uncoverStableCountRef.current >= 6) {
+          // Durdur koşulu: FSM running veya starting state'inde
+          if (isAnalyzing && (fsmRef.current === 'running' || fsmRef.current === 'starting')) {
             const now = Date.now();
             const ranMs = now - (analyzeStartTsRef.current || 0);
-            if (ranMs >= 7000 && now - (lastAutoToggleAtRef.current || 0) > 4000) {
-              stopAnalysisFSM();
-              coverStableCountRef.current = 0;
-              uncoverStableCountRef.current = 0;
+            
+            // Running state: normal durdur koşulları
+            if (fsmRef.current === 'running' && uncoverStableCountRef.current >= 6) {
+              if (ranMs >= 7000 && now - (lastAutoToggleAtRef.current || 0) > 4000) {
+                console.log('🔴 FSM Auto-stop: running → stopping (normal)');
+                stopAnalysisFSM();
+                coverStableCountRef.current = 0;
+                uncoverStableCountRef.current = 0;
+              }
+            }
+            
+            // Starting state (warmup): hızlı durdur koşulu
+            else if (fsmRef.current === 'starting' && uncoverStableCountRef.current >= 4) {
+              if (ranMs >= 2000 && now - (lastAutoToggleAtRef.current || 0) > 2000) {
+                console.log('🔴 FSM Auto-stop: starting → stopping (warmup early exit)');
+                stopAnalysisFSM();
+                coverStableCountRef.current = 0;
+                uncoverStableCountRef.current = 0;
+              }
             }
           }
         } catch {}
 
-        // Torch pulse tamamen devre dışı: başlama arayışında dahi torch kullanılmıyor
-        try { if (torchOn) setTorchOn(false); } catch {}
+        // Torch control FSM tarafından yönetiliyor - manuel müdahale yok
       } catch (e) {
         // occasional polling errors are non-fatal
       }
@@ -608,9 +727,16 @@ export default function CameraPPGAnalyzer() {
           setLastBeatCount(currentBeatCount);
         }
           
-          // Status mesajını güncelle
+          // Status mesajını güncelle + FSM warmup transition
           const nowTs = Date.now();
           const inWarmup = nowTs < (warmupUntilRef.current || 0);
+          
+          // FSM: Warmup bitiminde starting → running transition
+          if (!inWarmup && fsmRef.current === 'starting') {
+            console.log('🟡 FSM Warmup complete: starting → running');
+            fsmRef.current = 'running';
+          }
+          
           if (inWarmup) {
             setStatusMessage('⏳ Isınma: pozlama/sinyal oturuyor...');
           } else if ((newMetrics as any).quality?.goodQuality) {
@@ -635,11 +761,13 @@ export default function CameraPPGAnalyzer() {
 
   const pendingActivateRef = useRef(false);
 
-  // Analizi başlat/durdur
+  // Analizi başlat/durdur - FSM state'ini güncelle
   const toggleAnalysis = async () => {
-    console.log('🔵 toggleAnalysis called, isAnalyzing:', isAnalyzing);
+    console.log('🔵 toggleAnalysis called, isAnalyzing:', isAnalyzing, 'FSM:', fsmRef.current);
     if (isAnalyzing) {
-      // Durdur
+      // Durdur - FSM state'ini idle'a çevir
+      console.log('🔴 Stopping analysis, FSM: running → idle');
+      fsmRef.current = 'idle';
       setIsAnalyzing(false);
       setIsActive(false);
       setTorchOn(false);
@@ -671,12 +799,19 @@ export default function CameraPPGAnalyzer() {
       setMissedPeakCount(0);
       setStatusMessage('Analiz durduruldu');
     } else {
-      // Başlat
+      // Başlat - FSM state kontrolü
       console.log('🟢 Starting analysis...');
+      
+      // Eğer FSM idle ise starting'e çevir, değilse mevcut state'i koru
+      if (fsmRef.current === 'idle') {
+        console.log('🟢 FSM: idle → starting (manual)');
+        fsmRef.current = 'starting';
+      }
+      
       try {
         console.log('🟢 Setting isAnalyzing to true');
         setIsAnalyzing(true);
-        setStatusMessage('Analiz başlatılıyor...');
+        setStatusMessage('⏳ Analiz başlatılıyor...');
         startTimeRef.current = Date.now();
         setLastBeatCount(0);
         setFrameCount(0);
@@ -757,12 +892,24 @@ export default function CameraPPGAnalyzer() {
           throw createError;
         }
         console.log('Analyzer created successfully:', !!analyzerRef.current);
-        setStatusMessage('🔴 Gerçek PPG analizi aktif - veriler akıyor');
+        
+        // FSM: starting → running + warmup ayarla
+        console.log('🟢 Analysis started, FSM: starting → running');
+        fsmRef.current = 'running';
+        
+        // Warmup süresini ayarla (manual veya auto start için)
+        if (!warmupUntilRef.current || warmupUntilRef.current < Date.now()) {
+          warmupUntilRef.current = Date.now() + 3000; // 3 saniye warmup
+        }
+        setStatusMessage('⏳ Isınma: pozlama/sinyal oturuyor...');
       } catch (error) {
         console.error('Start analysis error:', error);
         try { console.error('Error type:', typeof error); } catch {}
         // Avoid accessing non-standard properties on unknown error
         try { console.error('Error string:', String(error)); } catch {}
+        // Başlatma hatası - FSM'i idle'a çevir
+        console.log('🔴 Start error, FSM: starting → idle');
+        fsmRef.current = 'idle';
         setIsAnalyzing(false);
         setIsActive(false); // Kamerayı da kapat
         setStatusMessage('❌ Başlatma hatası');
@@ -853,10 +1000,10 @@ export default function CameraPPGAnalyzer() {
       {/* Durum */}
       <Text style={styles.status}>{statusMessage}</Text>
 
-      {/* Durum Özeti - Sadece Güven Skoru */}
+      {/* Durum Özeti - FSM State + Güven Skoru */}
       <View style={styles.infoRow}>
         <Text style={styles.infoText}>
-          📊 PPG Analizi: {useNativePPG ? 'GERÇEKPPGPlugin' : 'KAPALI'} • FPS: {targetFps} • ROI: {roi} • 📳: ON
+          📊 PPG: {useNativePPG ? 'ON' : 'OFF'} • FPS: {targetFps} • FSM: {fsmRef.current} • 📳: ON
         </Text>
         <View style={[styles.qualityPill, { backgroundColor: confColor }]}> 
           <Text numberOfLines={1} style={styles.qualityPillText}>{Math.round((metrics?.quality?.confidence ?? 0) * 100)}%</Text>
