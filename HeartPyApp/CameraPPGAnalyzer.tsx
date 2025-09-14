@@ -13,6 +13,7 @@ import {
   NativeEventEmitter,
   NativeModules,
   ScrollView,
+  AppState,
 } from 'react-native';
 // import AsyncStorage from '@react-native-async-storage/async-storage'; // Optional - not needed for basic functionality
 // Haptics is optional; load lazily to avoid crash if native module is missing
@@ -145,13 +146,17 @@ export default function CameraPPGAnalyzer() {
   const [pluginConfidence, setPluginConfidence] = useState<number>(0);
   const [autoSelect, setAutoSelect] = useState(false); // Face mode disabled; keep blend OFF
   const [metricsTab, setMetricsTab] = useState<'Özet' | 'Zaman' | 'Frekans' | 'Kalite' | 'Ham'>('Özet');
-  // Otomatik başlat/durdur için kararlılık sayaçları ve zamanlayıcılar
+  // FSM ve süre-bazlı histerezis sayaçları
   const coverStableCountRef = useRef(0);
   const uncoverStableCountRef = useRef(0);
+  const coverStableMsRef = useRef(0);
+  const uncoverStableMsRef = useRef(0);
+  const qualityLowMsRef = useRef(0);
+  const lastPollTsRef = useRef<number>(0);
   const lastAutoToggleAtRef = useRef(0);
   const analyzeStartTsRef = useRef(0);
   const warmupUntilRef = useRef(0);
-  const fsmRef = useRef<'idle'|'starting'|'running'|'stopping'>('idle');
+  const fsmRef = useRef<'idle'|'starting'|'warmup'|'running'|'stopping'|'cooldown'>('idle');
   // Removed UI control states
 
   // Load/save persistent settings (best-effort)
@@ -200,6 +205,26 @@ export default function CameraPPGAnalyzer() {
   const analysisInterval = 1000; // 1000ms'de bir analiz - STABİL sonuçlar için
 
   // FSM kontrollü başlat/durdur yardımcıları
+  // Konfig (tek noktadan)
+  const CFG = {
+    CONF_HIGH: 0.8,
+    CONF_LOW: 0.3,
+    HIGH_DEBOUNCE_MS: 600,
+    LOW_DEBOUNCE_MS: 1400,
+    WARMUP_MS: 3000,
+    MIN_RUN_MS: 7000,
+    COOLDOWN_MS: 2000,
+    PRETORCH_IGNORE_FRAMES: 12,
+  } as const;
+
+  const resetStabilityCounters = useCallback(() => {
+    coverStableCountRef.current = 0;
+    uncoverStableCountRef.current = 0;
+    coverStableMsRef.current = 0;
+    uncoverStableMsRef.current = 0;
+    qualityLowMsRef.current = 0;
+  }, []);
+
   const startAnalysisFSM = useCallback(async () => {
     const now = Date.now();
     if (fsmRef.current !== 'idle' || isAnalyzing) return;
@@ -208,8 +233,10 @@ export default function CameraPPGAnalyzer() {
     fsmRef.current = 'starting';
     lastAutoToggleAtRef.current = now;
     analyzeStartTsRef.current = now;
-    warmupUntilRef.current = now + 3000;
+    warmupUntilRef.current = now + CFG.WARMUP_MS;
     setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
+    resetStabilityCounters();
+    // Torch ON
     
     try { 
       if (device?.hasTorch) {
@@ -249,6 +276,8 @@ export default function CameraPPGAnalyzer() {
       });
       
       console.log('✅ FSM analyzer created successfully');
+      // WARMUP aşamasına geç
+      fsmRef.current = 'warmup';
       
     } catch (error) {
       console.error('Start FSM error:', error);
@@ -259,16 +288,14 @@ export default function CameraPPGAnalyzer() {
     }
   }, [device, isAnalyzing, analyzerFs]);
 
-  const stopAnalysisFSM = useCallback(async () => {
+  const stopAnalysisFSM = useCallback(async (reason: string = 'manual') => {
     const now = Date.now();
-    if (fsmRef.current !== 'running' || !isAnalyzing) return;
+    if (fsmRef.current === 'idle' || fsmRef.current === 'stopping') return;
     
-    console.log('🔴 FSM Stop: running → stopping');
+    console.log('🔴 FSM Stop:', fsmRef.current, '→ stopping', 'reason=', reason);
     fsmRef.current = 'stopping';
     lastAutoToggleAtRef.current = now;
-    setStatusMessage('⏹️ Parmak kaldırıldı, analiz duruyor...');
-    
-    try { setTorchOn(false); } catch {}
+    setStatusMessage('⏹️ Analiz durduruluyor...');
     
     // Doğrudan analyzer'ı durdur (clean FSM implementation)
     try {
@@ -302,20 +329,18 @@ export default function CameraPPGAnalyzer() {
       setHapticPeakCount(0);
       setMissedPeakCount(0);
       
-      // FSM: stopping → idle
-      console.log('✅ FSM Stop complete: stopping → idle');
-      fsmRef.current = 'idle';
-      setStatusMessage('📷 Parmağınızı kamerayı tamamen kapatacak şekilde yerleştirin');
-      
     } catch (error) {
       console.error('Stop FSM error:', error);
+    } finally {
+      try { setTorchOn(false); } catch {}
+      // sayaç reset & idle
+      resetStabilityCounters();
+      analyzeStartTsRef.current = 0; 
+      warmupUntilRef.current = 0;
       fsmRef.current = 'idle';
-      setStatusMessage('❌ Durdurma hatası');
+      setStatusMessage('📷 Parmağınızı kamerayı tamamen kapatacak şekilde yerleştirin');
     }
-    
-    analyzeStartTsRef.current = 0; 
-    warmupUntilRef.current = 0;
-  }, [isAnalyzing]);
+  }, [isAnalyzing, resetStabilityCounters]);
 
   // Debug camera state (logs only; avoid alerts on UI)
   useEffect(() => {
@@ -492,10 +517,33 @@ export default function CameraPPGAnalyzer() {
           latestSamples = xs.slice(-20).map((s: any) => (typeof s === 'number' ? s : parseFloat(s))).filter((v: any) => isFinite(v));
           latestTs = ts.slice(-20).map((t: any) => (typeof t === 'number' ? t : parseFloat(t))).filter((v: any) => isFinite(v));
         }
-        // Confidence-based gating - çok düşük threshold (neredeyse her zaman geç)
-        const GATE = 0.05;  // Çok düşük threshold, hemen başla
-        const gateOK = confVal >= GATE || latestSamples.length > 0;  // Veri varsa her zaman işle
+        // Confidence-based gating + süre-bazlı histerezis
+        const nowTs = Date.now();
+        const dt = lastPollTsRef.current ? Math.max(1, nowTs - lastPollTsRef.current) : 200;
+        lastPollTsRef.current = nowTs;
+        if (confVal >= CFG.CONF_HIGH) {
+          coverStableMsRef.current += dt;
+          uncoverStableMsRef.current = 0;
+        } else if (confVal <= CFG.CONF_LOW) {
+          uncoverStableMsRef.current += dt;
+          coverStableMsRef.current = 0;
+        } else {
+          // orta bölgede yavaş çözülme
+          coverStableMsRef.current = Math.max(0, coverStableMsRef.current - dt/2);
+          uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - dt/2);
+        }
+        const GATE = 0.05;  // örnek akışını kesmeyelim
+        const gateOK = confVal >= GATE || latestSamples.length > 0;
         if (latestSamples.length > 0 && gateOK) {
+          // Warmup'ta ilk N kareyi yut
+          const inWarmup = Date.now() < (warmupUntilRef.current || 0);
+          if (inWarmup) {
+            preTorchFramesRef.current += latestSamples.length;
+            if (preTorchFramesRef.current <= CFG.PRETORCH_IGNORE_FRAMES) {
+              // bu batch'i yut
+              return;
+            }
+          }
           // Update UI and incremental queue
           latestSamples.forEach((val, i) => {
             frameBufferRef.current.push(val);
