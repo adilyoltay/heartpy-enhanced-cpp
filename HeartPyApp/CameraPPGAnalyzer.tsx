@@ -408,28 +408,29 @@ export default function CameraPPGAnalyzer() {
             coverStableCountRef.current = 0;
           }
 
-          // Başlat: ardışık 2 ölçüm yüksek güven
-          if (!isAnalyzing && coverStableCountRef.current >= 2) {
-            coverStableCountRef.current = 0;
-            setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
+          // Başlat koşulu: ardışık 3 ölçüm yüksek güven + cooldown
+          if (!isAnalyzing && coverStableCountRef.current >= 3) {
             const now = Date.now();
-            if (now - (lastAutoToggleAtRef.current || 0) > 3000) {
+            if (now - (lastAutoToggleAtRef.current || 0) > 4000) {
+              setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
               lastAutoToggleAtRef.current = now;
               toggleAnalysis();
               analyzeStartTsRef.current = now;
+              coverStableCountRef.current = 0;
+              uncoverStableCountRef.current = 0;
             }
           }
-          // Durdur: ardışık 4 ölçüm düşük güven
-          if (isAnalyzing && uncoverStableCountRef.current >= 4) {
-            uncoverStableCountRef.current = 0;
+          // Durdur koşulu: ardışık 6 ölçüm düşük güven + min çalışma + cooldown
+          if (isAnalyzing && uncoverStableCountRef.current >= 6) {
             const now = Date.now();
-            // En az 4 saniye çalıştıysa durdur (dwell)
             const ranMs = now - (analyzeStartTsRef.current || 0);
-            if (ranMs >= 4000 && now - (lastAutoToggleAtRef.current || 0) > 3000) {
+            if (ranMs >= 7000 && now - (lastAutoToggleAtRef.current || 0) > 4000) {
               setStatusMessage('⏹️ Parmak kaldırıldı / kapama yetersiz, analiz duruyor');
               lastAutoToggleAtRef.current = now;
               toggleAnalysis();
               analyzeStartTsRef.current = 0;
+              coverStableCountRef.current = 0;
+              uncoverStableCountRef.current = 0;
             }
           }
         } catch {}
