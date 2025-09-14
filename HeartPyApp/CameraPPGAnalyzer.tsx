@@ -108,8 +108,9 @@ interface PPGMetrics {
     rejectionRate: number;
     confidence?: number;  // C++ quality confidence
     snrDb?: number;       // C++ quality SNR
-    acDcRatio?: number;   // ✅ PHASE 1: AC/DC ratio for unified confidence
-    periodicity?: number; // ✅ PHASE 1: Periodicity score for unified confidence
+    f0Hz?: number;        // ✅ PHASE 2: Fundamental frequency (actual C++ metric)
+    maPercActive?: number; // ✅ PHASE 2: Moving average percentage (actual C++ metric)
+    pHalfOverFund?: number; // ✅ PHASE 2: P half over fundamental (actual C++ metric)
     qualityWarning?: string;
     // ✅ PHASE 2: RR Artifact Correction
     correctedRRList?: number[];
@@ -249,6 +250,9 @@ export default function CameraPPGAnalyzer() {
     correctionRatio: number,
     method: string
   }>({ outlierCount: 0, correctionRatio: 0, method: 'none' });
+  
+  // ✅ Telemetry throttling
+  const unifiedConfCallCountRef = useRef(0);
   const samplingRate = analyzerFs; // keep analyzer in sync with actual fps
   const bufferSize = samplingRate * 15; // 15 saniye buffer - daha stabil BPM için
   const analysisInterval = 1000; // 1000ms'de bir analiz - STABİL sonuçlar için
@@ -474,10 +478,11 @@ export default function CameraPPGAnalyzer() {
   const calculateUnifiedConfidence = useCallback((qualityMetrics: any): number => {
     if (!qualityMetrics) return 0;
     
-    // Extract metrics with fallbacks
+    // Extract AVAILABLE metrics from C++ interface
     const snrDb = typeof qualityMetrics.snrDb === 'number' ? qualityMetrics.snrDb : 0;
-    const acDcRatio = typeof qualityMetrics.acDcRatio === 'number' ? qualityMetrics.acDcRatio : 0;
-    const periodicity = typeof qualityMetrics.periodicity === 'number' ? qualityMetrics.periodicity : 0;
+    const f0Hz = typeof qualityMetrics.f0Hz === 'number' ? qualityMetrics.f0Hz : 0;
+    const maPercActive = typeof qualityMetrics.maPercActive === 'number' ? qualityMetrics.maPercActive : 0;
+    const pHalfOverFund = typeof qualityMetrics.pHalfOverFund === 'number' ? qualityMetrics.pHalfOverFund : 0;
     const baseConfidence = typeof qualityMetrics.confidence === 'number' ? qualityMetrics.confidence : 0;
     
     // Normalization functions
@@ -485,27 +490,50 @@ export default function CameraPPGAnalyzer() {
       return Math.max(0, Math.min(1, (value - min) / (max - min)));
     };
     
-    // Normalize components to [0,1]
-    const snrNorm = normalize(snrDb, 0, 12);        // 0-12 dB range
-    const acDcNorm = normalize(acDcRatio, 0.002, 0.02); // 0.2%-2% range  
-    const perNorm = Math.max(0, Math.min(1, periodicity)); // Already 0-1
+    // ✅ Normalize AVAILABLE C++ components to [0,1]
+    const snrNorm = normalize(snrDb, 0, 12);            // 0-12 dB range
+    const f0Norm = normalize(f0Hz, 0.5, 3.0);           // 0.5-3.0 Hz heart rate range
+    const maPercNorm = Math.max(0, Math.min(1, maPercActive / 100)); // 0-100% → 0-1
+    const pHalfNorm = Math.max(0, Math.min(1, pHalfOverFund)); // Already 0-1 ratio
     
-    // Weighted combination (as per user spec)
-    const unifiedScore = 0.5 * snrNorm + 0.3 * acDcNorm + 0.2 * perNorm;
+    // ✅ Weighted combination using AVAILABLE metrics
+    const unifiedScore = 0.4 * snrNorm + 0.3 * f0Norm + 0.2 * maPercNorm + 0.1 * pHalfNorm;
     
-    // Fallback blending if unified components are unavailable
-    const hasValidComponents = snrDb > 0 || acDcRatio > 0 || periodicity > 0;
-    const finalScore = hasValidComponents ? unifiedScore : baseConfidence;
+    // ✅ Component availability check using actual C++ metrics
+    const hasFullComponents = snrDb > 0 && f0Hz > 0 && (maPercActive > 0 || pHalfOverFund > 0);
+    const hasPartialComponents = snrDb > 0 || f0Hz > 0;
     
-    logTelemetryEvent('unified_confidence_debug', {
-      snrDb, snrNorm,
-      acDcRatio, acDcNorm,
-      periodicity, perNorm,
-      baseConfidence,
-      unifiedScore,
-      finalScore,
-      hasValidComponents
-    });
+    let finalScore;
+    if (hasFullComponents) {
+      // Full unified score
+      finalScore = unifiedScore;
+    } else if (hasPartialComponents) {
+      // Hybrid: SNR component + base confidence weighted
+      const snrWeight = 0.6; // Give more weight to SNR when it's the only component
+      finalScore = snrWeight * snrNorm + (1 - snrWeight) * baseConfidence;
+    } else {
+      // Fallback to base confidence
+      finalScore = baseConfidence;
+    }
+    
+    // ✅ Throttled telemetry (every 10th call to avoid spam)
+    unifiedConfCallCountRef.current++;
+    
+    if (unifiedConfCallCountRef.current % 10 === 1) {
+      logTelemetryEvent('unified_confidence_debug', {
+        // ✅ Available C++ metrics
+        snrDb, snrNorm,
+        f0Hz, f0Norm,
+        maPercActive, maPercNorm,
+        pHalfOverFund, pHalfNorm,
+        baseConfidence,
+        unifiedScore,
+        finalScore,
+        hasFullComponents,
+        hasPartialComponents,
+        method: hasFullComponents ? 'full_unified_cpp' : hasPartialComponents ? 'snr_f0_hybrid' : 'base_fallback'
+      });
+    }
     
     return Math.max(0, Math.min(1, finalScore));
   }, [logTelemetryEvent]);
@@ -524,13 +552,19 @@ export default function CameraPPGAnalyzer() {
     const now = Date.now();
     const confidence = getEffectiveConfidence(qualityMetrics);
     const snr = qualityMetrics.snrDb || 0;
-    const acDc = qualityMetrics.acDcRatio || 0;
+    const f0Hz = qualityMetrics.f0Hz || 0;
+    const maPerc = qualityMetrics.maPercActive || 0;
     
-    // Grid quality estimate (based on plugin confidence and multi-patch consistency)
-    const gridQuality = Math.min(1, (confidence + Math.min(1, snr / 10)) / 2);
+    // ✅ Enhanced grid quality estimate using available C++ metrics
+    const gridQuality = Math.min(1, (
+      confidence + 
+      Math.min(1, snr / 10) + 
+      Math.min(1, f0Hz / 3.0) + 
+      Math.min(1, maPerc / 100)
+    ) / 4);
     
-    // Track signal quality history
-    const qualityEntry = { timestamp: now, confidence, snr, acDc, gridQuality };
+    // ✅ Track signal quality history with available metrics
+    const qualityEntry = { timestamp: now, confidence, snr, acDc: f0Hz, gridQuality };
     signalQualityHistoryRef.current.push(qualityEntry);
     
     // Keep only last 10 entries
@@ -1415,10 +1449,13 @@ export default function CameraPPGAnalyzer() {
                     <Text style={styles.detailKey}>Unified Confidence:</Text> {String((getEffectiveConfidence(metrics.quality) * 100).toFixed(0))}%
                   </Text>
                   <Text style={styles.detailItem}>
-                    <Text style={styles.detailKey}>AC/DC Ratio:</Text> {String(metrics.quality?.acDcRatio?.toFixed?.(4) ?? '—')}
+                    <Text style={styles.detailKey}>f0 Hz:</Text> {String(metrics.quality?.f0Hz?.toFixed?.(2) ?? '—')}
                   </Text>
                   <Text style={styles.detailItem}>
-                    <Text style={styles.detailKey}>Periodicity:</Text> {String(metrics.quality?.periodicity?.toFixed?.(2) ?? '—')}
+                    <Text style={styles.detailKey}>MA Active %:</Text> {String(metrics.quality?.maPercActive?.toFixed?.(1) ?? '—')}
+                  </Text>
+                  <Text style={styles.detailItem}>
+                    <Text style={styles.detailKey}>P Half/Fund:</Text> {String(metrics.quality?.pHalfOverFund?.toFixed?.(3) ?? '—')}
                   </Text>
                 </>
               )}
