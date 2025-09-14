@@ -207,14 +207,14 @@ export default function CameraPPGAnalyzer() {
   // FSM kontrollü başlat/durdur yardımcıları
   // Konfig (tek noktadan)
   const CFG = {
-    CONF_HIGH: 0.8,
-    CONF_LOW: 0.3,
-    HIGH_DEBOUNCE_MS: 600,
-    LOW_DEBOUNCE_MS: 1400,
-    WARMUP_MS: 3000,
-    MIN_RUN_MS: 7000,
-    COOLDOWN_MS: 2000,
-    PRETORCH_IGNORE_FRAMES: 12,
+    CONF_HIGH: 0.35,  // ✅ Gerçekçi yüksek threshold  
+    CONF_LOW: 0.15,   // ✅ Gerçekçi düşük threshold
+    HIGH_DEBOUNCE_MS: 800,   // ✅ Biraz daha uzun start koruması
+    LOW_DEBOUNCE_MS: 1200,   // ✅ Premature stop önleme
+    WARMUP_MS: 3000,         // ✅ 3s warmup uygun
+    MIN_RUN_MS: 7000,        // ✅ 7s minimum run uygun  
+    COOLDOWN_MS: 3000,       // ✅ 3s cooldown daha güvenli
+    // PRETORCH_IGNORE_FRAMES kaldırıldı - hiç veri atılmıyor
   } as const;
 
   const resetStabilityCounters = useCallback(() => {
@@ -236,16 +236,18 @@ export default function CameraPPGAnalyzer() {
     warmupUntilRef.current = now + CFG.WARMUP_MS;
     setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
     resetStabilityCounters();
-    // Torch ON
     
-    try { 
+    // Torch aç (analyzer'dan önce, parmak algılandığı anda!)
+    try {
       if (device?.hasTorch) {
         setTorchOn(true);
-        console.log('🔦 Torch ON (FSM start)');
+        console.log('🔦 Torch ON - parmak algılandı');
       }
-    } catch {}
+    } catch (e) {
+      console.warn('Torch açılamadı:', e);
+    }
     
-    // Doğrudan analyzer'ı başlat (clean FSM - no toggleAnalysis dependency)
+    // Analyzer'ı başlat
     try {
       setIsAnalyzing(true);
       setIsActive(true);
@@ -276,8 +278,8 @@ export default function CameraPPGAnalyzer() {
       });
       
       console.log('✅ FSM analyzer created successfully');
-      // WARMUP aşamasına geç
-      fsmRef.current = 'warmup';
+      // starting state'inde kal, warmup süresi kontrolü performRealtimeAnalysis'de yapılıyor
+      // fsmRef.current = 'starting'; // zaten starting'de
       
     } catch (error) {
       console.error('Start FSM error:', error);
@@ -363,10 +365,10 @@ export default function CameraPPGAnalyzer() {
   const torchTimerRef = useRef<any>(null);
   const simulationTimerRef = useRef<any>(null);
   const torchOnTimeRef = useRef<number | null>(null);
-  const preTorchFramesRef = useRef<number>(0);
+  // const preTorchFramesRef = useRef<number>(0); // ✅ Kaldırıldı - artık kullanılmıyor
   const warnedJSIFallbackRef = useRef(false);
   const lastHapticTimeRef = useRef<number>(0);  // Haptic feedback zamanlaması için
-  const testHapticIntervalRef = useRef<any>(null);  // Test haptic interval
+  // const testHapticIntervalRef = useRef<any>(null);  // ✅ Kaldırıldı - kullanılmıyor
 
   // VisionCamera frame processor plugin initialized on JS thread
   const ppgPluginRef = useRef<any>(null);
@@ -535,15 +537,8 @@ export default function CameraPPGAnalyzer() {
         const GATE = 0.05;  // örnek akışını kesmeyelim
         const gateOK = confVal >= GATE || latestSamples.length > 0;
         if (latestSamples.length > 0 && gateOK) {
-          // Warmup'ta ilk N kareyi yut
-          const inWarmup = Date.now() < (warmupUntilRef.current || 0);
-          if (inWarmup) {
-            preTorchFramesRef.current += latestSamples.length;
-            if (preTorchFramesRef.current <= CFG.PRETORCH_IGNORE_FRAMES) {
-              // bu batch'i yut
-              return;
-            }
-          }
+          // ✅ Warmup'ta da tüm veriler işlenir, hiç veri atılmaz
+          
           // Update UI and incremental queue
           latestSamples.forEach((val, i) => {
             frameBufferRef.current.push(val);
@@ -564,9 +559,13 @@ export default function CameraPPGAnalyzer() {
               const xs = new Float32Array(latestSamples);
               const ts = new Float64Array(latestTs);
               await analyzerRef.current.pushWithTimestamps(xs, ts);
+              // ✅ ÖNEMLİ: pendingSamplesRef'i temizle çünkü data push edildi!
               pendingSamplesRef.current = [];
             }
-          } catch {}
+          } catch (e) {
+            console.warn('pushWithTimestamps failed, will use regular push:', e);
+            // Hata durumunda pendingSamplesRef dolu kalır, normal push kullanılır
+          }
         }
         // Otomatik başlat/durdur: süre-bazlı histerezis + cooldown + min-run
         try {
@@ -580,6 +579,10 @@ export default function CameraPPGAnalyzer() {
           // RUNNING → STOPPING: low debounce + min run + cooldown
           if (isAnalyzing && fsmRef.current === 'running' && uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS && ranMs >= CFG.MIN_RUN_MS && coolOK) {
             await stopAnalysisFSM('auto');
+          }
+          // ✅ STARTING (warmup) → STOPPING: erken parmak kalkması (daha kısa süre)
+          if (isAnalyzing && fsmRef.current === 'starting' && uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS && ranMs >= 2000 && coolOK) {
+            await stopAnalysisFSM('early_stop_warmup');
           }
         } catch {}
 
@@ -656,6 +659,8 @@ export default function CameraPPGAnalyzer() {
           } catch (pushError) {
             console.error('Native analyzer push failed:', pushError);
             setStatusMessage('❌ Native analyzer push hatası');
+            // ✅ Push hatası durumunda FSM'i sıfırla
+            await stopAnalysisFSM('push_error');
             return;
           }
         }
@@ -672,6 +677,8 @@ export default function CameraPPGAnalyzer() {
       } catch (pollError) {
         console.error('🔥 Native analyzer poll failed:', pollError);
         setStatusMessage('❌ Native analyzer poll hatası');
+        // ✅ Poll hatası durumunda FSM'i sıfırla
+        await stopAnalysisFSM('poll_error');
         return;
       }
       
@@ -707,7 +714,8 @@ export default function CameraPPGAnalyzer() {
         const currentBeatCount = (newMetrics as any).quality?.totalBeats ?? 0;
         const cppConf = (newMetrics as any).quality?.confidence ?? 0;
         const goodQ = !!(newMetrics as any).quality?.goodQuality;
-        if (currentBeatCount > lastBeatCount && goodQ && cppConf >= 0.5) {
+        // ✅ İyileştirilmiş haptic: running durumu + daha esnek confidence threshold
+        if (currentBeatCount > lastBeatCount && fsmRef.current === 'running' && goodQ && cppConf >= 0.3) {
           const now = Date.now();
           const refractoryMs = 250; // darbeler arası min süre
           if (!lastHapticTimeRef.current || now - lastHapticTimeRef.current >= refractoryMs) {
@@ -742,7 +750,8 @@ export default function CameraPPGAnalyzer() {
           // FSM: Warmup bitiminde parmak/konf tekrar doğrulaması
           if (!inWarmup && fsmRef.current === 'starting') {
             const confNow = (newMetrics as any)?.quality?.confidence ?? 0;
-            if (confNow >= 0.8 /* CFG.CONF_HIGH */) {
+            console.log(`🟡 Warmup complete, checking confidence: ${confNow.toFixed(2)} vs ${CFG.CONF_HIGH}`);
+            if (confNow >= CFG.CONF_HIGH) {
               console.log('🟡 Warmup OK → running');
               fsmRef.current = 'running';
             } else {
@@ -786,7 +795,7 @@ export default function CameraPPGAnalyzer() {
       setIsAnalyzing(false);
       setIsActive(false);
       setTorchOn(false);
-      preTorchFramesRef.current = 0;
+      // preTorchFramesRef.current = 0; // ✅ Kaldırıldı - artık kullanılmıyor
       if (analyzerRef.current) {
         try {
           await analyzerRef.current.destroy();
