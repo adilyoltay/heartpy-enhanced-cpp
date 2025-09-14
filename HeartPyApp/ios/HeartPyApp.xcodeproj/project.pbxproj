@@ -13,6 +13,7 @@
 		13B07FC11A68108700A75B9A /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 13B07FB71A68108700A75B9A /* main.m */; };
 		5F18A90F86BF522702299C37 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = D30B189352DEDDEB88B3E236 /* PrivacyInfo.xcprivacy */; };
 		7B8C9D001234567800000002 /* PPGMeanPlugin.m in Sources */ = {isa = PBXBuildFile; fileRef = 7B8C9D001234567800000001 /* PPGMeanPlugin.m */; };
+		7B8C9D001234567800000004 /* PPGCameraManager.mm in Sources */ = {isa = PBXBuildFile; fileRef = 7B8C9D001234567800000003 /* PPGCameraManager.mm */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
 		A1656FB8DD3FC3AE3D03F867 /* libPods-HeartPyApp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = EC98A59DA93633ADA7E5FED9 /* libPods-HeartPyApp.a */; };
 		AB312AF634DE7D8A417DE230 /* libPods-HeartPyApp-HeartPyAppTests.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B02B6D0E2FFDDB6595003188 /* libPods-HeartPyApp-HeartPyAppTests.a */; };
@@ -43,6 +44,8 @@
 		58B23CABFFF3DB075546A509 /* Pods-HeartPyApp-HeartPyAppTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-HeartPyApp-HeartPyAppTests.debug.xcconfig"; path = "Target Support Files/Pods-HeartPyApp-HeartPyAppTests/Pods-HeartPyApp-HeartPyAppTests.debug.xcconfig"; sourceTree = "<group>"; };
 		7232FA8B259A7F779DD2C9E7 /* Pods-HeartPyApp.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-HeartPyApp.debug.xcconfig"; path = "Target Support Files/Pods-HeartPyApp/Pods-HeartPyApp.debug.xcconfig"; sourceTree = "<group>"; };
 		7B8C9D001234567800000001 /* PPGMeanPlugin.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = PPGMeanPlugin.m; path = PPGMeanPlugin.m; sourceTree = "<group>"; };
+		7B8C9D001234567800000003 /* PPGCameraManager.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = PPGCameraManager.mm; path = PPGCameraManager.mm; sourceTree = "<group>"; };
+		7B8C9D001234567800000005 /* PPGCameraManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = PPGCameraManager.h; path = PPGCameraManager.h; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = HeartPyApp/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		B02B6D0E2FFDDB6595003188 /* libPods-HeartPyApp-HeartPyAppTests.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-HeartPyApp-HeartPyAppTests.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D30B189352DEDDEB88B3E236 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = HeartPyApp/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
@@ -92,6 +95,8 @@
 			isa = PBXGroup;
 			children = (
 				7B8C9D001234567800000001 /* PPGMeanPlugin.m */,
+				7B8C9D001234567800000003 /* PPGCameraManager.mm */,
+				7B8C9D001234567800000005 /* PPGCameraManager.h */,
 				13B07FAF1A68108700A75B9A /* AppDelegate.h */,
 				13B07FB01A68108700A75B9A /* AppDelegate.mm */,
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
@@ -369,6 +374,7 @@
 				13B07FBC1A68108700A75B9A /* AppDelegate.mm in Sources */,
 				13B07FC11A68108700A75B9A /* main.m in Sources */,
 				7B8C9D001234567800000002 /* PPGMeanPlugin.m in Sources */,
+				7B8C9D001234567800000004 /* PPGCameraManager.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

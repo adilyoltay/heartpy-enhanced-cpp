@@ -218,6 +218,8 @@ export default function CameraPPGAnalyzer() {
   const [lockIso, setLockIso] = useState<number | undefined>(200); // ISO 200
   const [lockWhiteBalance, setLockWhiteBalance] = useState<'auto' | 'sunny' | 'cloudy' | 'fluorescent'>('auto');
   const [lockFocus, setLockFocus] = useState<'auto' | 'manual'>('manual');
+  const [cameraCapabilities, setCameraCapabilities] = useState<any>(null);
+  const [cameraLockStatus, setCameraLockStatus] = useState<any>(null);
   
   // ✅ PHASE 1: Telemetry Events
   const sessionStartRef = useRef<number>(0);
@@ -278,6 +280,48 @@ export default function CameraPPGAnalyzer() {
     qualityLowMsRef.current = 0;
   }, []);
 
+  // ✅ CRITICAL: Camera Lock Functions for SNR improvement
+  const lockCameraSettings = useCallback(async () => {
+    if (!cameraLockEnabled) return null;
+    
+    try {
+      const settings = {
+        fps: targetFps,
+        exposureDuration: lockExposure,
+        iso: lockIso,
+        whiteBalance: lockWhiteBalance === 'auto' ? undefined : 'locked',
+        focus: lockFocus === 'manual' ? 'locked' : undefined,
+        torchLevel: torchLevel
+      };
+      
+      console.log('🔒 Locking camera settings:', settings);
+      const result = await NativeModules.PPGCameraManager?.lockCameraSettings(settings);
+      setCameraLockStatus(result);
+      console.log('✅ Camera lock result:', result);
+      logTelemetryEvent('camera_lock_applied', { settings, result });
+      return result;
+    } catch (error) {
+      console.error('❌ Camera lock failed:', error);
+      logTelemetryEvent('camera_lock_failed', { error: error.message });
+      return null;
+    }
+  }, [cameraLockEnabled, targetFps, lockExposure, lockIso, lockWhiteBalance, lockFocus, torchLevel]);
+
+  const unlockCameraSettings = useCallback(async () => {
+    try {
+      console.log('🔓 Unlocking camera settings...');
+      const result = await NativeModules.PPGCameraManager?.unlockCameraSettings();
+      setCameraLockStatus(null);
+      console.log('✅ Camera unlock result:', result);
+      logTelemetryEvent('camera_unlock_applied', { result });
+      return result;
+    } catch (error) {
+      console.error('❌ Camera unlock failed:', error);
+      logTelemetryEvent('camera_unlock_failed', { error: error.message });
+      return null;
+    }
+  }, []);
+
   const startAnalysisFSM = useCallback(async () => {
     const now = Date.now();
     if (fsmRef.current !== 'idle' || isAnalyzing) return;
@@ -291,6 +335,9 @@ export default function CameraPPGAnalyzer() {
     warmupUntilRef.current = now + CFG.WARMUP_MS;
     setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
     resetStabilityCounters();
+    
+    // ✅ CRITICAL: Lock camera settings for stable SNR (BEFORE torch!)
+    await lockCameraSettings();
     
     // Torch aç (analyzer'dan önce, parmak algılandığı anda!)
     try {
@@ -397,7 +444,11 @@ export default function CameraPPGAnalyzer() {
     } catch (error) {
       console.error('Stop FSM error:', error);
     } finally {
-      try { setTorchOn(false); } catch {}
+      try { 
+        setTorchOn(false); 
+        // ✅ CRITICAL: Unlock camera settings when stopping
+        await unlockCameraSettings();
+      } catch {}
       // sayaç reset & idle
       resetStabilityCounters();
       analyzeStartTsRef.current = 0; 
