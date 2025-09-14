@@ -152,7 +152,7 @@ export default function CameraPPGAnalyzer() {
   const [missedPeakCount, setMissedPeakCount] = useState(0);  // Atlanan peak sayısı
   const [torchOn, setTorchOn] = useState(false); // Auto-controlled
   const [useNativePPG, setUseNativePPG] = useState(true); // Fixed ON - ONLY REAL PPG DATA
-  const [roi, setRoi] = useState(0.4); // Fixed optimal
+  const [roi, setRoi] = useState(0.5); // ✅ Larger ROI for more light collection
   // Use green + chrom for improved SNR and robustness
   const [ppgChannel, setPpgChannel] = useState<'green' | 'red' | 'luma'>('green');
   const [ppgMode, setPpgMode] = useState<'mean' | 'chrom' | 'pos'>('chrom');
@@ -220,8 +220,8 @@ export default function CameraPPGAnalyzer() {
   
   // ✅ PHASE 1: Camera Lock Settings
   const [cameraLockEnabled, setCameraLockEnabled] = useState(true);
-  const [lockExposure, setLockExposure] = useState<number | undefined>(1/120); // 1/120s
-  const [lockIso, setLockIso] = useState<number | undefined>(200); // ISO 200
+  const [lockExposure, setLockExposure] = useState<number | undefined>(1/60); // ✅ Longer exposure for better SNR
+  const [lockIso, setLockIso] = useState<number | undefined>(100); // ✅ Lower ISO for less noise
   const [lockWhiteBalance, setLockWhiteBalance] = useState<'auto' | 'sunny' | 'cloudy' | 'fluorescent'>('auto');
   const [lockFocus, setLockFocus] = useState<'auto' | 'manual'>('manual');
   const [cameraCapabilities, setCameraCapabilities] = useState<any>(null);
@@ -232,10 +232,10 @@ export default function CameraPPGAnalyzer() {
   const torchDutyStartRef = useRef<number>(0);
   const torchTotalDutyRef = useRef<number>(0);
   
-  // ✅ PHASE 1: Progressive Torch Control
-  const [torchLevel, setTorchLevel] = useState<number>(0.6); // Start with medium
+  // ✅ CRITICAL: Higher torch for better SNR  
+  const [torchLevel, setTorchLevel] = useState<number>(1.0); // ✅ Start with MAX for best SNR
   const torchLevels = [0.3, 0.6, 1.0]; // Progressive levels
-  const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(1); // Start with 0.6
+  const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(2); // ✅ Start with MAX (1.0)
   
   // ✅ PHASE 2: Multi-ROI Adaptive Management
   const roiQualityHistoryRef = useRef<number[]>([]);
