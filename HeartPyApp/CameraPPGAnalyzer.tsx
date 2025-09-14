@@ -333,21 +333,39 @@ export default function CameraPPGAnalyzer() {
     lastAutoToggleAtRef.current = now;
     analyzeStartTsRef.current = now;
     warmupUntilRef.current = now + CFG.WARMUP_MS;
+    
+    // ✅ P1 FIX: Reset no-signal timer
+    lastSignalCheckRef.current = now;
+    
     setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
     resetStabilityCounters();
     
     // ✅ CRITICAL: Lock camera settings for stable SNR (BEFORE torch!)
     await lockCameraSettings();
     
-    // Torch aç (analyzer'dan önce, parmak algılandığı anda!)
+    // ✅ P1 FIX: Torch guarantee - ALWAYS ensure torch is ON during analysis
     try {
       if (device?.hasTorch) {
         setTorchOn(true);
         torchDutyStartRef.current = now;  // ✅ Torch duty tracking
-        console.log('🔦 Torch ON - parmak algılandı');
+        
+        // ✅ P1 FIX: Double-check torch level through camera manager
+        if (cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
+          await NativeModules.PPGCameraManager.setTorchLevel(torchLevel);
+          console.log(`🔦 Torch GUARANTEED ON - level: ${torchLevel}`);
+        } else {
+          console.log('🔦 Torch ON - parmak algılandı');
+        }
+        
+        logTelemetryEvent('torch_state_guarantee', { 
+          torchOn: true, 
+          level: torchLevel,
+          timestamp: now 
+        });
       }
     } catch (e) {
       console.warn('Torch açılamadı:', e);
+      logTelemetryEvent('torch_guarantee_failed', { error: e.message });
     }
     
     // Analyzer'ı başlat
@@ -487,6 +505,15 @@ export default function CameraPPGAnalyzer() {
   // const testHapticIntervalRef = useRef<any>(null);  // ✅ Kaldırıldı - kullanılmıyor
   const isAnalyzingRef = useRef(isAnalyzing);  // ✅ Poll interval staleness önleme
   const lastDataAtRef = useRef(Date.now());    // ✅ Watchdog timer için
+  
+  // ✅ P1 FIX: Producer watchdog & fallback ingest
+  const lastSampleAtRef = useRef<number>(0);
+  const FALLBACK_AFTER_MS = 800;
+  const [enableFallback, setEnableFallback] = useState(false);
+  
+  // ✅ P1 FIX: No-signal early stop
+  const NO_SIGNAL_TIMEOUT_MS = 2000;
+  const lastSignalCheckRef = useRef<number>(0);
   
   // ✅ isAnalyzingRef'i güncel tut
   useEffect(() => { 
@@ -870,6 +897,12 @@ export default function CameraPPGAnalyzer() {
         if (plugin != null && frame != null) {
           try {
             const v = plugin.call(frame, { roi, channel: ppgChannel, step: 2, mode: ppgMode, grid: ppgGrid, blend: 'off', torch: !!torchOn }) as number;
+            
+            // ✅ P1 FIX: Fallback ingest when native producer stalls
+            if (enableFallback && v != null && typeof v === 'number' && isFinite(v)) {
+              runOnJS(ingestSample)(v);
+            }
+            
             // Native data flow handled in-platform; no per-frame logs
           } catch (pluginError) {
             if (globalFrameCounter.current % 240 === 0) {
@@ -888,9 +921,37 @@ export default function CameraPPGAnalyzer() {
         console.log('Frame processor error:', e);
       }
     }
-  }, [useNativePPG, roi, ppgPlugin, ppgChannel, ppgMode, ppgGrid, autoSelect, torchOn]);
+  }, [useNativePPG, roi, ppgPlugin, ppgChannel, ppgMode, ppgGrid, autoSelect, torchOn, enableFallback, ingestSample]);
 
   // Native module polling for real PPG data + timestamps + plugin confidence
+  // ✅ P0 FIX: Universal Array/TypedArray → number[] converter  
+  const toNumArray = useCallback((maybe: any): number[] => {
+    if (!maybe) return [];
+    // Regular Array
+    if (Array.isArray(maybe)) {
+      return maybe.map(Number).filter(isFinite);
+    }
+    // TypedArray (Float32Array, Float64Array, etc.)
+    if (ArrayBuffer.isView(maybe) && typeof maybe.length === 'number') {
+      return Array.from(maybe as ArrayLike<number>).map(Number).filter(isFinite);
+    }
+    return [];
+  }, []);
+
+  // ✅ P1 FIX: Fallback ingest when producer stalls
+  const ingestSample = useCallback((val: number) => {
+    const v = Number(val);
+    if (!isFinite(v)) return;
+    
+    frameBufferRef.current.push(v);
+    if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
+    pendingSamplesRef.current.push(v);
+    if (pendingSamplesRef.current.length > bufferSize) {
+      pendingSamplesRef.current.splice(0, pendingSamplesRef.current.length - bufferSize);
+    }
+    lastSampleAtRef.current = Date.now();
+  }, [bufferSize]);
+
   useEffect(() => {
     if (!isActive || !useNativePPG) return;
     const pollingInterval = setInterval(async () => {
@@ -906,15 +967,94 @@ export default function CameraPPGAnalyzer() {
         }
         let latestSamples: number[] = [];
         let latestTs: number[] | null = null;
+        
+        // ✅ P0 FIX: Handle both Array and TypedArray from native  
         if (pack && Array.isArray(pack)) {
-          latestSamples = (pack as any[]).slice(-20).map(s => (typeof s === 'number' ? s : parseFloat(s))).filter((v: any) => isFinite(v));
+          // Old format: direct array
+          latestSamples = toNumArray((pack as any).slice(-20));
         } else if (pack && typeof pack === 'object') {
-          const xs = Array.isArray(pack.samples) ? pack.samples : [];
-          const ts = Array.isArray(pack.timestamps) ? pack.timestamps : [];
+          // New format: {samples, timestamps} - could be Arrays or TypedArrays
+          const xs = toNumArray((pack as any).samples);  
+          const ts = toNumArray((pack as any).timestamps);
           const k = Math.min(xs.length, ts.length);
-          latestSamples = xs.slice(-20).map((s: any) => (typeof s === 'number' ? s : parseFloat(s))).filter((v: any) => isFinite(v));
-          latestTs = ts.slice(-20).map((t: any) => (typeof t === 'number' ? t : parseFloat(t))).filter((v: any) => isFinite(v));
+          if (k > 0) {
+            latestSamples = xs.slice(-k);
+            latestTs = ts.slice(-k);
+          }
+          
+          // ✅ DEBUG: Log pack structure for diagnosis when samples empty
+          if (xs.length === 0 && (pack as any).samples) {
+            console.log('🔍 PACK DEBUG:', {
+              packType: typeof pack,
+              samplesType: typeof (pack as any).samples,
+              isArray: Array.isArray((pack as any).samples),
+              isTypedArray: ArrayBuffer.isView((pack as any).samples),
+              length: (pack as any).samples?.length ?? 'no length',
+              constructor: (pack as any).samples?.constructor?.name ?? 'no constructor'
+            });
+          }
         }
+        
+        // ✅ P1 FIX: Producer watchdog - activate fallback if native producer stalls
+        const now = Date.now();
+        const noProducer = (now - lastSampleAtRef.current) > FALLBACK_AFTER_MS;
+        const shouldEnableFallback = noProducer && isAnalyzingRef.current;
+        
+        if (shouldEnableFallback !== enableFallback) {
+          setEnableFallback(shouldEnableFallback);
+          if (shouldEnableFallback) {
+            console.log('⚠️ Producer watchdog: Native producer stalled, fallback ingest enabled');
+            logTelemetryEvent('producer_watchdog', { 
+              stallDuration: now - lastSampleAtRef.current,
+              fallbackEnabled: true 
+            });
+          } else {
+            console.log('✅ Producer watchdog: Native producer resumed, fallback ingest disabled');
+            logTelemetryEvent('producer_watchdog', { 
+              stallDuration: 0,
+              fallbackEnabled: false 
+            });
+          }
+        }
+        
+        // ✅ Update sample timestamp when we get data from native
+        if (latestSamples.length > 0) {
+          lastSampleAtRef.current = now;
+        }
+        
+        // ✅ P1 FIX: No-signal early stop - check for complete pipeline stall
+        if (isAnalyzingRef.current && (fsmRef.current === 'starting' || fsmRef.current === 'running')) {
+          const hasSignal = latestSamples.length > 0 || pendingSamplesRef.current.length > 0;
+          const hasData = confVal > 0 || hasSignal;
+          
+          if (hasData) {
+            // Reset timer when we have any kind of signal/data
+            lastSignalCheckRef.current = now;
+          } else {
+            // Check for timeout
+            const noSignalDuration = now - lastSignalCheckRef.current;
+            if (noSignalDuration > NO_SIGNAL_TIMEOUT_MS) {
+              console.log(`⚠️ No-signal early stop: ${noSignalDuration}ms without data (samples: ${latestSamples.length}, pending: ${pendingSamplesRef.current.length}, conf: ${confVal})`);
+              logTelemetryEvent('no_signal_early_stop', { 
+                duration: noSignalDuration,
+                fsmState: fsmRef.current,
+                sampleCount: latestSamples.length,
+                pendingCount: pendingSamplesRef.current.length,
+                confidence: confVal
+              });
+              
+              // Stop FSM due to no signal
+              stopAnalysisFSM('no_signal_timeout').catch(() => {
+                console.error('Failed to stop FSM on no-signal timeout');
+              });
+              return; // Exit polling loop
+            }
+          }
+        } else {
+          // Reset timer when not analyzing
+          lastSignalCheckRef.current = now;
+        }
+        
         // Confidence-based gating + süre-bazlı histerezis
         const nowTs = Date.now();
         const dt = lastPollTsRef.current ? Math.max(1, nowTs - lastPollTsRef.current) : 200;
@@ -1320,19 +1460,44 @@ export default function CameraPPGAnalyzer() {
     }
   }, [isAnalyzing, hasPermission, device]);
 
-  // ✅ PHASE 1: AppState listener - background handling
+  // ✅ PHASE 1: AppState listener - background handling + torch guarantee
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', (nextAppState) => {
+    const subscription = AppState.addEventListener('change', async (nextAppState) => {
       if (nextAppState !== 'active' && isAnalyzingRef.current) {
         console.log('⚠️ App going to background - stopping analysis for safety');
         stopAnalysisFSM('app_background').catch(() => {
           console.error('Failed to stop analysis on background');
         });
+      } else if (nextAppState === 'active' && isAnalyzingRef.current) {
+        // ✅ P1 FIX: Re-prime torch and camera locks on foreground return
+        console.log('✅ App returning to foreground - re-priming torch and camera');
+        
+        try {
+          // Re-apply camera locks
+          await lockCameraSettings();
+          
+          // Guarantee torch is ON
+          if (device?.hasTorch && torchOn) {
+            setTorchOn(true); // Re-trigger
+            
+            if (cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
+              await NativeModules.PPGCameraManager.setTorchLevel(torchLevel);
+              console.log(`🔦 Torch RE-GUARANTEED ON after foreground - level: ${torchLevel}`);
+            }
+            
+            logTelemetryEvent('torch_foreground_guarantee', { 
+              torchOn: true, 
+              level: torchLevel 
+            });
+          }
+        } catch (e) {
+          console.warn('Foreground torch/camera re-prime failed:', e);
+        }
       }
     });
 
     return () => subscription?.remove();
-  }, [stopAnalysisFSM]);
+  }, [stopAnalysisFSM, lockCameraSettings, device, torchOn, torchLevel, cameraLockEnabled, logTelemetryEvent]);
 
   // ✅ PHASE 1: Watchdog timer - stall detection
   useEffect(() => {
