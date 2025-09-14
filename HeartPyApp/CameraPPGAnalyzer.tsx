@@ -143,6 +143,10 @@ export default function CameraPPGAnalyzer() {
   const [pluginConfidence, setPluginConfidence] = useState<number>(0);
   const [autoSelect, setAutoSelect] = useState(false); // Face mode disabled; keep blend OFF
   const [metricsTab, setMetricsTab] = useState<'Özet' | 'Zaman' | 'Frekans' | 'Kalite' | 'Ham'>('Özet');
+  // Otomatik başlat/durdur için kararlılık sayaçları
+  const coverStableCountRef = useRef(0);
+  const uncoverStableCountRef = useRef(0);
+  const lastAutoToggleAtRef = useRef(0);
   // Removed UI control states
 
   // Load/save persistent settings (best-effort)
@@ -393,8 +397,8 @@ export default function CameraPPGAnalyzer() {
         }
         // Otomatik başlat/durdur: parmakla kapama tespiti (confidence tabanlı)
         try {
-          const START_THR = 0.6;
-          const STOP_THR = 0.4;
+          const START_THR = 0.25; // pulsesiz başlatmayı kolaylaştırmak için düşürüldü
+          const STOP_THR = 0.15;
           if (confVal >= START_THR) {
             coverStableCountRef.current += 1;
             uncoverStableCountRef.current = 0;
@@ -403,19 +407,30 @@ export default function CameraPPGAnalyzer() {
             coverStableCountRef.current = 0;
           }
 
-          // Başlat: ardışık 3 ölçüm yüksek güven
-          if (!isAnalyzing && coverStableCountRef.current >= 3) {
+          // Başlat: ardışık 2 ölçüm yüksek güven
+          if (!isAnalyzing && coverStableCountRef.current >= 2) {
             coverStableCountRef.current = 0;
             setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
-            toggleAnalysis();
+            const now = Date.now();
+            if (now - (lastAutoToggleAtRef.current || 0) > 1000) {
+              lastAutoToggleAtRef.current = now;
+              toggleAnalysis();
+            }
           }
-          // Durdur: ardışık 5 ölçüm düşük güven
-          if (isAnalyzing && uncoverStableCountRef.current >= 5) {
+          // Durdur: ardışık 4 ölçüm düşük güven
+          if (isAnalyzing && uncoverStableCountRef.current >= 4) {
             uncoverStableCountRef.current = 0;
             setStatusMessage('⏹️ Parmak kaldırıldı / kapama yetersiz, analiz duruyor');
-            toggleAnalysis();
+            const now = Date.now();
+            if (now - (lastAutoToggleAtRef.current || 0) > 1000) {
+              lastAutoToggleAtRef.current = now;
+              toggleAnalysis();
+            }
           }
         } catch {}
+
+        // Torch pulse tamamen devre dışı: başlama arayışında dahi torch kullanılmıyor
+        try { if (torchOn) setTorchOn(false); } catch {}
       } catch (e) {
         // occasional polling errors are non-fatal
       }
@@ -448,11 +463,10 @@ export default function CameraPPGAnalyzer() {
     return () => clearInterval(uiUpdateTimer);
   }, [isActive, analysisInterval, samplingRate, bufferSize, useNativePPG]);
 
-  // Sayfa açıldığında izin/cihaz hazırsa kamerayı etkinleştir ve torch'u aç (parmak algısı için)
+  // Sayfa açıldığında izin/cihaz hazırsa kamerayı etkinleştir (torch pulse hazırda)
   useEffect(() => {
     if (hasPermission && device) {
       if (!isActive) setIsActive(true);
-      if (device?.hasTorch && !torchOn) setTorchOn(true);
       if (!isAnalyzing) setStatusMessage('📷 Parmağınızı kamerayı tamamen kapatacak şekilde yerleştirin');
     }
   }, [hasPermission, device]);
