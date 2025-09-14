@@ -143,11 +143,13 @@ export default function CameraPPGAnalyzer() {
   const [pluginConfidence, setPluginConfidence] = useState<number>(0);
   const [autoSelect, setAutoSelect] = useState(false); // Face mode disabled; keep blend OFF
   const [metricsTab, setMetricsTab] = useState<'Özet' | 'Zaman' | 'Frekans' | 'Kalite' | 'Ham'>('Özet');
-  // Otomatik başlat/durdur için kararlılık sayaçları
+  // Otomatik başlat/durdur için kararlılık sayaçları ve zamanlayıcılar
   const coverStableCountRef = useRef(0);
   const uncoverStableCountRef = useRef(0);
   const lastAutoToggleAtRef = useRef(0);
   const analyzeStartTsRef = useRef(0);
+  const warmupUntilRef = useRef(0);
+  const fsmRef = useRef<'idle'|'starting'|'running'|'stopping'>('idle');
   // Removed UI control states
 
   // Load/save persistent settings (best-effort)
@@ -182,6 +184,30 @@ export default function CameraPPGAnalyzer() {
   // UI confidence indicator strictly from C++: quality.confidence
   const cppConfidence = Math.max(0, Math.min(1, metrics?.quality?.confidence ?? 0));
   const confColor = cppConfidence >= 0.7 ? '#4CAF50' : cppConfidence >= 0.4 ? '#FB8C00' : '#f44336';
+
+  // FSM kontrollü başlat/durdur yardımcıları
+  const startAnalysisFSM = useCallback(() => {
+    const now = Date.now();
+    if (fsmRef.current !== 'idle' || isAnalyzing) return;
+    try { if (device?.hasTorch) setTorchOn(true); } catch {}
+    fsmRef.current = 'starting';
+    lastAutoToggleAtRef.current = now;
+    analyzeStartTsRef.current = now;
+    warmupUntilRef.current = now + 3000;
+    setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
+    toggleAnalysis();
+  }, [device, isAnalyzing, toggleAnalysis]);
+
+  const stopAnalysisFSM = useCallback(() => {
+    const now = Date.now();
+    if (fsmRef.current !== 'running' || !isAnalyzing) return;
+    fsmRef.current = 'stopping';
+    lastAutoToggleAtRef.current = now;
+    setStatusMessage('⏹️ Parmak kaldırıldı / kapama yetersiz, analiz duruyor');
+    toggleAnalysis();
+    try { setTorchOn(false); } catch {}
+    analyzeStartTsRef.current = 0; warmupUntilRef.current = 0;
+  }, [isAnalyzing, toggleAnalysis]);
 
   const device = useCameraDevice('back', {
     physicalDevices: ['wide-angle-camera'],
@@ -409,26 +435,20 @@ export default function CameraPPGAnalyzer() {
           }
 
           // Başlat koşulu: ardışık 3 ölçüm yüksek güven + cooldown
-          if (!isAnalyzing && coverStableCountRef.current >= 3) {
+          if (!isAnalyzing && fsmRef.current === 'idle' && coverStableCountRef.current >= 3) {
             const now = Date.now();
             if (now - (lastAutoToggleAtRef.current || 0) > 4000) {
-              setStatusMessage('✅ Parmak algılandı, analiz başlatılıyor...');
-              lastAutoToggleAtRef.current = now;
-              toggleAnalysis();
-              analyzeStartTsRef.current = now;
+              startAnalysisFSM();
               coverStableCountRef.current = 0;
               uncoverStableCountRef.current = 0;
             }
           }
           // Durdur koşulu: ardışık 6 ölçüm düşük güven + min çalışma + cooldown
-          if (isAnalyzing && uncoverStableCountRef.current >= 6) {
+          if (isAnalyzing && fsmRef.current === 'running' && uncoverStableCountRef.current >= 6) {
             const now = Date.now();
             const ranMs = now - (analyzeStartTsRef.current || 0);
             if (ranMs >= 7000 && now - (lastAutoToggleAtRef.current || 0) > 4000) {
-              setStatusMessage('⏹️ Parmak kaldırıldı / kapama yetersiz, analiz duruyor');
-              lastAutoToggleAtRef.current = now;
-              toggleAnalysis();
-              analyzeStartTsRef.current = 0;
+              stopAnalysisFSM();
               coverStableCountRef.current = 0;
               uncoverStableCountRef.current = 0;
             }
@@ -589,7 +609,11 @@ export default function CameraPPGAnalyzer() {
         }
           
           // Status mesajını güncelle
-          if ((newMetrics as any).quality?.goodQuality) {
+          const nowTs = Date.now();
+          const inWarmup = nowTs < (warmupUntilRef.current || 0);
+          if (inWarmup) {
+            setStatusMessage('⏳ Isınma: pozlama/sinyal oturuyor...');
+          } else if ((newMetrics as any).quality?.goodQuality) {
             setStatusMessage(`✅ Kaliteli sinyal - BPM: ${newMetrics.bpm?.toFixed?.(0) ?? '—'} 💓 ${String(currentBeatCount)} beat`);
           } else {
             setStatusMessage(`⚠️ Zayıf sinyal - ${(newMetrics as any).quality?.qualityWarning || 'Parmağınızı kameraya daha iyi yerleştirin'}`);
