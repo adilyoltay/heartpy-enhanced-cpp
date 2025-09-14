@@ -568,58 +568,18 @@ export default function CameraPPGAnalyzer() {
             }
           } catch {}
         }
-         // Otomatik başlat/durdur: parmakla kapama tespiti (confidence tabanlı)
-         try {
-           const START_THR = 0.30; // Güvenilir başlangıç için
-           const STOP_THR = 0.20;  // Premature stop'u önlemek için
-           
-           console.log(`🎯 FSM Confidence Check: ${confVal.toFixed(2)} (start>${START_THR}, stop<${STOP_THR})`);
-           
-           if (confVal >= START_THR) {
-             coverStableCountRef.current += 1;
-             uncoverStableCountRef.current = 0;
-           } else if (confVal <= STOP_THR) {
-             uncoverStableCountRef.current += 1;
-             coverStableCountRef.current = 0;
-           } else {
-             // Orta aralık - sayaçları sıfırla
-             coverStableCountRef.current = 0;
-             uncoverStableCountRef.current = 0;
-           }
-
-          // Başlat koşulu: ardışık 3 ölçüm yüksek güven + cooldown
-          if (!isAnalyzing && fsmRef.current === 'idle' && coverStableCountRef.current >= 3) {
-            const now = Date.now();
-            if (now - (lastAutoToggleAtRef.current || 0) > 4000) {
-              startAnalysisFSM();
-              coverStableCountRef.current = 0;
-              uncoverStableCountRef.current = 0;
-            }
+        // Otomatik başlat/durdur: süre-bazlı histerezis + cooldown + min-run
+        try {
+          const now = Date.now();
+          const ranMs = now - (analyzeStartTsRef.current || 0);
+          const coolOK = now - (lastAutoToggleAtRef.current || 0) >= CFG.COOLDOWN_MS;
+          // IDLE → STARTING: high debounce sağlandıysa ve cooldown geçtiyse
+          if (!isAnalyzing && fsmRef.current === 'idle' && coverStableMsRef.current >= CFG.HIGH_DEBOUNCE_MS && coolOK) {
+            await startAnalysisFSM();
           }
-          // Durdur koşulu: FSM running veya starting state'inde
-          if (isAnalyzing && (fsmRef.current === 'running' || fsmRef.current === 'starting')) {
-            const now = Date.now();
-            const ranMs = now - (analyzeStartTsRef.current || 0);
-            
-            // Running state: normal durdur koşulları
-            if (fsmRef.current === 'running' && uncoverStableCountRef.current >= 6) {
-              if (ranMs >= 7000 && now - (lastAutoToggleAtRef.current || 0) > 4000) {
-                console.log('🔴 FSM Auto-stop: running → stopping (normal)');
-                stopAnalysisFSM();
-                coverStableCountRef.current = 0;
-                uncoverStableCountRef.current = 0;
-              }
-            }
-            
-            // Starting state (warmup): hızlı durdur koşulu
-            else if (fsmRef.current === 'starting' && uncoverStableCountRef.current >= 4) {
-              if (ranMs >= 2000 && now - (lastAutoToggleAtRef.current || 0) > 2000) {
-                console.log('🔴 FSM Auto-stop: starting → stopping (warmup early exit)');
-                stopAnalysisFSM();
-                coverStableCountRef.current = 0;
-                uncoverStableCountRef.current = 0;
-              }
-            }
+          // RUNNING → STOPPING: low debounce + min run + cooldown
+          if (isAnalyzing && fsmRef.current === 'running' && uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS && ranMs >= CFG.MIN_RUN_MS && coolOK) {
+            await stopAnalysisFSM('auto');
           }
         } catch {}
 
@@ -779,10 +739,17 @@ export default function CameraPPGAnalyzer() {
           const nowTs = Date.now();
           const inWarmup = nowTs < (warmupUntilRef.current || 0);
           
-          // FSM: Warmup bitiminde starting → running transition
+          // FSM: Warmup bitiminde parmak/konf tekrar doğrulaması
           if (!inWarmup && fsmRef.current === 'starting') {
-            console.log('🟡 FSM Warmup complete: starting → running');
-            fsmRef.current = 'running';
+            const confNow = (newMetrics as any)?.quality?.confidence ?? 0;
+            if (confNow >= 0.8 /* CFG.CONF_HIGH */) {
+              console.log('🟡 Warmup OK → running');
+              fsmRef.current = 'running';
+            } else {
+              console.log('🔴 Warmup bitti ama conf düşük → stop');
+              await stopAnalysisFSM('no_finger_after_warmup');
+              return;
+            }
           }
           
           if (inWarmup) {
