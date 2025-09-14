@@ -363,10 +363,14 @@ export default function CameraPPGAnalyzer() {
           console.log('🔦 Torch ON - parmak algılandı');
         }
         
+        // ✅ P1 FIX: Set pretorch drop period when torch turns on
+        pretorchUntilRef.current = now + PRETORCH_DROP_MS;
+        
         logTelemetryEvent('torch_state_guarantee', { 
           torchOn: true, 
           level: torchLevel,
-          timestamp: now 
+          timestamp: now,
+          pretorchDropUntil: pretorchUntilRef.current
         });
       }
     } catch (e) {
@@ -386,21 +390,21 @@ export default function CameraPPGAnalyzer() {
       }
       
       analyzerRef.current = await HP.RealtimeAnalyzer.create(analyzerFs, {
-        bandpass: { lowHz: 0.5, highHz: 4.0, order: 2 },  // ✅ Daha esnek frekans range
-        welch: { nfft: 1024, overlap: 0.5 },               // ✅ Hızlı hesap, daha tolerant
+        bandpass: { lowHz: 0.4, highHz: 4.5, order: 2 },  // ✅ Çok geniş frekans range
+        welch: { nfft: 512, overlap: 0.7 },                // ✅ Daha tolerant spectral analysis
         peak: { 
-          refractoryMs: 300,    // ✅ Daha kısa refractory - daha fazla peak
-          thresholdScale: 0.4,  // ✅ Daha düşük threshold - daha esnek peak
-          bpmMin: 40,           // ✅ Daha geniş BPM range
-          bpmMax: 180           // ✅ Daha geniş BPM range
+          refractoryMs: 200,    // ✅ Çok kısa refractory - maksimum peak detection
+          thresholdScale: 0.2,  // ✅ Çok düşük threshold - çok esnek peak detection
+          bpmMin: 8,            // ✅ Çok geniş BPM range (test için)
+          bpmMax: 200           // ✅ Çok geniş BPM range
         },
         preprocessing: { 
-          removeBaselineWander: true,
-          smoothingWindowMs: 50   // ✅ Daha az smoothing - daha çok detay
+          removeBaselineWander: false,  // ✅ Minimum preprocessing
+          smoothingWindowMs: 20         // ✅ Minimum smoothing - raw detail
         },
         quality: {
-          cleanRR: false,         // ✅ RR temizleme kapalı - daha esnek  
-          cleanMethod: 'none'     // ✅ Hiç temizleme yapma
+          cleanRR: false,         // ✅ RR temizleme kapalı - tamamen esnek
+          cleanMethod: 'none'     // ✅ Hiç müdahale yapma
         }
       });
       
@@ -478,7 +482,7 @@ export default function CameraPPGAnalyzer() {
       analyzeStartTsRef.current = 0; 
       warmupUntilRef.current = 0;
       logFSMTransition('stopping', 'idle', 'cleanup_complete');
-      logSessionOutcome('success', reason, metrics || null);
+      logSessionOutcome(classifyOutcome(reason), reason, metrics || null);
       fsmRef.current = 'idle';
       setStatusMessage('📷 Parmağınızı kamerayı tamamen kapatacak şekilde yerleştirin');
     }
@@ -521,10 +525,32 @@ export default function CameraPPGAnalyzer() {
   const NO_SIGNAL_TIMEOUT_MS = 2000;
   const lastSignalCheckRef = useRef<number>(0);
   
+  // ✅ P1 FIX: Pretorch frame drop - avoid torch/AE ramp-up noise
+  const PRETORCH_DROP_MS = 400;
+  const pretorchUntilRef = useRef<number>(0);
+  
   // ✅ isAnalyzingRef'i güncel tut
   useEffect(() => { 
     isAnalyzingRef.current = isAnalyzing; 
   }, [isAnalyzing]);
+  
+  // ✅ P1 FIX: Heavy logging throttle - prevent performance degradation
+  const DEBUG_HEAVY = false; // ✅ Default OFF for production
+  const HEAVY_LOG_THROTTLE = 10; // Log every 10th call
+  const heavyLogCountRef = useRef(0);
+  
+  const logHeavy = useCallback((tag: string, obj: any) => {
+    if (!DEBUG_HEAVY) return;
+    heavyLogCountRef.current++;
+    if (heavyLogCountRef.current % HEAVY_LOG_THROTTLE === 1) {
+      console.log(tag, JSON.stringify(obj, (key, value) => {
+        if (Array.isArray(value) && value.length > 10) {
+          return `[Array(${value.length})]`;
+        }
+        return value;
+      }, 2));
+    }
+  }, []);
 
   // ✅ PHASE 1: Telemetry Functions
   const logTelemetryEvent = useCallback((eventName: string, data: Record<string, any>) => {
@@ -544,6 +570,23 @@ export default function CameraPPGAnalyzer() {
       torchDuty: torchTotalDutyRef.current
     });
   }, [logTelemetryEvent]);
+
+  // ✅ P1 FIX: Stop outcome classification for better analytics
+  const classifyOutcome = useCallback((reason: string): 'success' | 'error' | 'cancelled' => {
+    switch (reason) {
+      case 'stall_watchdog':
+      case 'poll_error':
+      case 'push_error':
+        return 'error';
+      case 'app_background':
+      case 'manual':
+      case 'no_signal_timeout':
+      case 'early_stop_warmup':
+        return 'cancelled';
+      default:
+        return 'success';
+    }
+  }, []);
 
   const logSessionOutcome = useCallback((outcome: 'success' | 'error' | 'cancelled', reason: string, metrics?: any) => {
     const sessionDuration = sessionStartRef.current ? Date.now() - sessionStartRef.current : 0;
@@ -1061,21 +1104,9 @@ export default function CameraPPGAnalyzer() {
           lastSignalCheckRef.current = now;
         }
         
-        // Confidence-based gating + süre-bazlı histerezis
-        const nowTs = Date.now();
-        const dt = lastPollTsRef.current ? Math.max(1, nowTs - lastPollTsRef.current) : 200;
-        lastPollTsRef.current = nowTs;
-        if (confVal >= CFG.CONF_HIGH) {
-          coverStableMsRef.current += dt;
-          uncoverStableMsRef.current = 0;
-        } else if (confVal <= CFG.CONF_LOW) {
-          uncoverStableMsRef.current += dt;
-          coverStableMsRef.current = 0;
-        } else {
-          // orta bölgede yavaş çözülme
-          coverStableMsRef.current = Math.max(0, coverStableMsRef.current - dt/2);
-          uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - dt/2);
-        }
+        // ✅ P1 FIX: Auto-stop gate moved to C++ result processing
+        // Plugin confidence used only for initial start triggering
+        // Actual stop/start decisions use C++ quality (below in performRealtimeAnalysis)
         // ✅ GATE kaldırıldı - etkisizdi (latestSamples.length > 0 varsa her zaman true)
         if (latestSamples.length > 0) {
           // ✅ Watchdog: Data received, update timestamp
@@ -1189,10 +1220,22 @@ export default function CameraPPGAnalyzer() {
     }
 
     console.log('🔄 Starting realtime analysis...');
-    
+
     try {
       // Push only new samples accumulated since last call
       const pending = pendingSamplesRef.current;
+      
+      // ✅ P1 FIX: Skip push during pretorch period (torch/AE ramp-up noise)
+      const now = Date.now();
+      const inPretorch = now < pretorchUntilRef.current;
+      
+      if (inPretorch) {
+        console.log(`⏳ Pretorch period: Skipping ${pending.length} samples (${pretorchUntilRef.current - now}ms remaining)`);
+        // Clear pending samples during pretorch but keep UI flowing
+        pendingSamplesRef.current = [];
+        return; // Skip C++ analysis during ramp-up
+      }
+      
       console.log(`📥 Pushing ${pending.length} samples to C++ analyzer`);
       
       // ✅ DEBUG: Sample değerlerini kontrol et
@@ -1257,18 +1300,12 @@ export default function CameraPPGAnalyzer() {
           'Is Finite': isFinite(result.bpm || 0)
         });
         
-        // ✅ DEBUG: Daha detaylı quality log'u
+        // ✅ P1 FIX: Throttled heavy logging - performance optimization
         if ((result as any).quality) {
-          console.log('📊 DETAILED QUALITY:', JSON.stringify((result as any).quality, null, 2));
+          logHeavy('📊 DETAILED QUALITY:', (result as any).quality);
         }
         
-        // ✅ DEBUG: Tüm result'u da logla (çok detaylı)
-        console.log('📋 FULL RESULT:', JSON.stringify(result, (key, value) => {
-          if (Array.isArray(value) && value.length > 10) {
-            return `[Array(${value.length})]`;
-          }
-          return value;
-        }, 2));
+        logHeavy('📋 FULL RESULT:', result);
         
         try {
           // C++ NATIVE BPM'İNİ AYNEN KULLAN - HİÇ DEĞİŞTİRME!
@@ -1321,13 +1358,13 @@ export default function CameraPPGAnalyzer() {
             const pHalfOverFund = qualityMetrics.pHalfOverFund ?? 0;
             const rrCount = Array.isArray(qualityMetrics.rrList) ? qualityMetrics.rrList.length : 0;
             
-            // ✅ P2 FIX: HRV quality criteria
+            // ✅ P2 FIX: Gevşetilmiş HRV quality criteria - SNR prioritized
             const hrvQualityGate = (
-              snr > 8 &&                    // SNR > 8 dB
-              confidence > 0.6 &&           // Confidence > 0.6  
-              rejectionRate < 0.2 &&        // Rejection rate < 20%
-              pHalfOverFund < 0.3 &&        // No significant doubling/halving
-              rrCount >= 30                 // At least 30 RR intervals for reliable HRV
+              snr > 5 &&                    // ✅ SNR > 5 dB (gevşetildi)
+              (confidence > 0.3 || snr > 6) && // ✅ Confidence > 0.3 OR good SNR
+              rejectionRate < 0.3 &&        // ✅ Rejection rate < 30% (gevşetildi)
+              pHalfOverFund < 0.5 &&        // ✅ Less strict doubling check
+              rrCount >= 15                 // ✅ At least 15 RR intervals (gevşetildi)
             );
             
             // ✅ P2 FIX: Mask invalid HRV metrics
@@ -1354,18 +1391,38 @@ export default function CameraPPGAnalyzer() {
                 qualityMetrics.qualityWarning = 'HRV metrics masked due to insufficient quality';
               }
             } else {
-              console.log(`✅ HRV quality gate PASSED - metrics reliable`);
-            }
+            console.log(`✅ HRV quality gate PASSED - metrics reliable`);
           }
-          
-          setMetrics(newMetrics as PPGMetrics);
+        }
+        
+        // ✅ P1 FIX: Auto-stop gate using C++ quality (ground truth)
+        const cppConf = qualityMetrics?.confidence ?? 0;
+        const cppGoodQuality = qualityMetrics?.goodQuality ?? false;
+        const snr = qualityMetrics?.snrDb ?? 0;
+        const now = Date.now();
+        const dt = lastPollTsRef.current ? Math.max(1, now - lastPollTsRef.current) : 200;
+        lastPollTsRef.current = now;
+        
+        // Update stability counters based on C++ quality
+        if (cppGoodQuality && (cppConf >= 0.3 || snr > 6)) {
+          coverStableMsRef.current += dt;
+          uncoverStableMsRef.current = 0;
+        } else if (!cppGoodQuality || cppConf <= 0.1) {
+          uncoverStableMsRef.current += dt;
+          coverStableMsRef.current = 0;
+        } else {
+          // Middle zone - slow decay
+          coverStableMsRef.current = Math.max(0, coverStableMsRef.current - dt/2);
+          uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - dt/2);
+        }
+        
+        setMetrics(newMetrics as PPGMetrics);
           
         // C++ analizindeki beat artışına göre haptic feedback (kalite koşulu ile)
         const currentBeatCount = (newMetrics as any).quality?.totalBeats ?? 0;
-        const effectiveConf = getEffectiveConfidence((newMetrics as any)?.quality);
-        const goodQ = !!(newMetrics as any).quality?.goodQuality;
-        // ✅ İyileştirilmiş haptic: running durumu + unified confidence
-        if (currentBeatCount > lastBeatCount && fsmRef.current === 'running' && goodQ && effectiveConf >= 0.3) {
+        // cppConf already declared above
+        // ✅ P1 FIX: Haptic gate - C++ confidence (ground truth), not unified
+        if (currentBeatCount > lastBeatCount && fsmRef.current === 'running' && cppGoodQuality && cppConf >= 0.05) {
           const now = Date.now();
           const refractoryMs = 250; // darbeler arası min süre
           if (!lastHapticTimeRef.current || now - lastHapticTimeRef.current >= refractoryMs) {
@@ -1377,20 +1434,35 @@ export default function CameraPPGAnalyzer() {
               }
             } catch {}
             lastHapticTimeRef.current = now;
-          } else {
+              } else {
             setMissedPeakCount(prev => prev + 1);
-          }
-        }
+              }
+            }
         
         // Peak listesini güncelle (görsel için)
         if (Array.isArray(result.peakList) && result.peakList.length > 0) {
           setLastPeakIndices(result.peakList.slice(-100));
-        }
+          }
         
         // Beat count değişimi logu
         if (currentBeatCount > lastBeatCount) {
           console.log(`💓 ${currentBeatCount - lastBeatCount} new beat(s)! Total: ${currentBeatCount}`);
-          setLastBeatCount(currentBeatCount);
+        setLastBeatCount(currentBeatCount);
+        }
+        
+        // ✅ P1 FIX: Auto-stop logic using C++ quality after minimum run time
+        const ranMs = Date.now() - analyzeStartTsRef.current;
+        const coolOK = Date.now() - lastAutoToggleAtRef.current >= CFG.COOLDOWN_MS;
+        
+        // Auto-stop condition: Poor C++ quality for extended period + minimum run time
+        if (fsmRef.current === 'running' && 
+            ranMs >= CFG.MIN_RUN_MS && 
+            coolOK && 
+            uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS &&
+            (!cppGoodQuality || cppConf <= 0.1)) {
+          console.log(`🔴 Auto-stop: Poor C++ quality (goodQ: ${cppGoodQuality}, conf: ${cppConf.toFixed(3)}, uncoverMs: ${uncoverStableMsRef.current})`);
+          await stopAnalysisFSM('cpp_quality_drop');
+          return;
         }
           
           // Status mesajını güncelle + FSM warmup transition
@@ -1448,7 +1520,7 @@ export default function CameraPPGAnalyzer() {
         } catch (metricsError) {
           console.error('Metrics processing error:', metricsError);
           if (metricsError instanceof Error) {
-            console.error('Error stack:', metricsError.stack);
+          console.error('Error stack:', metricsError.stack);
           }
           console.error('Result object that caused error:', JSON.stringify(result, null, 2));
           setStatusMessage('❌ Metrik işleme hatası');
@@ -1470,7 +1542,7 @@ export default function CameraPPGAnalyzer() {
     if (fsmRef.current !== 'idle') {
       // Tek kapıdan durdur
       await stopAnalysisFSM('manual');
-      return;
+            return;
     }
     
     // Tek kapıdan başlat  
@@ -1482,7 +1554,7 @@ export default function CameraPPGAnalyzer() {
     if (isAnalyzing && pendingActivateRef.current && hasPermission && device) {
       console.log('🟢 Device ready after permission; activating camera');
       pendingActivateRef.current = false;
-      setIsActive(true);
+          setIsActive(true);
       setStatusMessage('Analiz başlatıldı');
     }
   }, [isAnalyzing, hasPermission, device]);
@@ -1525,6 +1597,19 @@ export default function CameraPPGAnalyzer() {
 
     return () => subscription?.remove();
   }, [stopAnalysisFSM, lockCameraSettings, device, torchOn, torchLevel, cameraLockEnabled, logTelemetryEvent]);
+
+  // ✅ P1 FIX: Unmount safety - guarantee proper cleanup
+  useEffect(() => {
+    return () => {
+      // ✅ Ensure clean stop on unmount (torch/camera/analyzer cleanup)
+      if (fsmRef.current !== 'idle') {
+        console.log('🔴 Component unmounting - forcing clean stop');
+        stopAnalysisFSM('unmount').catch(() => {
+          console.error('Failed to stop FSM on unmount');
+        });
+      }
+    };
+  }, [stopAnalysisFSM]);
 
   // ✅ PHASE 1: Watchdog timer - stall detection
   useEffect(() => {
@@ -1586,7 +1671,10 @@ export default function CameraPPGAnalyzer() {
             frameProcessor={isActive ? frameProcessor : undefined}
             // ✅ P1 FIX: Single camera authority - only Android uses VisionCamera props
             {...(Platform.OS === 'android' ? { fps: targetFps } : {})}
-            torch={device?.hasTorch && torchOn ? 'on' : 'off'}
+            // ✅ CRITICAL: iOS torch controlled by PPGCameraManager, Android by VisionCamera
+            {...(Platform.OS === 'android' 
+              ? { torch: device?.hasTorch && torchOn ? 'on' : 'off' }
+              : {})} 
             // ✅ iOS: PPGCameraManager controls everything, Android: VisionCamera props
             {...(Platform.OS === 'android' && cameraLockEnabled && lockExposure ? { 
               exposure: lockExposure 
@@ -1626,7 +1714,7 @@ export default function CameraPPGAnalyzer() {
 
       {/* Durum */}
       <Text style={styles.status}>{statusMessage}</Text>
-
+      
       {/* Durum Özeti - FSM State + Güven Skoru */}
       <View style={styles.infoRow}>
         <Text style={styles.infoText}>
@@ -1695,9 +1783,9 @@ export default function CameraPPGAnalyzer() {
           {/* PPG Value Range & Peak Stats */}
           {ppgSignal.length > 10 && (
             <>
-              <Text style={styles.rangeText}>
-                Range: {String(Math.min(...ppgSignal).toFixed(0))} - {String(Math.max(...ppgSignal).toFixed(0))}
-              </Text>
+            <Text style={styles.rangeText}>
+              Range: {String(Math.min(...ppgSignal).toFixed(0))} - {String(Math.max(...ppgSignal).toFixed(0))}
+            </Text>
               <Text style={styles.peakStatsText}>
                 📳 Haptic Peaks: {hapticPeakCount} | ⚠️ Skipped: {missedPeakCount} | 
                 Success Rate: {hapticPeakCount > 0 ? `${Math.round((hapticPeakCount / (hapticPeakCount + missedPeakCount)) * 100)}%` : '—'}
@@ -1724,12 +1812,12 @@ export default function CameraPPGAnalyzer() {
           {/* Tab Content */}
           {metricsTab === 'Özet' && (
             <View>
-              <View style={styles.metricsGrid}>
-                <View style={styles.metricBox}>
-                  <Text style={styles.metricValue}>{String(metrics.bpm?.toFixed?.(0) ?? '—')}</Text>
-                  <Text style={styles.metricLabel}>BPM</Text>
-                </View>
-                <View style={styles.metricBox}>
+          <View style={styles.metricsGrid}>
+            <View style={styles.metricBox}>
+              <Text style={styles.metricValue}>{String(metrics.bpm?.toFixed?.(0) ?? '—')}</Text>
+              <Text style={styles.metricLabel}>BPM</Text>
+            </View>
+            <View style={styles.metricBox}>
                   <Text style={styles.metricValue}>
                     {useUnifiedConfidence ? 
                       `${String((getEffectiveConfidence(metrics.quality) * 100).toFixed(0))}%ᵁ` :
@@ -1738,12 +1826,12 @@ export default function CameraPPGAnalyzer() {
                   <Text style={styles.metricLabel}>
                     {useUnifiedConfidence ? 'Unified Güven' : 'Base Güven'}
                   </Text>
-                </View>
-                <View style={styles.metricBox}>
+            </View>
+            <View style={styles.metricBox}>
                   <Text style={styles.metricValue}>{String(metrics.quality?.snrDb?.toFixed?.(1) ?? '—')}</Text>
-                  <Text style={styles.metricLabel}>SNR dB</Text>
-                </View>
-              </View>
+              <Text style={styles.metricLabel}>SNR dB</Text>
+            </View>
+          </View>
               <View style={styles.grid2col}>
                 <Text style={styles.detailItem}><Text style={styles.detailKey}>Nefes:</Text> {String(metrics.breathingRate?.toFixed?.(2) ?? '—')} Hz</Text>
                 <Text style={styles.detailItem}><Text style={styles.detailKey}>LF/HF:</Text> {String(metrics.lfhf?.toFixed?.(2) ?? '—')}</Text>
@@ -1761,7 +1849,7 @@ export default function CameraPPGAnalyzer() {
               <Text style={styles.detailItem}><Text style={styles.detailKey}>NN20:</Text> {String((metrics as any)?.nn20?.toFixed?.(0) ?? '—')}</Text>
               <Text style={styles.detailItem}><Text style={styles.detailKey}>NN50:</Text> {String((metrics as any)?.nn50?.toFixed?.(0) ?? '—')}</Text>
               <Text style={styles.detailItem}><Text style={styles.detailKey}>MAD:</Text> {String((metrics as any)?.mad?.toFixed?.(1) ?? '—')}</Text>
-            </View>
+          </View>
           )}
 
           {metricsTab === 'Frekans' && (
@@ -1784,7 +1872,7 @@ export default function CameraPPGAnalyzer() {
               <Text style={styles.detailItem}><Text style={styles.detailKey}>Red Oranı:</Text> {String(((metrics.quality?.rejectionRate ?? 0) * 100).toFixed(0))}%</Text>
               <Text style={styles.detailItem}>
                 <Text style={styles.detailKey}>Base Confidence:</Text> {String(((metrics.quality?.confidence ?? 0) * 100).toFixed(0))}%
-              </Text>
+                    </Text>
               {useUnifiedConfidence && (
                 <>
                   <Text style={styles.detailItem}>
@@ -1900,9 +1988,9 @@ export default function CameraPPGAnalyzer() {
                       <Text style={styles.detailKey}>Signal History:</Text> {signalQualityHistoryRef.current.length}
                     </Text>
                   </>
-                )}
-              </View>
-            </View>
+                  )}
+                </View>
+                </View>
           )}
         </View>
       )}
