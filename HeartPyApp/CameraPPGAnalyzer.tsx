@@ -970,6 +970,18 @@ export default function CameraPPGAnalyzer() {
       const pending = pendingSamplesRef.current;
       console.log(`📥 Pushing ${pending.length} samples to C++ analyzer`);
       
+      // ✅ DEBUG: Sample değerlerini kontrol et
+      if (pending.length > 0) {
+        const sampleStats = {
+          min: Math.min(...pending),
+          max: Math.max(...pending),
+          mean: pending.reduce((a, b) => a + b, 0) / pending.length,
+          first5: pending.slice(0, 5),
+          last5: pending.slice(-5)
+        };
+        console.log('📊 SAMPLE STATS:', sampleStats);
+      }
+      
       if (pending.length > 0) {
         const samplesArray = new Float32Array(pending);
         // Validate samples array
@@ -1019,6 +1031,19 @@ export default function CameraPPGAnalyzer() {
           'Result Type': typeof result.bpm,
           'Is Finite': isFinite(result.bpm || 0)
         });
+        
+        // ✅ DEBUG: Daha detaylı quality log'u
+        if ((result as any).quality) {
+          console.log('📊 DETAILED QUALITY:', JSON.stringify((result as any).quality, null, 2));
+        }
+        
+        // ✅ DEBUG: Tüm result'u da logla (çok detaylı)
+        console.log('📋 FULL RESULT:', JSON.stringify(result, (key, value) => {
+          if (Array.isArray(value) && value.length > 10) {
+            return `[Array(${value.length})]`;
+          }
+          return value;
+        }, 2));
         
         try {
           // C++ NATIVE BPM'İNİ AYNEN KULLAN - HİÇ DEĞİŞTİRME!

@@ -329,10 +329,13 @@
                                                         object:nil
                                                       userInfo:userInfo];
     
-    // Debug log periodically
-    if (notificationCount % 120 == 0) {
-      NSLog(@"📸 PPGMeanPlugin posted notification #%d with value: %.1f", notificationCount, mean);
-    }
+  // Debug log periodically
+  if (notificationCount % 30 == 0) {  // ✅ Daha sık log (her 30 frame'de bir)
+    NSLog(@"📸 PPGMeanPlugin posted notification #%d with value: %.1f, confidence: %.2f, outSample: %.1f", 
+          notificationCount, mean, outConfidence, outSample);
+    NSLog(@"   📊 weightedSum: %.1f, weightTotal: %.1f, chromVal: %.1f, mode: %@", 
+          weightedSum, weightTotal, chromVal, mode);
+  }
   } @catch (__unused id e) {}
   return @(outSample);
 }
