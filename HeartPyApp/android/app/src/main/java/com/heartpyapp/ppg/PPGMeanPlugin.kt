@@ -92,7 +92,7 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
         for (gx in 0 until grid) {
           val px0 = startX + gx * patchW
           val py0 = startY + gy * patchH
-          val px1 = if (gx == grid - 1) startX + roiH else px0 + patchW // note: roiH vs roiW bug guard below
+          val px1 = if (gx == grid - 1) startX + roiW else px0 + patchW
           val py1 = if (gy == grid - 1) startY + roiH else py0 + patchH
           var sR = 0.0; var sG = 0.0; var sB = 0.0; var sY = 0.0; var cntD = 0.0
           val px1c = (startX + roiW).coerceAtMost(px1)
@@ -271,7 +271,19 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       // Publish sample + ts (seconds) to native buffer
       if (outVal.isFinite()) {
         try {
-          val tsSec = try { frame.timestamp.toDouble() / 1_000_000_000.0 } catch (_: Throwable) { System.nanoTime().toDouble() / 1_000_000_000.0 }
+          // Frame timestamp'i kullan, yoksa system time kullan
+          val tsNanos = try { 
+            frame.timestamp 
+          } catch (_: Throwable) { 
+            System.nanoTime() 
+          }
+          val tsSec = tsNanos.toDouble() / 1_000_000_000.0
+          
+          // Debug: Her 30 frame'de bir timestamp log'la
+          if (histCount % 30 == 0) {
+            android.util.Log.d("PPGPlugin", "PPG value: $outVal, ts: $tsSec, conf: $outConf")
+          }
+          
           HeartPyModule.addPPGSampleWithTs(outVal, tsSec)
         } catch (_: Throwable) {}
       }

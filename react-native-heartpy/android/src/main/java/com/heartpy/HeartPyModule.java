@@ -156,6 +156,8 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
 
     // Cross-platform PPG buffer (Android parity with iOS notification path)
     private static final ConcurrentLinkedQueue<Double> PPG_BUFFER = new ConcurrentLinkedQueue<>();
+    private static final ConcurrentLinkedQueue<Double> PPG_TS_BUFFER = new ConcurrentLinkedQueue<>();
+    
     public static void addPPGSample(double value) {
         try {
             if (Double.isNaN(value) || Double.isInfinite(value)) return;
@@ -163,6 +165,23 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             // Keep last ~300 samples
             while (PPG_BUFFER.size() > 300) {
                 PPG_BUFFER.poll();
+            }
+        } catch (Throwable ignore) {}
+    }
+    
+    // Timestamp'li PPG sample ekleme metodu (PPGMeanPlugin tarafından kullanılıyor)
+    public static void addPPGSampleWithTs(double value, double timestamp) {
+        try {
+            if (Double.isNaN(value) || Double.isInfinite(value)) return;
+            if (Double.isNaN(timestamp) || Double.isInfinite(timestamp)) return;
+            PPG_BUFFER.add(value);
+            PPG_TS_BUFFER.add(timestamp);
+            // Keep last ~300 samples
+            while (PPG_BUFFER.size() > 300) {
+                PPG_BUFFER.poll();
+            }
+            while (PPG_TS_BUFFER.size() > 300) {
+                PPG_TS_BUFFER.poll();
             }
         } catch (Throwable ignore) {}
     }
@@ -192,6 +211,35 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             promise.resolve(out);
         } catch (Throwable t) {
             promise.reject("ppg_buffer_error", t);
+        }
+    }
+    
+    // Timestamp'li PPG sample'ları okuma (iOS ile uyumluluk için)
+    @ReactMethod
+    public void getLatestPPGSamplesTs(Promise promise) {
+        try {
+            final WritableArray samples = Arguments.createArray();
+            final WritableArray timestamps = Arguments.createArray();
+            int drained = 0;
+            
+            // Senkronize şekilde oku
+            while (true) {
+                final Double v = PPG_BUFFER.poll();
+                final Double ts = PPG_TS_BUFFER.poll();
+                if (v == null || ts == null) break;
+                samples.pushDouble(v);
+                timestamps.pushDouble(ts);
+                drained++;
+                if (drained >= 1000) break; // safety cap
+            }
+            
+            // iOS ile aynı format
+            final com.facebook.react.bridge.WritableMap result = Arguments.createMap();
+            result.putArray("samples", samples);
+            result.putArray("timestamps", timestamps);
+            promise.resolve(result);
+        } catch (Throwable t) {
+            promise.reject("ppg_buffer_ts_error", t);
         }
     }
 

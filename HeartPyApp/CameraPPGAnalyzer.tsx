@@ -18,14 +18,19 @@ import {
 // Haptics is optional; load lazily to avoid crash if native module is missing
 let OptionalHaptics: any | null = null;
 function getHaptics(): any | null {
-  if (OptionalHaptics !== null) return OptionalHaptics;
+  if (OptionalHaptics !== null) {
+    console.log('🎯 Haptics already loaded:', !!OptionalHaptics);
+    return OptionalHaptics;
+  }
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const mod = require('react-native-haptic-feedback');
     OptionalHaptics = mod && (mod.default ? mod.default : mod);
+    console.log('🎯 Haptics loaded successfully:', !!OptionalHaptics);
+    console.log('🎯 Haptics methods:', OptionalHaptics ? Object.keys(OptionalHaptics) : 'none');
   } catch (e) {
     OptionalHaptics = null;
-    console.warn('react-native-haptic-feedback not available; skipping haptics');
+    console.error('🚨 react-native-haptic-feedback not available:', e);
   }
   return OptionalHaptics;
 }
@@ -124,15 +129,20 @@ export default function CameraPPGAnalyzer() {
   const [rawResult, setRawResult] = useState<any | null>(null);
   const [statusMessage, setStatusMessage] = useState('Kamerayı başlatmak için butona basın');
   const [lastBeatCount, setLastBeatCount] = useState(0);
-  const [hapticEnabled, setHapticEnabled] = useState(true); // Fixed ON
+  const hapticEnabled = true; // Always ON - no state needed
+  const [lastPeakIndices, setLastPeakIndices] = useState<number[]>([]);  // Peak takibi için
+  const [hapticPeakCount, setHapticPeakCount] = useState(0);  // Haptic tetiklenen peak sayısı
+  const [missedPeakCount, setMissedPeakCount] = useState(0);  // Atlanan peak sayısı
   const [torchOn, setTorchOn] = useState(false); // Auto-controlled
   const [useNativePPG, setUseNativePPG] = useState(true); // Fixed ON - ONLY REAL PPG DATA
   const [roi, setRoi] = useState(0.4); // Fixed optimal
-  const [ppgChannel, setPpgChannel] = useState<'green' | 'red' | 'luma'>('red'); // Fixed optimal for PPG
-  const [ppgMode, setPpgMode] = useState<'mean' | 'chrom' | 'pos'>('mean'); // Fixed optimal
+  // Use green + chrom for improved SNR and robustness
+  const [ppgChannel, setPpgChannel] = useState<'green' | 'red' | 'luma'>('green');
+  const [ppgMode, setPpgMode] = useState<'mean' | 'chrom' | 'pos'>('chrom');
   const [ppgGrid, setPpgGrid] = useState<1 | 2 | 3>(1); // Fixed optimal
   const [pluginConfidence, setPluginConfidence] = useState<number>(0);
-  const [autoSelect, setAutoSelect] = useState(true); // Fixed ON
+  const [autoSelect, setAutoSelect] = useState(false); // Face mode disabled; keep blend OFF
+  const [metricsTab, setMetricsTab] = useState<'Özet' | 'Zaman' | 'Frekans' | 'Kalite' | 'Ham'>('Özet');
   // Removed UI control states
 
   // Load/save persistent settings (best-effort)
@@ -164,13 +174,9 @@ export default function CameraPPGAnalyzer() {
     })();
   }, [autoSelect, ppgChannel, ppgMode, ppgGrid, roi]);
   
-  // Derived: blended final confidence (0..1)
-  const finalConfidence = (() => {
-    const m = metrics?.confidence ?? 0;
-    const p = pluginConfidence ?? 0;
-    return Math.max(0, Math.min(1, 0.5 * m + 0.5 * p));
-  })();
-  const confColor = finalConfidence >= 0.7 ? '#4CAF50' : finalConfidence >= 0.4 ? '#FB8C00' : '#f44336';
+  // UI confidence indicator strictly from C++: quality.confidence
+  const cppConfidence = Math.max(0, Math.min(1, metrics?.quality?.confidence ?? 0));
+  const confColor = cppConfidence >= 0.7 ? '#4CAF50' : cppConfidence >= 0.4 ? '#FB8C00' : '#f44336';
 
   const device = useCameraDevice('back', {
     physicalDevices: ['wide-angle-camera'],
@@ -193,8 +199,8 @@ export default function CameraPPGAnalyzer() {
   const [targetFps, setTargetFps] = useState(30); // Optimal FPS for PPG
   const [analyzerFs, setAnalyzerFs] = useState(30); // matched to targetFps
   const samplingRate = analyzerFs; // keep analyzer in sync with actual fps
-  const bufferSize = samplingRate * 5; // 5 saniye buffer
-  const analysisInterval = 1000; // 1 saniyede bir analiz
+  const bufferSize = samplingRate * 15; // 15 saniye buffer - daha stabil BPM için
+  const analysisInterval = 1000; // 1000ms'de bir analiz - STABİL sonuçlar için
   
   const frameBufferRef = useRef<number[]>([]);
   const lastAnalysisTimeRef = useRef<number>(0);
@@ -205,6 +211,8 @@ export default function CameraPPGAnalyzer() {
   const torchOnTimeRef = useRef<number | null>(null);
   const preTorchFramesRef = useRef<number>(0);
   const warnedJSIFallbackRef = useRef(false);
+  const lastHapticTimeRef = useRef<number>(0);  // Haptic feedback zamanlaması için
+  const testHapticIntervalRef = useRef<any>(null);  // Test haptic interval
 
   // VisionCamera frame processor plugin initialized on JS thread
   const ppgPluginRef = useRef<any>(null);
@@ -240,8 +248,6 @@ export default function CameraPPGAnalyzer() {
 
   // Trigger haptic feedback for each heartbeat
   const triggerHapticForBeat = useCallback(() => {
-    if (!hapticEnabled) return;
-    
     try {
       const Haptics = getHaptics();
       if (!Haptics) return;
@@ -254,7 +260,7 @@ export default function CameraPPGAnalyzer() {
     } catch (error) {
       console.warn('Haptic feedback error:', error);
     }
-  }, [hapticEnabled]);
+  }, []);
 
   // Stable JS handler for frame processor errors (avoid inline runOnJS closures)
   const onFrameError = useCallback((message: string) => {
@@ -297,53 +303,7 @@ export default function CameraPPGAnalyzer() {
   // Global communication - worklet ↔ main thread
   const globalFrameCounter = useRef(0);
   
-  // Native module polling for real PPG data - practical UI solution
-  useEffect(() => {
-    if (!isActive || !useNativePPG) return;
-    
-    const pollingInterval = setInterval(async () => {
-      try {
-        // Direct native module call for PPG buffer
-        const samples = await NativeModules.HeartPyModule?.getLatestPPGSamples?.();
-        
-        if (samples && Array.isArray(samples) && samples.length > 0) {
-          // Update UI with real PPG data
-          const latestSamples = samples.slice(-10); // Last 10 samples
-          
-          latestSamples.forEach(sample => {
-            const val = typeof sample === 'number' ? sample : parseFloat(sample);
-            if (isFinite(val)) {
-              frameBufferRef.current.push(val);
-              if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
-              // Queue for incremental streaming
-              pendingSamplesRef.current.push(val);
-              if (pendingSamplesRef.current.length > bufferSize) {
-                pendingSamplesRef.current.splice(0, pendingSamplesRef.current.length - bufferSize);
-              }
-            }
-          });
-          
-          setPpgSignal(prev => {
-            const validSamples = latestSamples.filter(s => isFinite(parseFloat(s)));
-            const next = [...prev, ...validSamples.map(s => parseFloat(s))];
-            if (next.length > 100) return next.slice(-100);
-            return next;
-          });
-          
-          // Periodic log only
-          if ((globalFrameCounter.current || 0) % 120 === 0) {
-            console.log(`PPG poll: +${latestSamples.length}, frameBuf=${frameBufferRef.current.length}`);
-          }
-        } else {
-          // Quiet when empty
-        }
-      } catch (pollError) {
-        if ((globalFrameCounter.current || 0) % 240 === 0) console.error('PPG polling error:', pollError);
-      }
-    }, 300); // ~3 Hz polling for UI responsiveness
-    
-    return () => clearInterval(pollingInterval);
-  }, [isActive, useNativePPG, bufferSize]);
+  // (removed) legacy duplicate polling effect; consolidated below with confidence/timestamps
 
   // Frame işleme - minimal logs
   const frameProcessor = useFrameProcessor((frame) => {
@@ -357,7 +317,7 @@ export default function CameraPPGAnalyzer() {
         
         if (plugin != null && frame != null) {
           try {
-            const v = plugin.call(frame, { roi, channel: ppgChannel, step: 2, mode: ppgMode, grid: ppgGrid, blend: autoSelect ? 'auto' : 'off', torch: !!torchOn }) as number;
+            const v = plugin.call(frame, { roi, channel: ppgChannel, step: 2, mode: ppgMode, grid: ppgGrid, blend: 'off', torch: !!torchOn }) as number;
             // Native data flow handled in-platform; no per-frame logs
           } catch (pluginError) {
             if (globalFrameCounter.current % 240 === 0) {
@@ -387,19 +347,26 @@ export default function CameraPPGAnalyzer() {
           NativeModules.HeartPyModule?.getLatestPPGSamplesTs?.() ?? NativeModules.HeartPyModule?.getLatestPPGSamples?.(),
           NativeModules.HeartPyModule?.getLastPPGConfidence?.(),
         ]);
-        if (typeof conf === 'number' && isFinite(conf)) setPluginConfidence(conf);
+        let confVal = 0;
+        if (typeof conf === 'number' && isFinite(conf)) {
+          setPluginConfidence(conf);
+          confVal = conf;
+        }
         let latestSamples: number[] = [];
         let latestTs: number[] | null = null;
         if (pack && Array.isArray(pack)) {
-          latestSamples = (pack as any[]).slice(-10).map(s => (typeof s === 'number' ? s : parseFloat(s))).filter((v: any) => isFinite(v));
+          latestSamples = (pack as any[]).slice(-20).map(s => (typeof s === 'number' ? s : parseFloat(s))).filter((v: any) => isFinite(v));
         } else if (pack && typeof pack === 'object') {
           const xs = Array.isArray(pack.samples) ? pack.samples : [];
           const ts = Array.isArray(pack.timestamps) ? pack.timestamps : [];
           const k = Math.min(xs.length, ts.length);
-          latestSamples = xs.slice(-10).map((s: any) => (typeof s === 'number' ? s : parseFloat(s))).filter((v: any) => isFinite(v));
-          latestTs = ts.slice(-10).map((t: any) => (typeof t === 'number' ? t : parseFloat(t))).filter((v: any) => isFinite(v));
+          latestSamples = xs.slice(-20).map((s: any) => (typeof s === 'number' ? s : parseFloat(s))).filter((v: any) => isFinite(v));
+          latestTs = ts.slice(-20).map((t: any) => (typeof t === 'number' ? t : parseFloat(t))).filter((v: any) => isFinite(v));
         }
-        if (latestSamples.length > 0) {
+        // Confidence-based gating - çok düşük threshold (neredeyse her zaman geç)
+        const GATE = 0.05;  // Çok düşük threshold, hemen başla
+        const gateOK = confVal >= GATE || latestSamples.length > 0;  // Veri varsa her zaman işle
+        if (latestSamples.length > 0 && gateOK) {
           // Update UI and incremental queue
           latestSamples.forEach((val, i) => {
             frameBufferRef.current.push(val);
@@ -409,12 +376,14 @@ export default function CameraPPGAnalyzer() {
           });
           setPpgSignal(prev => {
             const next = [...prev, ...latestSamples];
-            if (next.length > 100) return next.slice(-100);
-            return next;
+            const trimmed = next.length > 150 ? next.slice(-150) : next;
+            // Haptic tetiği yalnızca C++ analizindeki beat artışına göre verilir (aşağıda)
+            
+            return trimmed;
           });
           // If timestamps available and analyzer supports, push with timestamps now (optional)
           try {
-            if (latestTs && latestTs.length === latestSamples.length && analyzerRef.current?.pushWithTimestamps) {
+            if (latestTs && latestTs.length === latestSamples.length && analyzerRef.current?.pushWithTimestamps && gateOK) {
               const xs = new Float32Array(latestSamples);
               const ts = new Float64Array(latestTs);
               await analyzerRef.current.pushWithTimestamps(xs, ts);
@@ -425,7 +394,7 @@ export default function CameraPPGAnalyzer() {
       } catch (e) {
         // occasional polling errors are non-fatal
       }
-    }, 300);
+    }, 200);  // 200ms - STABIL polling interval
     return () => clearInterval(pollingInterval);
   }, [isActive, useNativePPG, bufferSize]);
 
@@ -443,7 +412,9 @@ export default function CameraPPGAnalyzer() {
       }
 
       const now = Date.now();
-      if (now - lastAnalysisTimeRef.current > analysisInterval && frameBufferRef.current.length >= samplingRate * 3) {
+      // En az 8 saniye veri toplandıktan sonra analiz başlat (STABIL BPM için)
+      const minBufferSize = samplingRate * 8;  // 8 saniye minimum veri - stabil sonuçlar
+      if (now - lastAnalysisTimeRef.current > analysisInterval && frameBufferRef.current.length >= minBufferSize) {
         lastAnalysisTimeRef.current = now;
         performRealtimeAnalysis();
       }
@@ -452,15 +423,26 @@ export default function CameraPPGAnalyzer() {
     return () => clearInterval(uiUpdateTimer);
   }, [isActive, analysisInterval, samplingRate, bufferSize, useNativePPG]);
 
+  // Test haptic devre dışı: Haptic sadece C++ beat artışında tetiklenir
+
   // (removed) exposure badge derivation; consider dynamic gate later
+
+  // Face mode disabled: always run red + mean (contact PPG).
 
   // Real-time analiz - incremental streaming push + metric poll
   const performRealtimeAnalysis = async () => {
-    if (!analyzerRef.current) return;
+    if (!analyzerRef.current) {
+      console.log('⚠️ Analyzer not initialized!');
+      return;
+    }
 
+    console.log('🔄 Starting realtime analysis...');
+    
     try {
       // Push only new samples accumulated since last call
       const pending = pendingSamplesRef.current;
+      console.log(`📥 Pushing ${pending.length} samples to C++ analyzer`);
+      
       if (pending.length > 0) {
         const samplesArray = new Float32Array(pending);
         // Validate samples array
@@ -469,6 +451,7 @@ export default function CameraPPGAnalyzer() {
         } else {
           try {
             await analyzerRef.current.push(samplesArray);
+            console.log('✅ Samples pushed to C++ analyzer successfully');
           } catch (pushError) {
             console.error('Native analyzer push failed:', pushError);
             setStatusMessage('❌ Native analyzer push hatası');
@@ -482,64 +465,84 @@ export default function CameraPPGAnalyzer() {
       // Metrikleri al - defensive native call
       let result;
       try {
+        console.log('🔍 Polling C++ analyzer for results...');
         result = await analyzerRef.current.poll();
+        console.log('✅ C++ analyzer poll successful');
       } catch (pollError) {
-        console.error('Native analyzer poll failed:', pollError);
+        console.error('🔥 Native analyzer poll failed:', pollError);
         setStatusMessage('❌ Native analyzer poll hatası');
         return;
       }
       
       if (result && typeof result === 'object') {
         try { setRawResult(result as any); } catch {}
+        
+        // Debug: Native analyzer sonuçlarını logla
+        console.log('🔥 NATIVE C++ ANALYZER RESULT:', {
+          'C++ BPM': result.bpm,
+          'RR Count': Array.isArray(result.rrList) ? result.rrList.length : 0,
+          'Peak Count': Array.isArray(result.peakList) ? result.peakList.length : 0,
+          'C++ Confidence': (result as any).quality?.confidence,
+          'C++ SNR': (result as any).quality?.snrDb,
+          'Total Beats': (result as any).quality?.totalBeats,
+          'Result Type': typeof result.bpm,
+          'Is Finite': isFinite(result.bpm || 0)
+        });
+        
         try {
-          const newMetrics: PPGMetrics = {
-            bpm: typeof result.bpm === 'number' ? result.bpm : 0,
-            confidence: (result as any).quality?.confidence ?? 0,
-            snrDb: (result as any).quality?.snrDb ?? 0,
-            rmssd: typeof result.rmssd === 'number' ? result.rmssd : 0,
-            sdnn: typeof result.sdnn === 'number' ? result.sdnn : 0,
-            sdsd: typeof result.sdsd === 'number' ? result.sdsd : 0,
-            pnn50: typeof result.pnn50 === 'number' ? result.pnn50 : 0,
-            lfhf: typeof result.lfhf === 'number' ? result.lfhf : 0,
-            breathingRate: typeof result.breathingRate === 'number' ? result.breathingRate : 0,
-            quality: result.quality || { goodQuality: false, totalBeats: 0, rejectedBeats: 0, rejectionRate: 0 },
-          };
+          // C++ NATIVE BPM'İNİ AYNEN KULLAN - HİÇ DEĞİŞTİRME!
+          const calculatedBpm = typeof result.bpm === 'number' ? result.bpm : 0;
           
-          setMetrics(newMetrics);
+          console.log(`🎯 C++ Native BPM (değiştirilmeden): ${calculatedBpm.toFixed(1)}`);
           
-        // Check for new beats and trigger haptic feedback
-        const currentBeatCount = newMetrics.quality.totalBeats;
+          const newMetrics: any = result;
+          
+          // C++ BPM AYNEN KULLANILIYOR - HİÇ DEĞİŞİKLİK YOK
+          console.log(`✅ UI'da gösterilecek BPM: ${calculatedBpm.toFixed(1)} (C++ orijinal değeri)`);
+          
+          setMetrics(newMetrics as PPGMetrics);
+          
+        // C++ analizindeki beat artışına göre haptic feedback
+        const currentBeatCount = (newMetrics as any).quality?.totalBeats ?? 0;
         if (currentBeatCount > lastBeatCount) {
-          // New beat detected! Trigger haptic feedback
-          const newBeats = currentBeatCount - lastBeatCount;
-          console.log(`💓 ${newBeats} new beat(s) detected! Total: ${currentBeatCount}`);
-          
-          // Immediate haptic trigger for new beats
-          if (hapticEnabled) {
+          const now = Date.now();
+          const refractoryMs = 250; // darbeler arası min süre
+          if (!lastHapticTimeRef.current || now - lastHapticTimeRef.current >= refractoryMs) {
             try {
               const Haptics = getHaptics();
               if (Haptics) {
-                Haptics.trigger('impactMedium', hapticOptions);
-                console.log(`📳 Haptic triggered for beat ${currentBeatCount}`);
-              } else {
-                console.log('📳 Haptic module not available');
+                Haptics.trigger(Platform.OS === 'ios' ? 'impactLight' : 'impactMedium', hapticOptions);
+                setHapticPeakCount(prev => prev + 1);
               }
-            } catch (e) {
-              console.error('Haptic error:', e);
-            }
+            } catch {}
+            lastHapticTimeRef.current = now;
+          } else {
+            setMissedPeakCount(prev => prev + 1);
           }
         }
-        setLastBeatCount(currentBeatCount);
+        
+        // Peak listesini güncelle (görsel için)
+        if (Array.isArray(result.peakList) && result.peakList.length > 0) {
+          setLastPeakIndices(result.peakList.slice(-100));
+        }
+        
+        // Beat count değişimi logu
+        if (currentBeatCount > lastBeatCount) {
+          console.log(`💓 ${currentBeatCount - lastBeatCount} new beat(s)! Total: ${currentBeatCount}`);
+          setLastBeatCount(currentBeatCount);
+        }
           
           // Status mesajını güncelle
-          if (newMetrics.quality.goodQuality) {
+          if ((newMetrics as any).quality?.goodQuality) {
             setStatusMessage(`✅ Kaliteli sinyal - BPM: ${newMetrics.bpm?.toFixed?.(0) ?? '—'} 💓 ${String(currentBeatCount)} beat`);
           } else {
-            setStatusMessage(`⚠️ Zayıf sinyal - ${newMetrics.quality.qualityWarning || 'Parmağınızı kameraya daha iyi yerleştirin'}`);
+            setStatusMessage(`⚠️ Zayıf sinyal - ${(newMetrics as any).quality?.qualityWarning || 'Parmağınızı kameraya daha iyi yerleştirin'}`);
           }
         } catch (metricsError) {
           console.error('Metrics processing error:', metricsError);
-          console.error('Error stack:', metricsError.stack);
+          if (metricsError instanceof Error) {
+            console.error('Error stack:', metricsError.stack);
+          }
           console.error('Result object that caused error:', JSON.stringify(result, null, 2));
           setStatusMessage('❌ Metrik işleme hatası');
         }
@@ -584,6 +587,8 @@ export default function CameraPPGAnalyzer() {
       setPpgSignal([]);
       setLastBeatCount(0);
       setFrameCount(0);
+      setHapticPeakCount(0);
+      setMissedPeakCount(0);
       setStatusMessage('Analiz durduruldu');
     } else {
       // Başlat
@@ -596,6 +601,8 @@ export default function CameraPPGAnalyzer() {
         setLastBeatCount(0);
         setFrameCount(0);
         setPpgSignal([]);
+        setHapticPeakCount(0);
+        setMissedPeakCount(0);
         setTorchOn(false);
 
         // Ensure permission first
@@ -642,13 +649,30 @@ export default function CameraPPGAnalyzer() {
           }
         } catch {}
         try {
+          // PPG sinyali için STABİL parametreler
           analyzerRef.current = await HP.RealtimeAnalyzer.create(fsForAnalyzer, {
-            bandpass: { lowHz: 0.7, highHz: 3.5, order: 2 },
-            welch: { nfft: 512, overlap: 0.5 },
-            peak: { refractoryMs: 320, thresholdScale: 0.6, bpmMin: 50, bpmMax: 150 },
-            preprocessing: { removeBaselineWander: true }
+            // Daha geniş bandpass - stabil sonuçlar için
+            bandpass: { lowHz: 0.4, highHz: 3.5, order: 2 },
+            // Daha büyük FFT - daha stabil frekans analizi
+            welch: { nfft: 2048, overlap: 0.75 },
+            // STABİL peak detection parametreleri
+            peak: { 
+              refractoryMs: 450,      // Daha konservatif - yanlış peak'leri önler
+              thresholdScale: 0.6,    // Daha yüksek threshold - stabil peak'ler
+              bpmMin: 50,             // Daha dar aralık - stabil BPM
+              bpmMax: 120             // Çok yüksek BPM'leri önle
+            },
+            preprocessing: { 
+              removeBaselineWander: true,
+              smoothingWindowMs: 100   // Daha fazla smoothing - stabil sinyal
+            },
+            // RR Temizleme - stabilite için kritik
+            quality: {
+              cleanRR: true,          // RR interval temizleme aktif
+              cleanMethod: 'iqr'      // IQR outlier removal
+            }
           });
-          console.log('Real native analyzer created successfully');
+          console.log('Real native analyzer created with optimized PPG parameters');
         } catch (createError) {
           console.error('Native analyzer creation failed:', createError);
           throw createError;
@@ -784,10 +808,10 @@ export default function CameraPPGAnalyzer() {
       {/* Durum Özeti - Sadece Güven Skoru */}
       <View style={styles.infoRow}>
         <Text style={styles.infoText}>
-          📊 PPG Analizi: {useNativePPG ? 'GERÇEKPPGPlugin' : 'KAPALI'} • FPS: {targetFps} • ROI: {roi} • 📳: {hapticEnabled ? 'ON' : 'OFF'}
+          📊 PPG Analizi: {useNativePPG ? 'GERÇEKPPGPlugin' : 'KAPALI'} • FPS: {targetFps} • ROI: {roi} • 📳: ON
         </Text>
         <View style={[styles.qualityPill, { backgroundColor: confColor }]}> 
-          <Text numberOfLines={1} style={styles.qualityPillText}>{Math.round(finalConfidence * 100)}%</Text>
+          <Text numberOfLines={1} style={styles.qualityPillText}>{Math.round((metrics?.quality?.confidence ?? 0) * 100)}%</Text>
         </View>
       </View>
 
@@ -801,15 +825,27 @@ export default function CameraPPGAnalyzer() {
             Frame: {frameCount} | Buffer: {frameBufferRef.current.length}
           </Text>
           
-          {/* Basit PPG Waveform Grafiği */}
+          {/* Gelişmiş PPG Waveform Grafiği - Peak'leri göster */}
           <View style={styles.waveformContainer}>
-            {ppgSignal.slice(-50).map((value, index) => {
+            {ppgSignal.slice(-50).map((value, index, array) => {
               // Normalize value to 0-100 height
               const minVal = Math.min(...ppgSignal);
               const maxVal = Math.max(...ppgSignal);
               const normalizedHeight = maxVal > minVal 
                 ? ((value - minVal) / (maxVal - minVal)) * 100 
                 : 50;
+              
+              // Peak detection for visualization
+              let isPeak = false;
+              if (index > 0 && index < array.length - 1) {
+                const prev = array[index - 1];
+                const next = array[index + 1];
+                const mean = array.reduce((a, b) => a + b, 0) / array.length;
+                const std = Math.sqrt(array.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / array.length);
+                const threshold = mean + 0.5 * std; // Same threshold as haptic
+                
+                isPeak = value > threshold && value > prev && value >= next;
+              }
               
               return (
                 <View
@@ -818,8 +854,10 @@ export default function CameraPPGAnalyzer() {
                     styles.waveformBar,
                     { 
                       height: Math.max(2, normalizedHeight),
-                      backgroundColor: normalizedHeight > 70 ? '#ff4444' : 
-                                     normalizedHeight > 40 ? '#ff8800' : '#44ff44'
+                      backgroundColor: isPeak ? '#ff0000' :  // Kırmızı: Peak
+                                     normalizedHeight > 70 ? '#ff6666' : 
+                                     normalizedHeight > 40 ? '#ffaa00' : '#66ff66',
+                      width: isPeak ? 4 : 3, // Peak'ler daha kalın
                     }
                   ]}
                 />
@@ -827,119 +865,103 @@ export default function CameraPPGAnalyzer() {
             })}
           </View>
           
-          {/* PPG Value Range */}
+          {/* PPG Value Range & Peak Stats */}
           {ppgSignal.length > 10 && (
-            <Text style={styles.rangeText}>
-              Range: {String(Math.min(...ppgSignal).toFixed(0))} - {String(Math.max(...ppgSignal).toFixed(0))}
-            </Text>
+            <>
+              <Text style={styles.rangeText}>
+                Range: {String(Math.min(...ppgSignal).toFixed(0))} - {String(Math.max(...ppgSignal).toFixed(0))}
+              </Text>
+              <Text style={styles.peakStatsText}>
+                📳 Haptic Peaks: {hapticPeakCount} | ⚠️ Skipped: {missedPeakCount} | 
+                Success Rate: {hapticPeakCount > 0 ? `${Math.round((hapticPeakCount / (hapticPeakCount + missedPeakCount)) * 100)}%` : '—'}
+              </Text>
+            </>
           )}
         </View>
       )}
 
       {/* Real-time Metrikler */}
-      {metrics && metrics.bpm != null && (
+      {metrics && (
         <View style={styles.metricsContainer}>
-          <Text style={styles.metricsTitle}>📊 Real-time Metrikler</Text>
-          
-          <View style={styles.metricsGrid}>
-            <View style={styles.metricBox}>
-              <Text style={styles.metricValue}>{String(metrics.bpm?.toFixed?.(0) ?? '—')}</Text>
-              <Text style={styles.metricLabel}>BPM</Text>
-            </View>
-            
-            <View style={styles.metricBox}>
-              <Text style={styles.metricValue}>{String(((metrics.confidence ?? 0) * 100).toFixed(0))}%</Text>
-              <Text style={styles.metricLabel}>Güven</Text>
-            </View>
-            
-            <View style={styles.metricBox}>
-              <Text style={styles.metricValue}>{String(metrics.snrDb?.toFixed?.(1) ?? '—')}</Text>
-              <Text style={styles.metricLabel}>SNR dB</Text>
-            </View>
+          <Text style={styles.metricsTitle}>📊 Metrikler</Text>
+
+          {/* Tabs */}
+          <View style={styles.tabBar}>
+            {(['Özet','Zaman','Frekans','Kalite','Ham'] as const).map(t => (
+              <TouchableOpacity key={t} style={[styles.tabBtn, metricsTab === t && styles.tabBtnActive]} onPress={() => setMetricsTab(t)}>
+                <Text style={[styles.tabText, metricsTab === t && styles.tabTextActive]}>{t}</Text>
+              </TouchableOpacity>
+            ))}
           </View>
 
-          <View style={styles.detailedMetrics}>
-            <Text style={styles.detailText}>RMSSD: {String(metrics.rmssd?.toFixed?.(1) ?? '—')} ms</Text>
-            <Text style={styles.detailText}>SDNN: {String(metrics.sdnn?.toFixed?.(1) ?? '—')} ms</Text>
-            <Text style={styles.detailText}>pNN50: {String(((metrics.pnn50 ?? 0) * 100).toFixed(1))}%</Text>
-            <Text style={styles.detailText}>LF/HF: {String(metrics.lfhf?.toFixed?.(2) ?? '—')}</Text>
-            <Text style={styles.detailText}>Nefes: {String(metrics.breathingRate?.toFixed?.(2) ?? '—')} Hz</Text>
-            <Text style={styles.detailText}>PPG Conf (plugin): {String(((pluginConfidence ?? 0) * 100).toFixed(0))}%</Text>
-            <Text style={styles.detailText}>
-              Final Güven: {String((
-                (0.5 * (metrics.confidence ?? 0) + 0.5 * (pluginConfidence ?? 0)) * 100
-              ).toFixed(0))}%
-            </Text>
-            <Text style={styles.detailText}>
-              Kalite: {String(metrics.quality.totalBeats)} atış, 
-              {String(metrics.quality.rejectedBeats)} reddedilen 
-              ({String((metrics.quality.rejectionRate * 100).toFixed(0))}%)
-            </Text>
-          </View>
+          {/* Tab Content */}
+          {metricsTab === 'Özet' && (
+            <View>
+              <View style={styles.metricsGrid}>
+                <View style={styles.metricBox}>
+                  <Text style={styles.metricValue}>{String(metrics.bpm?.toFixed?.(0) ?? '—')}</Text>
+                  <Text style={styles.metricLabel}>BPM</Text>
+                </View>
+                <View style={styles.metricBox}>
+                  <Text style={styles.metricValue}>{String(((metrics.quality?.confidence ?? 0) * 100).toFixed(0))}%</Text>
+                  <Text style={styles.metricLabel}>Güven</Text>
+                </View>
+                <View style={styles.metricBox}>
+                  <Text style={styles.metricValue}>{String(metrics.quality?.snrDb?.toFixed?.(1) ?? '—')}</Text>
+                  <Text style={styles.metricLabel}>SNR dB</Text>
+                </View>
+              </View>
+              <View style={styles.grid2col}>
+                <Text style={styles.detailItem}><Text style={styles.detailKey}>Nefes:</Text> {String(metrics.breathingRate?.toFixed?.(2) ?? '—')} Hz</Text>
+                <Text style={styles.detailItem}><Text style={styles.detailKey}>LF/HF:</Text> {String(metrics.lfhf?.toFixed?.(2) ?? '—')}</Text>
+              </View>
+            </View>
+          )}
 
-          {(() => {
-            try {
-              if (!rawResult) return null;
-              
-              return (
-                <View style={styles.detailedMetrics}>
-                  <Text style={styles.detailText}>📊 Detaylı Analiz Sonuçları</Text>
-                  
-                  {/* Safe BPM via RR */}
-                  {Array.isArray(rawResult?.rrList) && rawResult.rrList.length > 0 && (
-                    <Text style={styles.detailText}>
-                      BPM (RR): {(() => { 
-                        try {
-                          const rr = rawResult.rrList as number[]; 
-                          const mean = rr.reduce((a: number,b: number)=>a+b,0)/rr.length; 
-                          return String(isFinite(mean)&&mean>1e-6 ? (60000/mean).toFixed(0) : '—');
-                        } catch { return '—'; }
-                      })()}
-                    </Text>
-                  )}
-                  
-                  {/* Safe Time Domain */}
-                  {typeof rawResult?.sdsd === 'number' && (
-                    <Text style={styles.detailText}>SDSD: {String(rawResult.sdsd.toFixed(1))}</Text>
-                  )}
-                  {typeof rawResult?.pnn20 === 'number' && (
-                    <Text style={styles.detailText}>pNN20: {String((rawResult.pnn20 * 100).toFixed(1))}%</Text>
-                  )}
-                  {typeof rawResult?.nn20 === 'number' && (
-                    <Text style={styles.detailText}>NN20: {String(rawResult.nn20.toFixed(0))}</Text>
-                  )}
-                  {typeof rawResult?.nn50 === 'number' && (
-                    <Text style={styles.detailText}>NN50: {String(rawResult.nn50.toFixed(0))}</Text>
-                  )}
-                  {typeof rawResult?.mad === 'number' && (
-                    <Text style={styles.detailText}>MAD: {String(rawResult.mad.toFixed(1))}</Text>
-                  )}
-                  
-                  {/* Safe Poincaré */}
-                  {(typeof rawResult?.sd1 === 'number' || typeof rawResult?.sd2 === 'number') && (
-                    <Text style={styles.detailText}>
-                      SD1/SD2: {String((rawResult?.sd1 ?? 0).toFixed(1))} / {String((rawResult?.sd2 ?? 0).toFixed(1))}
-                    </Text>
-                  )}
-                  
-                  {/* Safe Quality Summary Only */}
-                  {rawResult?.quality && (
-                    <Text style={styles.detailText}>
-                      Kalite Özeti: {String(rawResult.quality.totalBeats ?? 0)} atış, 
-                      {String(rawResult.quality.rejectedBeats ?? 0)} reddedilen
-                    </Text>
-                  )}
-                </View>
-              );
-            } catch (error) {
-              console.error('Detailed metrics render error:', error);
-              return (
-                <View style={styles.detailedMetrics}>
-                  <Text style={styles.detailText}>⚠️ Detaylı metrikler yüklenemiyor</Text>
-                </View>
-              );
-            }
-          })()}
+          {metricsTab === 'Zaman' && (
+            <View style={styles.grid2col}>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>RMSSD:</Text> {String(metrics.rmssd?.toFixed?.(1) ?? '—')} ms</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>SDNN:</Text> {String(metrics.sdnn?.toFixed?.(1) ?? '—')} ms</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>SDSD:</Text> {String((metrics as any)?.sdsd?.toFixed?.(1) ?? '—')} ms</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>pNN50:</Text> {String(metrics.pnn50?.toFixed?.(1) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>pNN20:</Text> {String((metrics as any)?.pnn20?.toFixed?.(1) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>NN20:</Text> {String((metrics as any)?.nn20?.toFixed?.(0) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>NN50:</Text> {String((metrics as any)?.nn50?.toFixed?.(0) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>MAD:</Text> {String((metrics as any)?.mad?.toFixed?.(1) ?? '—')}</Text>
+            </View>
+          )}
+
+          {metricsTab === 'Frekans' && (
+            <View style={styles.grid2col}>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>VLF:</Text> {String((metrics as any)?.vlf?.toFixed?.(2) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>LF:</Text> {String((metrics as any)?.lf?.toFixed?.(2) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>HF:</Text> {String((metrics as any)?.hf?.toFixed?.(2) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>LF/HF:</Text> {String(metrics.lfhf?.toFixed?.(2) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>Toplam Güç:</Text> {String((metrics as any)?.totalPower?.toFixed?.(2) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>LF norm:</Text> {String((metrics as any)?.lfNorm?.toFixed?.(1) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>HF norm:</Text> {String((metrics as any)?.hfNorm?.toFixed?.(1) ?? '—')}</Text>
+            </View>
+          )}
+
+          {metricsTab === 'Kalite' && (
+            <View style={styles.grid2col}>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>İyi Kalite:</Text> {String(metrics.quality?.goodQuality ?? false)}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>Toplam Atış:</Text> {String(metrics.quality?.totalBeats ?? 0)}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>Reddedilen:</Text> {String(metrics.quality?.rejectedBeats ?? 0)}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>Red Oranı:</Text> {String(((metrics.quality?.rejectionRate ?? 0) * 100).toFixed(0))}%</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>Confidence:</Text> {String(((metrics.quality?.confidence ?? 0) * 100).toFixed(0))}%</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>SNR dB:</Text> {String(metrics.quality?.snrDb?.toFixed?.(1) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>f0 Hz:</Text> {String((metrics as any)?.quality?.f0Hz?.toFixed?.(2) ?? '—')}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>Uyarı:</Text> {String(metrics.quality?.qualityWarning ?? '—')}</Text>
+            </View>
+          )}
+
+          {metricsTab === 'Ham' && (
+            <View style={styles.grid2col}>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>RR Sayısı:</Text> {String(Array.isArray((metrics as any)?.rrList) ? (metrics as any).rrList.length : 0)}</Text>
+              <Text style={styles.detailItem}><Text style={styles.detailKey}>Peak Sayısı:</Text> {String(Array.isArray((metrics as any)?.peakList) ? (metrics as any).peakList.length : 0)}</Text>
+            </View>
+          )}
         </View>
       )}
     </ScrollView>
@@ -1124,11 +1146,43 @@ const styles = StyleSheet.create({
     marginTop: 4,
     textAlign: 'center',
   },
+  peakStatsText: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 4,
+    textAlign: 'center',
+    fontWeight: '600',
+  },
   metricsContainer: {
     backgroundColor: 'white',
     padding: 16,
     borderRadius: 12,
     marginBottom: 16,
+  },
+  tabBar: {
+    flexDirection: 'row',
+    backgroundColor: '#f0f0f0',
+    borderRadius: 8,
+    padding: 4,
+    marginBottom: 12,
+  },
+  tabBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabBtnActive: {
+    backgroundColor: '#ffffff',
+  },
+  tabText: {
+    fontSize: 12,
+    color: '#666',
+    fontWeight: '600',
+  },
+  tabTextActive: {
+    color: '#333',
   },
   metricsTitle: {
     fontSize: 18,
@@ -1147,6 +1201,21 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8f9fa',
     borderRadius: 8,
     minWidth: 80,
+  },
+  grid2col: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  detailItem: {
+    width: '48%',
+    fontSize: 13,
+    color: '#333',
+    marginBottom: 8,
+  },
+  detailKey: {
+    fontWeight: '600',
+    color: '#555',
   },
   metricValue: {
     fontSize: 24,
