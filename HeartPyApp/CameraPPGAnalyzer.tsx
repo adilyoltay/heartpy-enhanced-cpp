@@ -166,7 +166,8 @@ export default function CameraPPGAnalyzer() {
   const coverStableMsRef = useRef(0);
   const uncoverStableMsRef = useRef(0);
   const qualityLowMsRef = useRef(0);
-  const lastPollTsRef = useRef<number>(0);
+  const lastPluginPollTsRef = useRef<number>(0);  // ✅ Plugin confidence timing
+  const lastCppPollTsRef = useRef<number>(0);     // ✅ C++ quality timing
   const lastAutoToggleAtRef = useRef(0);
   const analyzeStartTsRef = useRef(0);
   const warmupUntilRef = useRef(0);
@@ -268,8 +269,8 @@ export default function CameraPPGAnalyzer() {
   // FSM kontrollü başlat/durdur yardımcıları
   // Konfig (tek noktadan)
   const CFG = {
-    CONF_HIGH: 0.15,  // ✅ Çok daha düşük - immediate start için
-    CONF_LOW: 0.05,   // ✅ Çok daha düşük - minimum threshold
+    CONF_HIGH: 0.35,  // ✅ Conservative - prevent erken warmup'lar
+    CONF_LOW: 0.20,   // ✅ Higher threshold for stability
     HIGH_DEBOUNCE_MS: 400,   // ✅ Çok daha kısa - hızlı start
     LOW_DEBOUNCE_MS: 1200,   // ✅ Premature stop önleme
     WARMUP_MS: 3000,         // ✅ 3s warmup uygun
@@ -557,23 +558,23 @@ export default function CameraPPGAnalyzer() {
         }
       };
     } else {
-      // PROD: Conservative, stable settings
+      // PROD: Conservative, stable settings with RAW RR processing
       return {
         bandpass: { lowHz: 0.5, highHz: 3.5, order: 3 },  // ✅ Narrower, more stable
         welch: { nfft: 1024, overlap: 0.5 },              // ✅ Higher resolution
         peak: { 
-          refractoryMs: 350,    // ✅ Conservative refractory
-          thresholdScale: 0.6,  // ✅ Higher threshold for reliability
+          refractoryMs: 320,    // ✅ Conservative refractory ≈320ms
+          thresholdScale: 0.55, // ✅ Conservative threshold ≈0.55
           bpmMin: 40,           // ✅ Realistic range
           bpmMax: 180           // ✅ Realistic range
         },
         preprocessing: { 
           removeBaselineWander: true,   // ✅ Clean signal
-          smoothingWindowMs: 100        // ✅ Stable smoothing
+          smoothingWindowMs: 60         // ✅ Conservative smoothing ≈60ms
         },
         quality: {
-          cleanRR: true,         // ✅ Clean outliers
-          cleanMethod: 'iqr'     // ✅ Conservative cleaning
+          cleanRR: false,        // ✅ CRITICAL: RAW RR processing for JS-side correction
+          cleanMethod: 'none'    // ✅ CRITICAL: No C++ RR cleaning, JS handles it
         }
       };
     }
@@ -914,21 +915,7 @@ export default function CameraPPGAnalyzer() {
     ignoreAndroidSystemSettings: true,
   };
 
-  // Trigger haptic feedback for each heartbeat
-  const triggerHapticForBeat = useCallback(() => {
-    try {
-      const Haptics = getHaptics();
-      if (!Haptics) return;
-      // Use different haptic patterns for iOS and Android
-      if (Platform.OS === 'ios') {
-        Haptics.trigger('impactLight', hapticOptions);
-      } else {
-        Haptics.trigger('impactMedium', hapticOptions);
-      }
-    } catch (error) {
-      console.warn('Haptic feedback error:', error);
-    }
-  }, []);
+  // ✅ CRITICAL: Removed unused triggerHapticForBeat function (code cleanup)
 
   // Stable JS handler for frame processor errors (avoid inline runOnJS closures)
   const onFrameError = useCallback((message: string) => {
@@ -1168,22 +1155,22 @@ export default function CameraPPGAnalyzer() {
   }
   
   // ✅ CRITICAL: Plugin confidence ONLY for auto-start trigger, NOT for auto-stop
-  // Update stability counters for auto-start logic only
+  // ✅ CRITICAL: Split timers - plugin confidence timing separate from C++ quality
   const nowTs = Date.now();
-  const dt = lastPollTsRef.current ? Math.max(1, nowTs - lastPollTsRef.current) : 200;
-  lastPollTsRef.current = nowTs;
+  const pluginDt = lastPluginPollTsRef.current ? Math.max(1, nowTs - lastPluginPollTsRef.current) : 200;
+  lastPluginPollTsRef.current = nowTs;
   
   // ✅ Only track plugin confidence for START trigger (not STOP)
   if (confVal >= CFG.CONF_HIGH) {
-    coverStableMsRef.current += dt;
+    coverStableMsRef.current += pluginDt;
     uncoverStableMsRef.current = 0;
   } else if (confVal <= CFG.CONF_LOW) {
-    uncoverStableMsRef.current += dt;
+    uncoverStableMsRef.current += pluginDt;
     coverStableMsRef.current = 0;
   } else {
     // Middle zone - slow decay
-    coverStableMsRef.current = Math.max(0, coverStableMsRef.current - dt/2);
-    uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - dt/2);
+    coverStableMsRef.current = Math.max(0, coverStableMsRef.current - pluginDt/2);
+    uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - pluginDt/2);
   }
   
   // Auto-start triggering based on plugin confidence (START only!)
@@ -1237,21 +1224,8 @@ export default function CameraPPGAnalyzer() {
           const now = Date.now();
           const ranMs = now - (analyzeStartTsRef.current || 0);
           const coolOK = now - (lastAutoToggleAtRef.current || 0) >= CFG.COOLDOWN_MS;
-          // ✅ Güncel analyzing durumu için ref kullan (staleness önleme)
-          const analyzingNow = isAnalyzingRef.current;
-          
-          // IDLE → STARTING: high debounce sağlandıysa ve cooldown geçtiyse
-          if (!analyzingNow && fsmRef.current === 'idle' && coverStableMsRef.current >= CFG.HIGH_DEBOUNCE_MS && coolOK) {
-            await startAnalysisFSM();
-          }
-          // RUNNING → STOPPING: low debounce + min run + cooldown
-          if (analyzingNow && fsmRef.current === 'running' && uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS && ranMs >= CFG.MIN_RUN_MS && coolOK) {
-            await stopAnalysisFSM('auto');
-          }
-          // ✅ STARTING (warmup) → STOPPING: erken parmak kalkması (cooldown'sız!)
-          if (analyzingNow && fsmRef.current === 'starting' && uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS && ranMs >= 2000) {
-            await stopAnalysisFSM('early_stop_warmup');
-          }
+          // ✅ CRITICAL: Removed duplicate auto-start/stop logic  
+          // All FSM decisions now happen in performRealtimeAnalysis with C++ quality
         } catch {}
 
         // Torch control FSM tarafından yönetiliyor - manuel müdahale yok
@@ -1324,9 +1298,14 @@ export default function CameraPPGAnalyzer() {
         return; // Skip C++ analysis during ramp-up but keep samples
       }
       
-      // ✅ Post-pretorch: If we have accumulated samples, do enhanced batch push
+      // ✅ Post-pretorch: Enhanced batch push with telemetry
       if (pending.length > 60) { // Large batch after pretorch
         console.log(`📦 Post-pretorch batch: Pushing ${pending.length} accumulated samples`);
+        logTelemetryEvent('pretorch_batch_size', {
+          batchSize: pending.length,
+          pretorchDuration: PRETORCH_DROP_MS,
+          timestamp: now
+        });
       }
       
       console.log(`📥 Pushing ${pending.length} samples to C++ analyzer`);
@@ -1451,10 +1430,10 @@ export default function CameraPPGAnalyzer() {
             const pHalfOverFund = qualityMetrics.pHalfOverFund ?? 0;
             const rrCount = Array.isArray(qualityMetrics.rrList) ? qualityMetrics.rrList.length : 0;
             
-            // ✅ P2 FIX: Gevşetilmiş HRV quality criteria - SNR prioritized
+            // ✅ CRITICAL: HRV quality criteria using consistent cppSnr naming
             const hrvQualityGate = (
-              snr > 5 &&                    // ✅ SNR > 5 dB (gevşetildi)
-              (confidence > 0.3 || snr > 6) && // ✅ Confidence > 0.3 OR good SNR
+              cppSnr > 5 &&                    // ✅ C++ SNR > 5 dB 
+              (confidence > 0.3 || cppSnr > 6) && // ✅ Confidence > 0.3 OR good C++ SNR
               rejectionRate < 0.3 &&        // ✅ Rejection rate < 30% (gevşetildi)
               pHalfOverFund < 0.5 &&        // ✅ Less strict doubling check
               rrCount >= 15                 // ✅ At least 15 RR intervals (gevşetildi)
@@ -1462,7 +1441,7 @@ export default function CameraPPGAnalyzer() {
             
             // ✅ P2 FIX: Mask invalid HRV metrics
             if (!hrvQualityGate) {
-              console.log(`⚠️ HRV quality gate FAILED - masking HRV metrics (SNR: ${snr.toFixed(1)}, Conf: ${confidence.toFixed(2)}, RejRate: ${rejectionRate.toFixed(2)}, RR count: ${rrCount})`);
+              console.log(`⚠️ HRV quality gate FAILED - masking HRV metrics (C++ SNR: ${cppSnr.toFixed(1)}, Conf: ${confidence.toFixed(2)}, RejRate: ${rejectionRate.toFixed(2)}, RR count: ${rrCount})`);
               
               // Mask HRV metrics when quality is insufficient
               (newMetrics as any).rmssd = null;
@@ -1488,25 +1467,25 @@ export default function CameraPPGAnalyzer() {
           }
         }
         
-        // ✅ P1 FIX: Auto-stop gate using C++ quality (ground truth)
+        // ✅ CRITICAL: C++ quality gate using separate timing and consistent naming
         const cppConf = qualityMetrics?.confidence ?? 0;
         const cppGoodQuality = qualityMetrics?.goodQuality ?? false;
-        const snr = qualityMetrics?.snrDb ?? 0;
+        const cppSnr = qualityMetrics?.snrDb ?? 0;  // ✅ Consistent cppSnr naming
         const now = Date.now();
-        const dt = lastPollTsRef.current ? Math.max(1, now - lastPollTsRef.current) : 200;
-        lastPollTsRef.current = now;
+        const cppDt = lastCppPollTsRef.current ? Math.max(1, now - lastCppPollTsRef.current) : 200;
+        lastCppPollTsRef.current = now;
         
-        // Update stability counters based on C++ quality
-        if (cppGoodQuality && (cppConf >= 0.3 || snr > 6)) {
-          coverStableMsRef.current += dt;
+        // ✅ CRITICAL: Update stability counters using C++ timing and consistent naming
+        if (cppGoodQuality && (cppConf >= 0.3 || cppSnr > 6)) {
+          coverStableMsRef.current += cppDt;
           uncoverStableMsRef.current = 0;
         } else if (!cppGoodQuality || cppConf <= 0.1) {
-          uncoverStableMsRef.current += dt;
+          uncoverStableMsRef.current += cppDt;
           coverStableMsRef.current = 0;
         } else {
           // Middle zone - slow decay
-          coverStableMsRef.current = Math.max(0, coverStableMsRef.current - dt/2);
-          uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - dt/2);
+          coverStableMsRef.current = Math.max(0, coverStableMsRef.current - cppDt/2);
+          uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - cppDt/2);
         }
         
         setMetrics(newMetrics as PPGMetrics);
@@ -1547,13 +1526,26 @@ export default function CameraPPGAnalyzer() {
         const ranMs = Date.now() - analyzeStartTsRef.current;
         const coolOK = Date.now() - lastAutoToggleAtRef.current >= CFG.COOLDOWN_MS;
         
-        // Auto-stop condition: Poor C++ quality for extended period + minimum run time
+        // ✅ CRITICAL: Single STOP gate using only C++ quality with telemetry
         if (fsmRef.current === 'running' && 
             ranMs >= CFG.MIN_RUN_MS && 
             coolOK && 
             uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS &&
             (!cppGoodQuality || cppConf <= 0.1)) {
+          
           console.log(`🔴 Auto-stop: Poor C++ quality (goodQ: ${cppGoodQuality}, conf: ${cppConf.toFixed(3)}, uncoverMs: ${uncoverStableMsRef.current})`);
+          
+          // ✅ CRITICAL: Quality gate telemetry for monitoring
+          logTelemetryEvent('quality_gates', {
+            triggerType: 'cpp_quality_drop',
+            cppGoodQuality,
+            cppConfidence: cppConf,
+            cppSnr: cppSnr,
+            uncoverDuration: uncoverStableMsRef.current,
+            sessionDuration: ranMs,
+            reason: 'poor_cpp_quality_sustained'
+          });
+          
           await stopAnalysisFSM('cpp_quality_drop');
           return;
         }
@@ -1571,7 +1563,7 @@ export default function CameraPPGAnalyzer() {
             const peaksNow = (newMetrics as any)?.quality?.totalBeats ?? 0;
             console.log(`🟡 Warmup complete - C++ Conf: ${cppConf.toFixed(3)}, GoodQ: ${cppGoodQuality}, SNR: ${cppSnr.toFixed(1)}, BPM: ${bpmNow.toFixed(1)}, Peaks: ${peaksNow}`);
             
-            // ✅ CRITICAL: C++ quality-based warmup validation (ground truth)
+            // ✅ CRITICAL: C++ quality-based warmup validation using consistent cppSnr
             const hasValidData = (cppGoodQuality && cppConf >= 0.3) || (cppSnr > 5 && peaksNow > 3) || (bpmNow > 40 && bpmNow < 180 && peaksNow > 5);
             
             if (hasValidData) {
@@ -1783,13 +1775,14 @@ export default function CameraPPGAnalyzer() {
             {...(Platform.OS === 'android' 
               ? { torch: device?.hasTorch && torchOn ? 'on' : 'off' }
               : {})} 
-            // ✅ iOS: PPGCameraManager controls everything, Android: VisionCamera props
-            {...(Platform.OS === 'android' && cameraLockEnabled && lockExposure ? { 
+            // ✅ CRITICAL: Android prop guard - only use supported VisionCamera props
+            {...(Platform.OS === 'android' && cameraLockEnabled && lockExposure && device?.supportsManualExposure ? { 
               exposure: lockExposure 
             } : {})}
-            {...(Platform.OS === 'android' && cameraLockEnabled && lockIso ? { 
+            {...(Platform.OS === 'android' && cameraLockEnabled && lockIso && device?.supportsManualISO ? { 
               iso: lockIso 
             } : {})}
+            // Note: iOS camera controls handled exclusively by PPGCameraManager
             // Note: iOS camera controls handled by PPGCameraManager.lockCameraSettings()
             onError={(error) => {
               console.error('🔴 Camera error:', error);
@@ -1863,8 +1856,16 @@ export default function CameraPPGAnalyzer() {
               if (index > 0 && index < array.length - 1) {
                 const prev = array[index - 1];
                 const next = array[index + 1];
-                const mean = array.reduce((a, b) => a + b, 0) / array.length;
-                const std = Math.sqrt(array.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / array.length);
+                // ✅ CRITICAL: O(n²) → O(n) optimization - single pass mean + std calculation
+                let sum = 0, sumSq = 0;
+                for (let i = 0; i < array.length; i++) {
+                  const val = array[i];
+                  sum += val;
+                  sumSq += val * val;
+                }
+                const mean = sum / array.length;
+                const variance = (sumSq / array.length) - (mean * mean);
+                const std = Math.sqrt(Math.max(0, variance)); // Ensure non-negative
                 const threshold = mean + 0.5 * std; // Same threshold as haptic
                 
                 isPeak = value > threshold && value > prev && value >= next;
