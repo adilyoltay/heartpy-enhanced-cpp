@@ -34,9 +34,9 @@ RCT_EXPORT_MODULE();
     return self;
 }
 
-RCT_EXPORT_METHOD(lockCameraSettings:(NSDictionary *)settings
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject) {
+RCT_EXPORT_METHOD(lockCameraSettings:(nonnull NSDictionary *)settings
+                  resolver:(nonnull RCTPromiseResolveBlock)resolve
+                  rejecter:(nonnull RCTPromiseRejectBlock)reject) {
     
     if (!self.captureDevice) {
         reject(@"NO_CAMERA", @"Camera device not available", nil);
@@ -163,8 +163,8 @@ RCT_EXPORT_METHOD(lockCameraSettings:(NSDictionary *)settings
     }
 }
 
-RCT_EXPORT_METHOD(unlockCameraSettings:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject) {
+RCT_EXPORT_METHOD(unlockCameraSettings:(nonnull RCTPromiseResolveBlock)resolve
+                  rejecter:(nonnull RCTPromiseRejectBlock)reject) {
     
     if (!self.captureDevice) {
         reject(@"NO_CAMERA", @"Camera device not available", nil);
@@ -202,9 +202,9 @@ RCT_EXPORT_METHOD(unlockCameraSettings:(RCTPromiseResolveBlock)resolve
     resolve(@{@"status": @"unlocked"});
 }
 
-RCT_EXPORT_METHOD(setTorchLevel:(NSNumber *)level
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject) {
+RCT_EXPORT_METHOD(setTorchLevel:(nonnull NSNumber *)level
+                  resolver:(nonnull RCTPromiseResolveBlock)resolve
+                  rejecter:(nonnull RCTPromiseRejectBlock)reject) {
     
     if (!self.captureDevice || ![self.captureDevice hasTorch]) {
         reject(@"NO_TORCH", @"Torch not available", nil);
@@ -237,8 +237,8 @@ RCT_EXPORT_METHOD(setTorchLevel:(NSNumber *)level
     [self.captureDevice unlockForConfiguration];
 }
 
-RCT_EXPORT_METHOD(getCameraCapabilities:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject) {
+RCT_EXPORT_METHOD(getCameraCapabilities:(nonnull RCTPromiseResolveBlock)resolve
+                  rejecter:(nonnull RCTPromiseRejectBlock)reject) {
     
     if (!self.captureDevice) {
         reject(@"NO_CAMERA", @"Camera device not available", nil);

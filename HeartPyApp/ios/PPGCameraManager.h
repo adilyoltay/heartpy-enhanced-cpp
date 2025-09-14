@@ -6,10 +6,10 @@
 
 @property (nonatomic, strong) AVCaptureDevice *captureDevice;
 
-// Camera lock methods
-- (void)lockCameraSettings:(NSDictionary *)settings resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject;
-- (void)unlockCameraSettings:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject;
-- (void)setTorchLevel:(NSNumber *)level resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject;
-- (void)getCameraCapabilities:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject;
+// Camera lock methods  
+- (void)lockCameraSettings:(nonnull NSDictionary *)settings resolver:(nonnull RCTPromiseResolveBlock)resolve rejecter:(nonnull RCTPromiseRejectBlock)reject;
+- (void)unlockCameraSettings:(nonnull RCTPromiseResolveBlock)resolve rejecter:(nonnull RCTPromiseRejectBlock)reject;
+- (void)setTorchLevel:(nonnull NSNumber *)level resolver:(nonnull RCTPromiseResolveBlock)resolve rejecter:(nonnull RCTPromiseRejectBlock)reject;
+- (void)getCameraCapabilities:(nonnull RCTPromiseResolveBlock)resolve rejecter:(nonnull RCTPromiseRejectBlock)reject;
 
 @end
