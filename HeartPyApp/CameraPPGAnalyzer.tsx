@@ -268,9 +268,9 @@ export default function CameraPPGAnalyzer() {
   // FSM kontrollü başlat/durdur yardımcıları
   // Konfig (tek noktadan)
   const CFG = {
-    CONF_HIGH: 0.25,  // ✅ Daha düşük - C++ confidence 0 sorunu için
-    CONF_LOW: 0.10,   // ✅ Daha düşük - daha kolay başlatma
-    HIGH_DEBOUNCE_MS: 800,   // ✅ Biraz daha uzun start koruması
+    CONF_HIGH: 0.15,  // ✅ Çok daha düşük - immediate start için
+    CONF_LOW: 0.05,   // ✅ Çok daha düşük - minimum threshold
+    HIGH_DEBOUNCE_MS: 400,   // ✅ Çok daha kısa - hızlı start
     LOW_DEBOUNCE_MS: 1200,   // ✅ Premature stop önleme
     WARMUP_MS: 3000,         // ✅ 3s warmup uygun
     MIN_RUN_MS: 7000,        // ✅ 7s minimum run uygun  
@@ -486,7 +486,7 @@ export default function CameraPPGAnalyzer() {
       fsmRef.current = 'idle';
       setStatusMessage('📷 Parmağınızı kamerayı tamamen kapatacak şekilde yerleştirin');
     }
-  }, [isAnalyzing, resetStabilityCounters]);
+  }, [isAnalyzing, resetStabilityCounters, classifyOutcome]);
 
   // Debug camera state (logs only; avoid alerts on UI)
   useEffect(() => {
@@ -528,6 +528,9 @@ export default function CameraPPGAnalyzer() {
   // ✅ P1 FIX: Pretorch frame drop - avoid torch/AE ramp-up noise
   const PRETORCH_DROP_MS = 400;
   const pretorchUntilRef = useRef<number>(0);
+  
+  // ✅ DEBUG: Track plugin confidence changes
+  const lastLoggedConfRef = useRef<number>(-1);
   
   // ✅ isAnalyzingRef'i güncel tut
   useEffect(() => { 
@@ -1013,6 +1016,14 @@ export default function CameraPPGAnalyzer() {
         if (typeof conf === 'number' && isFinite(conf)) {
           setPluginConfidence(conf);
           confVal = conf;
+          
+          // ✅ DEBUG: Always log plugin confidence for troubleshooting
+          if (confVal !== lastLoggedConfRef.current) {
+            console.log(`📊 Plugin Confidence: ${confVal.toFixed(4)} (${confVal >= CFG.CONF_HIGH ? 'HIGH' : confVal >= CFG.CONF_LOW ? 'MID' : 'LOW'})`);
+            lastLoggedConfRef.current = confVal;
+          }
+        } else {
+          console.log('📊 Plugin Confidence: NULL or invalid');
         }
         let latestSamples: number[] = [];
         let latestTs: number[] | null = null;
@@ -1104,9 +1115,46 @@ export default function CameraPPGAnalyzer() {
           lastSignalCheckRef.current = now;
         }
         
-        // ✅ P1 FIX: Auto-stop gate moved to C++ result processing
-        // Plugin confidence used only for initial start triggering
-        // Actual stop/start decisions use C++ quality (below in performRealtimeAnalysis)
+  // ✅ DEBUG: Auto-start logic with plugin confidence monitoring
+  if (confVal > 0) {
+    console.log(`🔍 Plugin Conf: ${confVal.toFixed(3)} (threshold: ${CFG.CONF_HIGH}) - Cover: ${coverStableMsRef.current}ms`);
+  }
+  
+  // ✅ Force start when frameBuffer full and plugin confidence is 0
+  if (frameBufferRef.current.length >= 400 && fsmRef.current === 'idle' && !isAnalyzing) {
+    const timeSinceLastStart = Date.now() - lastAutoToggleAtRef.current;
+    if (timeSinceLastStart > 5000) { // 5s cooldown
+      console.log('🚀 FORCE START: frameBuffer full + plugin conf low/0, manual trigger for analysis');
+      console.log(`   📊 Plugin conf: ${confVal.toFixed(4)}, frameBuffer: ${frameBufferRef.current.length}`);
+      startAnalysisFSM().catch((e) => console.error('Force start failed:', e));
+    }
+  }
+  
+  // Update stability counters for auto-start logic
+  const nowTs = Date.now();
+  const dt = lastPollTsRef.current ? Math.max(1, nowTs - lastPollTsRef.current) : 200;
+  lastPollTsRef.current = nowTs;
+  
+  if (confVal >= CFG.CONF_HIGH) {
+    coverStableMsRef.current += dt;
+    uncoverStableMsRef.current = 0;
+  } else if (confVal <= CFG.CONF_LOW) {
+    uncoverStableMsRef.current += dt;
+    coverStableMsRef.current = 0;
+  } else {
+    // Middle zone - slow decay
+    coverStableMsRef.current = Math.max(0, coverStableMsRef.current - dt/2);
+    uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - dt/2);
+  }
+  
+  // Auto-start triggering based on plugin confidence
+  const coolOK = Date.now() - lastAutoToggleAtRef.current >= CFG.COOLDOWN_MS;
+  
+  // START: high confidence + debounce + cooldown
+  if (!isAnalyzingRef.current && coverStableMsRef.current >= CFG.HIGH_DEBOUNCE_MS && coolOK) {
+    console.log(`🟢 Auto-start triggered: conf=${confVal.toFixed(3)}, coverMs=${coverStableMsRef.current}, coolOK=${coolOK}`);
+    await startAnalysisFSM();
+  }
         // ✅ GATE kaldırıldı - etkisizdi (latestSamples.length > 0 varsa her zaman true)
         if (latestSamples.length > 0) {
           // ✅ Watchdog: Data received, update timestamp
