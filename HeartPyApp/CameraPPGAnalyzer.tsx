@@ -76,6 +76,7 @@ function getHeartPy(): HeartPyExports | null {
 
 interface PPGMetrics {
   bpm: number;
+  bpmUI?: number; // UI'da gösterilecek düzeltilmiş BPM (C++ bpm'i bozmadan)
   confidence: number;
   snrDb: number;
   rmssd: number;
@@ -142,7 +143,11 @@ export default function CameraPPGAnalyzer() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [metrics, setMetrics] = useState<PPGMetrics | null>(null);
   const [frameCount, setFrameCount] = useState(0);
-  const [ppgSignal, setPpgSignal] = useState<number[]>([]);
+  const [ppgSignal, setPpgSignal] = useState<number[]>([]); // ham örnekler (debug)
+  const [uiSignal, setUiSignal] = useState<number[]>([]);   // zaman tabanlı yeniden örneklenmiş waveform
+  const tsBufferRef = useRef<number[]>([]);
+  const valBufferRef = useRef<number[]>([]);
+  const startOffsetSecRef = useRef<number | null>(null); // Analyzer time 0 → camera tsSec offset
   const [rawResult, setRawResult] = useState<any | null>(null);
   const [statusMessage, setStatusMessage] = useState('Kamerayı başlatmak için butona basın');
   const [lastBeatCount, setLastBeatCount] = useState(0);
@@ -155,11 +160,14 @@ export default function CameraPPGAnalyzer() {
   const [roi, setRoi] = useState(0.5); // ✅ Larger ROI for more light collection
   // Use green + chrom for improved SNR and robustness
   const [ppgChannel, setPpgChannel] = useState<'green' | 'red' | 'luma'>('green');
-  const [ppgMode, setPpgMode] = useState<'mean' | 'chrom' | 'pos'>('chrom');
-  const [ppgGrid, setPpgGrid] = useState<1 | 2 | 3>(3); // ✅ PHASE 2: 3x3 grid for robust multi-ROI
+  const [ppgMode, setPpgMode] = useState<'mean' | 'chrom' | 'pos'>('mean'); // Contact PPG için doğru varsayılan
+  const [ppgGrid, setPpgGrid] = useState<1 | 2 | 3>(1); // Başlangıçta tek ROI daha stabil
+  const [ppgStep, setPpgStep] = useState<1 | 2>(1);
+  const [enableProbe, setEnableProbe] = useState(true);
   const [pluginConfidence, setPluginConfidence] = useState<number>(0);
   const [autoSelect, setAutoSelect] = useState(false); // Face mode disabled; keep blend OFF
   const [metricsTab, setMetricsTab] = useState<'Özet' | 'Zaman' | 'Frekans' | 'Kalite' | 'Ham'>('Özet');
+  const [waveformMode, setWaveformMode] = useState<'raw' | 'resampled' | 'filtered'>('filtered');
   // FSM ve süre-bazlı histerezis sayaçları
   const coverStableCountRef = useRef(0);
   const uncoverStableCountRef = useRef(0);
@@ -172,13 +180,17 @@ export default function CameraPPGAnalyzer() {
   const qualityLowMsRef = useRef(0);
   const lastPluginPollTsRef = useRef<number>(0);  // ✅ Plugin confidence timing
   const lastCppPollTsRef = useRef<number>(0);     // ✅ C++ quality timing
+  const tsPushOkRef = useRef(false);              // ✅ Track last timestamped push success
+  const lastTsScaleLogAtRef = useRef(0);          // ✅ Throttle timestamp scale logs
   const lastAutoToggleAtRef = useRef(0);
   const analyzeStartTsRef = useRef(0);
   const warmupUntilRef = useRef(0);
   // C++ quality readiness and STOP holdoff (to avoid premature stops when quality is unknown)
   const cppQualityReadyRef = useRef(false);
   const qualityStopHoldoffUntilRef = useRef(0);
-  const fsmRef = useRef<'idle'|'starting'|'running'|'stopping'>('idle');  // ✅ Sadeleştirildi
+  // RECOVER window to tolerate brief quality dips
+  const recoverUntilRef = useRef(0);
+  const fsmRef = useRef<'idle'|'starting'|'running'|'recover'|'stopping'>('idle');  // RECOVER eklendi
   // Removed UI control states
 
   // Load/save persistent settings (best-effort)
@@ -195,6 +207,8 @@ export default function CameraPPGAnalyzer() {
         if (cfg.ppgMode && ['mean','chrom','pos'].includes(cfg.ppgMode)) setPpgMode(cfg.ppgMode);
         if (cfg.ppgGrid && [1,2,3].includes(cfg.ppgGrid)) setPpgGrid(cfg.ppgGrid);
         if (typeof cfg.roi === 'number') setRoi(Math.max(0.2, Math.min(0.6, cfg.roi)));
+        if ([1,2].includes(cfg.ppgStep)) setPpgStep(cfg.ppgStep);
+        if (['raw','resampled','filtered'].includes(cfg.waveformMode)) setWaveformMode(cfg.waveformMode);
       } catch {}
     })();
   }, []);
@@ -204,15 +218,13 @@ export default function CameraPPGAnalyzer() {
       const S = getStorage();
       if (!S?.setItem) return;
       try {
-        const cfg = { autoSelect, ppgChannel, ppgMode, ppgGrid, roi };
+        const cfg = { autoSelect, ppgChannel, ppgMode, ppgGrid, roi, ppgStep, waveformMode };
         await S.setItem('hp_ppg_settings', JSON.stringify(cfg));
       } catch {}
     })();
-  }, [autoSelect, ppgChannel, ppgMode, ppgGrid, roi]);
+  }, [autoSelect, ppgChannel, ppgMode, ppgGrid, roi, ppgStep, waveformMode]);
   
-  // UI confidence indicator strictly from C++: quality.confidence
-  const cppConfidence = Math.max(0, Math.min(1, metrics?.quality?.confidence ?? 0));
-  const confColor = cppConfidence >= 0.7 ? '#4CAF50' : cppConfidence >= 0.4 ? '#FB8C00' : '#f44336';
+  // (moved) UI confidence color computed later from effective confidence
 
   const device = useCameraDevice('back', {
     physicalDevices: ['wide-angle-camera'],
@@ -244,6 +256,29 @@ export default function CameraPPGAnalyzer() {
   const [torchLevel, setTorchLevel] = useState<number>(1.0); // ✅ Start with MAX for best SNR
   const torchLevels = [0.3, 0.6, 1.0]; // Progressive levels
   const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(2); // ✅ Start with MAX (1.0)
+  // Torch thrash-guard state
+  const torchTargetRef = useRef<number | null>(null);
+  const lastTorchChangeAtRef = useRef(0);
+
+  async function setTorchLevelSafely(nextLevel: number, reason: string) {
+    try {
+      if (!device?.hasTorch || Platform.OS !== 'ios') return;
+      const now = Date.now();
+      const cur = torchTargetRef.current ?? torchLevel;
+      const tooSoon = now - lastTorchChangeAtRef.current < 1500; // 1.5s throttle
+      const sameLevel = Math.abs(cur - nextLevel) < 0.05;
+      if (tooSoon || sameLevel) return;
+
+      await NativeModules.PPGCameraManager?.setTorchLevel?.(nextLevel);
+      torchTargetRef.current = nextLevel;
+      lastTorchChangeAtRef.current = now;
+      setTorchLevel(nextLevel);
+      setCurrentTorchLevelIndex(nextLevel >= 1.0 ? 2 : nextLevel >= 0.6 ? 1 : 0);
+      logTelemetryEvent('torch_auto_adjust', { action: cur < nextLevel ? 'up' : 'down', level: nextLevel, reason });
+    } catch (e) {
+      console.warn('setTorchLevelSafely failed:', e);
+    }
+  }
   
   // ✅ PHASE 2: Multi-ROI Adaptive Management
   const roiQualityHistoryRef = useRef<number[]>([]);
@@ -269,6 +304,8 @@ export default function CameraPPGAnalyzer() {
   
   // ✅ Telemetry throttling
   const unifiedConfCallCountRef = useRef(0);
+  // Aggregate for periodic summaries
+  const qualityAggRef = useRef({ count: 0, sumConf: 0, sumSnr: 0, recoverCount: 0, stops: 0 });
   const samplingRate = analyzerFs; // keep analyzer in sync with actual fps
   const bufferSize = samplingRate * 15; // 15 saniye buffer - daha stabil BPM için
   const analysisInterval = 1000; // 1000ms'de bir analiz - STABİL sonuçlar için
@@ -283,6 +320,9 @@ export default function CameraPPGAnalyzer() {
     WARMUP_MS: 3000,         // ✅ 3s warmup uygun
     MIN_RUN_MS: 7000,        // ✅ 7s minimum run uygun  
     COOLDOWN_MS: 3000,       // ✅ 3s cooldown daha güvenli
+    STABLE_MS_FOR_TORCH_DOWN: 10000, // ✅ 10s stable → lower torch
+    TORCH_LOW_LEVEL: 0.6,    // ✅ Battery-friendly level after stable
+    RECOVER_MS: 2000,        // ✅ Allow 2s brief dips before stopping
     // PRETORCH_IGNORE_FRAMES kaldırıldı - hiç veri atılmıyor
   } as const;
 
@@ -502,6 +542,27 @@ export default function CameraPPGAnalyzer() {
     } catch {}
   }, [hasPermission, device]);
 
+  // Per-device en iyi profil önbelleği: yükle
+  useEffect(() => {
+    (async () => {
+      if (!device?.id) return;
+      const S = getStorage();
+      if (!S?.getItem) return;
+      try {
+        const raw = await S.getItem(`hp_best_${device.id}`);
+        if (!raw) return;
+        const best = JSON.parse(raw);
+        if (best?.ppgMode && ['mean','chrom','pos'].includes(best.ppgMode)) setPpgMode(best.ppgMode);
+        if ([1,2,3].includes(best?.ppgGrid)) setPpgGrid(best.ppgGrid);
+        if ([1,2].includes(best?.ppgStep)) setPpgStep(best.ppgStep);
+        if (typeof best?.roi === 'number') setRoi(Math.max(0.2, Math.min(0.6, best.roi)));
+        // En iyi profili bulduysak probe’u pasif başlat
+        if (enableProbe) setEnableProbe(false);
+        logTelemetryEvent('best_profile_loaded', { deviceId: device.id, best });
+      } catch {}
+    })();
+  }, [device]);
+
   // Analyzer parameters moved up to FSM section - duplicate removed
   
   const frameBufferRef = useRef<number[]>([]);
@@ -511,9 +572,11 @@ export default function CameraPPGAnalyzer() {
   const torchTimerRef = useRef<any>(null);
   const simulationTimerRef = useRef<any>(null);
   const torchOnTimeRef = useRef<number | null>(null);
+  const torchAdjustCoolUntilRef = useRef<number>(0);
   // const preTorchFramesRef = useRef<number>(0); // ✅ Kaldırıldı - artık kullanılmıyor
   const warnedJSIFallbackRef = useRef(false);
   const lastHapticTimeRef = useRef<number>(0);  // Haptic feedback zamanlaması için
+  // ✅ FIXED: tsPushOkRef already declared above (line 183) - removed duplicate
   // const testHapticIntervalRef = useRef<any>(null);  // ✅ Kaldırıldı - kullanılmıyor
   const isAnalyzingRef = useRef(isAnalyzing);  // ✅ Poll interval staleness önleme
   const lastDataAtRef = useRef(Date.now());    // ✅ Watchdog timer için
@@ -530,6 +593,8 @@ export default function CameraPPGAnalyzer() {
   // ✅ P1 FIX: Pretorch frame drop - avoid torch/AE ramp-up noise
   const PRETORCH_DROP_MS = 400;
   const pretorchUntilRef = useRef<number>(0);
+  // ✅ Fail-safe: Maximum time we wait for C++ quality to become ready
+  const QUALITY_READY_TIMEOUT_MS = 20000;
   
   // ✅ DEBUG: Track plugin confidence changes
   const lastLoggedConfRef = useRef<number>(-1);
@@ -574,10 +639,10 @@ export default function CameraPPGAnalyzer() {
         bandpass: { lowHz: 0.5, highHz: 3.5, order: 3 },  // ✅ Narrower, more stable
         welch: { nfft: 1024, overlap: 0.5 },              // ✅ Higher resolution
         peak: { 
-          refractoryMs: 320,    // ✅ Conservative refractory ≈320ms
-          thresholdScale: 0.55, // ✅ Conservative threshold ≈0.55
-          bpmMin: 40,           // ✅ Realistic range
-          bpmMax: 180           // ✅ Realistic range
+          refractoryMs: 280,    // Biraz daha kısa: yakın vuruşları kaçırma riskini azaltır
+          thresholdScale: 0.35, // Daha duyarlı: yarıya düşme eğilimini azaltabilir
+          bpmMin: 40,           // Realistic range
+          bpmMax: 180           // Realistic range
         },
         preprocessing: { 
           removeBaselineWander: true,   // ✅ Clean signal
@@ -650,6 +715,143 @@ export default function CameraPPGAnalyzer() {
       metrics: metrics || null
     });
   }, [logTelemetryEvent]);
+
+  // ✅ Timestamp normalization helper (ns/µs/ms → s), with monotonic fix and telemetry
+  const normalizeTimestampsToSeconds = useCallback((tsIn: number[], expectedFs: number): Float64Array => {
+    if (!tsIn || tsIn.length < 2) return new Float64Array(tsIn || []);
+    const deltas: number[] = [];
+    for (let i = 1; i < tsIn.length; i++) {
+      const d = tsIn[i] - tsIn[i - 1];
+      if (Number.isFinite(d) && d > 0) deltas.push(d);
+    }
+    if (deltas.length === 0) return new Float64Array(tsIn);
+    const sorted = deltas.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const medDtRaw = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    const targetDtSec = 1 / Math.max(1, expectedFs);
+
+    let scaleToSec = 1; // assume seconds by default
+    if (medDtRaw > 1e6) scaleToSec = 1e-9;      // ns → s
+    else if (medDtRaw > 1e3) scaleToSec = 1e-6; // µs → s
+    else if (medDtRaw > 1) scaleToSec = 1e-3;   // ms → s
+
+    const tsSec = new Float64Array(tsIn.length);
+    for (let i = 0; i < tsIn.length; i++) tsSec[i] = tsIn[i] * scaleToSec;
+
+    const medDtSec = medDtRaw * scaleToSec;
+    const fsFromTs = medDtSec > 0 ? (1 / medDtSec) : 0;
+    const mismatch = expectedFs > 0 ? Math.abs(fsFromTs - expectedFs) / expectedFs : 1;
+    const nowLog = Date.now();
+    if (nowLog - lastTsScaleLogAtRef.current > 2000) {
+      logTelemetryEvent('timestamp_scale_selected', {
+        medDtRaw,
+        scaleToSec,
+        medDtSec,
+        fsFromTs,
+        expectedFs,
+        mismatch
+      });
+      lastTsScaleLogAtRef.current = nowLog;
+    }
+
+    // Enforce strict monotonicity (fix tiny backsteps)
+    for (let i = 1; i < tsSec.length; i++) {
+      if (!(tsSec[i] > tsSec[i - 1])) tsSec[i] = tsSec[i - 1] + targetDtSec;
+    }
+
+    return tsSec;
+  }, [logTelemetryEvent]);
+
+  // ✅ Yardımcılar: BPM düzeltme (anti-halving) için
+  const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
+  const robustMedian = (arr: number[]) => {
+    if (!arr || arr.length === 0) return NaN;
+    const s = [...arr].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+
+  function resolveDisplayBpm(res: any): number | null {
+    const q = res?.quality ?? {};
+    const rrRaw: number[] = (q.correctedRRList && q.correctedRRList.length >= 3)
+      ? q.correctedRRList
+      : (Array.isArray(res?.rrList) ? res.rrList : []);
+
+    const medRR = robustMedian(rrRaw);
+    const bpmRR = Number.isFinite(medRR) && medRR > 250 ? 60000 / medRR : NaN;
+
+    const bpmCpp = Number(res?.bpm);
+    const f0Hz   = Number(q?.f0Hz);
+    const bpmF0  = Number.isFinite(f0Hz) ? f0Hz * 60 : NaN;
+
+    // Halving şüphesi: çok düşük BPM ve ilgili bayraklar/ölçütler
+    const halvingSuspect = (
+      ((bpmCpp && bpmCpp < 40) || (bpmRR && bpmRR < 40) || (bpmF0 && bpmF0 < 40)) &&
+      (q?.doublingFlag || q?.doublingHintFlag || (q?.pairFrac ?? 0) > 0.6 ||
+       (q?.pHalfOverFund ?? 0) > 0.9 || (medRR ?? 0) > 1400)
+    );
+
+    let cands: number[] = [];
+    if (Number.isFinite(bpmCpp)) cands.push(bpmCpp);
+    if (Number.isFinite(bpmRR))  cands.push(bpmRR);
+    if (Number.isFinite(bpmF0))  cands.push(bpmF0);
+
+    if (halvingSuspect) {
+      cands = cands.concat(cands.map(v => v * 2).filter(v => v >= 40 && v <= 180));
+    }
+
+    const plausible = cands.filter(v => v >= 40 && v <= 180);
+    if (plausible.length === 0) return null;
+    return robustMedian(plausible);
+  }
+
+  // ✅ UI waveform için zaman tabanlı eşit aralıklı yeniden örnekleme (lineer interpolasyon)
+  const resampleForUI = useCallback((tsSec: Float64Array, xs: number[], targetFs = 30, winSec = 3) => {
+    if (!tsSec || tsSec.length < 2 || !xs || xs.length !== tsSec.length) return;
+    // Global buffer'a ekle (son 10 sn)
+    for (let i = 0; i < tsSec.length; i++) {
+      tsBufferRef.current.push(tsSec[i]);
+      valBufferRef.current.push(xs[i]);
+    }
+    // Sadece son 10 sn tut
+    const nowT = tsBufferRef.current[tsBufferRef.current.length - 1];
+    const minT = nowT - 10;
+    while (tsBufferRef.current.length > 0 && tsBufferRef.current[0] < minT) {
+      tsBufferRef.current.shift();
+      valBufferRef.current.shift();
+    }
+
+    // Hedef grid (son winSec)
+    const n = Math.max(10, Math.floor(targetFs * winSec));
+    const tStart = nowT - winSec;
+    const out: number[] = new Array(n);
+
+    // Lineer interpolasyon
+    let j = 1; // arama başlangıcı
+    for (let i = 0; i < n; i++) {
+      const t = tStart + (i / targetFs);
+      // İlgili segmenti bul
+      while (j < tsBufferRef.current.length && tsBufferRef.current[j] < t) j++;
+      const j0 = Math.max(1, Math.min(j, tsBufferRef.current.length - 1));
+      const t1 = tsBufferRef.current[j0 - 1];
+      const t2 = tsBufferRef.current[j0];
+      const x1 = valBufferRef.current[j0 - 1];
+      const x2 = valBufferRef.current[j0];
+      let y = x2;
+      if (t2 > t1) {
+        const a = (t - t1) / (t2 - t1);
+        y = x1 + a * (x2 - x1);
+      }
+      out[i] = y;
+    }
+
+    // Basit detrend ve ölçekleme (pencere ortalaması çıkar, normalize et)
+    const mean = out.reduce((s, v) => s + v, 0) / out.length;
+    const zeroed = out.map(v => v - mean);
+    const maxAbs = zeroed.reduce((m, v) => Math.max(m, Math.abs(v)), 1);
+    const normed = zeroed.map(v => (v / maxAbs) * 100); // -100..100 ölçeğine getir
+    setUiSignal(normed);
+  }, []);
 
   // ✅ PHASE 1.4: Unified Confidence Score Calculator
   const [useUnifiedConfidence, setUseUnifiedConfidence] = useState(true); // ✅ Start enabled for testing
@@ -774,8 +976,8 @@ export default function CameraPPGAnalyzer() {
     const qualityEntry = { timestamp: now, confidence, snr, acDc, gridQuality };
     signalQualityHistoryRef.current.push(qualityEntry);
     
-    // Keep only last 10 entries
-    if (signalQualityHistoryRef.current.length > 10) {
+    // Keep only last 60 entries (~1 minute at 1s cadence)
+    if (signalQualityHistoryRef.current.length > 60) {
       signalQualityHistoryRef.current.shift();
     }
     
@@ -983,7 +1185,7 @@ export default function CameraPPGAnalyzer() {
         
         if (plugin != null && frame != null) {
           try {
-            const v = plugin.call(frame, { roi, channel: ppgChannel, step: 2, mode: ppgMode, grid: ppgGrid, blend: 'off', torch: !!torchOn }) as number;
+            const v = plugin.call(frame, { roi, channel: ppgChannel, step: ppgStep, mode: ppgMode, grid: ppgGrid, blend: 'off', torch: !!torchOn }) as number;
             
             // ✅ P1 FIX: Fallback ingest when native producer stalls
             if (enableFallback && v != null && typeof v === 'number' && isFinite(v)) {
@@ -1115,6 +1317,13 @@ export default function CameraPPGAnalyzer() {
         // ✅ Update sample timestamp when we get data from native
         if (latestSamples.length > 0) {
           lastSampleAtRef.current = now;
+          // UI waveform resampling when timestamps available
+          if (latestTs && latestTs.length === latestSamples.length) {
+            try {
+              const tsSec = normalizeTimestampsToSeconds(latestTs, analyzerFs);
+              resampleForUI(tsSec, latestSamples, 30, 3);
+            } catch {}
+          }
         }
         
         // ✅ P1 FIX: No-signal early stop - check for complete pipeline stall
@@ -1223,14 +1432,24 @@ export default function CameraPPGAnalyzer() {
             const inPretorchPush = nowPush < (pretorchUntilRef.current || 0);
             if (!inPretorchPush && latestTs && latestTs.length === latestSamples.length && analyzerRef.current?.pushWithTimestamps) {
               const xs = new Float32Array(latestSamples);
-              const ts = new Float64Array(latestTs);
-              await analyzerRef.current.pushWithTimestamps(xs, ts);
+              // Normalize timestamps to seconds (auto-detect unit)
+              const tsSec = normalizeTimestampsToSeconds(latestTs, analyzerFs);
+              await analyzerRef.current.pushWithTimestamps(xs, tsSec);
               // Clear pending only when we actually pushed to native
               pendingSamplesRef.current = [];
+              tsPushOkRef.current = true;
+              if (startOffsetSecRef.current == null && tsSec.length > 0) {
+                startOffsetSecRef.current = tsSec[0];
+              }
+              // UI waveform resampling
+              try {
+                resampleForUI(tsSec, Array.from(xs), 30, 3);
+              } catch {}
             }
           } catch (e) {
             console.warn('pushWithTimestamps failed, will use regular push:', e);
             // Normal push pipeline will handle pending samples
+            tsPushOkRef.current = false;
           }
         }
         // Otomatik başlat/durdur: süre-bazlı histerezis + cooldown + min-run
@@ -1266,7 +1485,7 @@ export default function CameraPPGAnalyzer() {
       const now = Date.now();
       // En az 8 saniye veri toplandıktan sonra analiz başlat (STABIL BPM için)
       const minBufferSize = samplingRate * 8;  // 8 saniye minimum veri - stabil sonuçlar
-      if (now - lastAnalysisTimeRef.current > analysisInterval && frameBufferRef.current.length >= minBufferSize) {
+      if (analyzerRef.current && (now - lastAnalysisTimeRef.current > analysisInterval) && frameBufferRef.current.length >= minBufferSize) {
         lastAnalysisTimeRef.current = now;
         performRealtimeAnalysis();
       }
@@ -1274,6 +1493,95 @@ export default function CameraPPGAnalyzer() {
     
     return () => clearInterval(uiUpdateTimer);
   }, [isActive, analysisInterval, samplingRate, bufferSize, useNativePPG]);
+
+  // ✅ Periodic telemetry summaries (every 10s)
+  useEffect(() => {
+    if (!isAnalyzing) return;
+    const t = setInterval(() => {
+      const history = signalQualityHistoryRef.current;
+      if (history.length > 0) {
+        const avgConf = history.reduce((s, h) => s + h.confidence, 0) / history.length;
+        const avgSnr = history.reduce((s, h) => s + h.snr, 0) / history.length;
+        logTelemetryEvent('ppg_summary', {
+          avgConf: Number(avgConf.toFixed(3)),
+          avgSnr: Number(avgSnr.toFixed(2)),
+          entries: history.length,
+          fsm: fsmRef.current
+        });
+      }
+    }, 10000);
+    return () => clearInterval(t);
+  }, [isAnalyzing, logTelemetryEvent]);
+
+  // ✅ SNR/Confidence Probe: mean vs chrom (kısa A/B test), tek seferlik
+  useEffect(() => {
+    if (!enableProbe) return;
+    let probeTimer: any = null;
+    let phase: 'idle'|'phaseA'|'phaseB'|'done' = 'idle';
+    let phaseStart = 0;
+    let baseMode: 'mean'|'chrom'|'pos' = ppgMode;
+    let results: { mode: string, avgSnr: number, avgConf: number }[] = [];
+    let startIdx = 0;
+    const PHASE_MS = 3000;
+
+    const tick = () => {
+      // FSM RUNNING değilse bekle
+      if (fsmRef.current !== 'running') return;
+      const hist = signalQualityHistoryRef.current;
+      const now = Date.now();
+      if (phase === 'idle') {
+        baseMode = ppgMode;
+        // Aşama A: diğer modu dene
+        const altMode = baseMode === 'mean' ? 'chrom' : 'mean';
+        setPpgMode(altMode as any);
+        logTelemetryEvent('ppg_probe_start', { phase: 'A', mode: altMode });
+        phase = 'phaseA';
+        phaseStart = now;
+        startIdx = hist.length;
+        return;
+      }
+      if (phase === 'phaseA' && now - phaseStart >= PHASE_MS) {
+        // A sonuçları
+        const slice = hist.slice(startIdx);
+        const avgSnr = slice.length ? slice.reduce((s,h)=>s+h.snr,0)/slice.length : 0;
+        const avgConf = slice.length ? slice.reduce((s,h)=>s+h.confidence,0)/slice.length : 0;
+        results.push({ mode: ppgMode, avgSnr, avgConf });
+        // B: base moda dön
+        setPpgMode(baseMode);
+        logTelemetryEvent('ppg_probe_start', { phase: 'B', mode: baseMode });
+        phase = 'phaseB';
+        phaseStart = now;
+        startIdx = hist.length;
+        return;
+      }
+      if (phase === 'phaseB' && now - phaseStart >= PHASE_MS) {
+        const slice = hist.slice(startIdx);
+        const avgSnr = slice.length ? slice.reduce((s,h)=>s+h.snr,0)/slice.length : 0;
+        const avgConf = slice.length ? slice.reduce((s,h)=>s+h.confidence,0)/slice.length : 0;
+        results.push({ mode: ppgMode, avgSnr, avgConf });
+        // Kazananı seç
+        const score = (r: any) => (r.avgSnr * 0.7 + r.avgConf * 0.3);
+        const best = results.sort((a,b)=>score(b)-score(a))[0];
+        setPpgMode(best.mode as any);
+        logTelemetryEvent('ppg_probe_result', { results, chosen: best });
+        // Kaydet: cihaz bazlı en iyi profil
+        try {
+          const S = getStorage();
+          if (S?.setItem && device?.id) {
+            const bestCfg = { ppgMode: best.mode, ppgGrid, ppgStep, roi };
+            await S.setItem(`hp_best_${device.id}`, JSON.stringify(bestCfg));
+            logTelemetryEvent('best_profile_saved', { deviceId: device.id, bestCfg });
+          }
+        } catch {}
+        phase = 'done';
+        // bir daha çalıştırma
+        clearInterval(probeTimer);
+      }
+    };
+
+    probeTimer = setInterval(tick, 250);
+    return () => probeTimer && clearInterval(probeTimer);
+  }, [enableProbe, ppgMode, logTelemetryEvent]);
 
   // Sayfa açıldığında izin/cihaz hazırsa kamerayı etkinleştir (torch pulse hazırda)
   useEffect(() => {
@@ -1342,6 +1650,12 @@ export default function CameraPPGAnalyzer() {
         console.log('📊 SAMPLE STATS:', sampleStats);
       }
       
+      // Avoid duplicate small pushes if last timestamped push succeeded
+      if (pending.length > 0 && tsPushOkRef.current && pending.length < samplingRate / 2) {
+        analysisInFlightRef.current = false;
+        return;
+      }
+
       if (pending.length > 0) {
         const samplesArray = new Float32Array(pending);
         // Validate samples array
@@ -1361,6 +1675,7 @@ export default function CameraPPGAnalyzer() {
         }
         // Clear pending after push
         pendingSamplesRef.current = [];
+        tsPushOkRef.current = false; // reverted to regular push path
       }
       
       // Metrikleri al - defensive native call
@@ -1498,15 +1813,27 @@ export default function CameraPPGAnalyzer() {
 
         // ✅ Readiness detection: mark C++ quality as ready once any metric matures
         const beatsForReady = (newMetrics as any)?.quality?.totalBeats ?? 0;
+        const rrCountTop = Array.isArray((newMetrics as any)?.rrList) ? (newMetrics as any).rrList.length : 0;
         if (!cppQualityReadyRef.current) {
-          if (cppConf > 0.05 || cppSnr > 1 || beatsForReady >= 12) {
+          if (cppConf > 0.05 || cppSnr > 1 || beatsForReady >= 12 || rrCountTop >= 12) {
             cppQualityReadyRef.current = true;
             qualityStopHoldoffUntilRef.current = Date.now() + 3000; // 3s grace for stabilization
             logTelemetryEvent('cpp_quality_ready', {
               beats: beatsForReady,
+              rrCountTop,
               cppConf,
               cppSnr
             });
+          }
+        }
+
+        // ✅ Fail-safe: quality never ready within timeout → stop safely
+        if (!cppQualityReadyRef.current) {
+          const elapsed = Date.now() - (analyzeStartTsRef.current || 0);
+          if (elapsed >= QUALITY_READY_TIMEOUT_MS) {
+            logTelemetryEvent('quality_never_ready_timeout', { elapsedMs: elapsed });
+            await stopAnalysisFSM('quality_never_ready');
+            return;
           }
         }
 
@@ -1527,68 +1854,112 @@ export default function CameraPPGAnalyzer() {
           uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - cppDt/2);
         }
         
-        setMetrics(newMetrics as PPGMetrics);
+          // UI için BPM düzeltmesi (C++ bpm'i bozmadan)
+          const bpmUI = resolveDisplayBpm(newMetrics);
+          (newMetrics as any).bpmUI = Number.isFinite(bpmUI as number) ? (bpmUI as number) : (newMetrics.bpm ?? null);
+          logTelemetryEvent('bpm_ui_resolved', {
+            bpm_cpp: newMetrics.bpm,
+            bpm_ui: (newMetrics as any).bpmUI,
+            f0Hz: (newMetrics as any)?.quality?.f0Hz ?? null,
+            rrCount: Array.isArray((newMetrics as any)?.rrList) ? (newMetrics as any).rrList.length : 0
+          });
+
+          setMetrics(newMetrics as PPGMetrics);
           
-        // C++ analizindeki beat artışına göre haptic feedback (kalite koşulu ile)
+        // C++ analizindeki beat artışına göre haptic sadece fonksiyonel setter içinde tetiklenir
         const currentBeatCount = (newMetrics as any).quality?.totalBeats ?? 0;
-        // cppConf already declared above
-        // ✅ P1 FIX: Haptic gate - C++ confidence (ground truth), not unified
-        if (currentBeatCount > lastBeatCount && fsmRef.current === 'running' && cppGoodQuality && cppConf >= 0.05) {
-          const now = Date.now();
-          const refractoryMs = 250; // darbeler arası min süre
-          if (!lastHapticTimeRef.current || now - lastHapticTimeRef.current >= refractoryMs) {
-            try {
-              const Haptics = getHaptics();
-              if (Haptics) {
-                Haptics.trigger(Platform.OS === 'ios' ? 'impactLight' : 'impactMedium', hapticOptions);
-                setHapticPeakCount(prev => prev + 1);
-              }
-            } catch {}
-            lastHapticTimeRef.current = now;
-              } else {
-            setMissedPeakCount(prev => prev + 1);
-              }
-            }
-        
+
         // Peak listesini güncelle (görsel için)
         if (Array.isArray(result.peakList) && result.peakList.length > 0) {
           setLastPeakIndices(result.peakList.slice(-100));
           }
         
-        // Beat count değişimi logu
-        if (currentBeatCount > lastBeatCount) {
-          console.log(`💓 ${currentBeatCount - lastBeatCount} new beat(s)! Total: ${currentBeatCount}`);
-        setLastBeatCount(currentBeatCount);
-        }
+        // Beat sayacı ve haptik: stale state'i önlemek için fonksiyonel set kullan
+        setLastBeatCount(prev => {
+          const newly = Math.max(0, currentBeatCount - prev);
+          if (newly > 0) {
+            if (fsmRef.current === 'running' && cppGoodQuality && cppConf >= 0.2) {
+              const nowH = Date.now();
+              const refractoryMs = 250;
+              if (!lastHapticTimeRef.current || nowH - lastHapticTimeRef.current >= refractoryMs) {
+                try {
+                  const Haptics = getHaptics();
+                  if (Haptics) {
+                    Haptics.trigger(Platform.OS === 'ios' ? 'impactLight' : 'impactMedium', hapticOptions);
+                    setHapticPeakCount(h => h + newly);
+                  }
+                } catch {}
+                lastHapticTimeRef.current = nowH;
+              } else {
+                setMissedPeakCount(m => m + newly);
+              }
+            }
+            console.log(`💓 ${newly} new beat(s)! Total: ${currentBeatCount}`);
+          }
+          return currentBeatCount;
+        });
         
         // ✅ P1 FIX: Auto-stop logic using C++ quality after minimum run time
         const ranMs = Date.now() - analyzeStartTsRef.current;
         const coolOK = Date.now() - lastAutoToggleAtRef.current >= CFG.COOLDOWN_MS;
+
+        // ✅ Torch optimization: lower torch after long stable period; boost during recover/poor
+        try {
+          const nowTsTorch = Date.now();
+          // Lower when very stable
+          if (fsmRef.current === 'running' && coverStableMsRef.current >= CFG.STABLE_MS_FOR_TORCH_DOWN && nowTsTorch >= torchAdjustCoolUntilRef.current) {
+            if (Platform.OS === 'ios' && device?.hasTorch && torchLevel > CFG.TORCH_LOW_LEVEL) {
+              await setTorchLevelSafely(CFG.TORCH_LOW_LEVEL, 'stable_quality');
+              torchAdjustCoolUntilRef.current = nowTsTorch + 3000;
+            }
+          }
+          // Boost during recover or poor quality
+          const isPoorNow = (!cppGoodQuality && cppConf <= 0.1 && cppSnr <= 3);
+          if ((fsmRef.current === 'recover' || isPoorNow) && Platform.OS === 'ios' && device?.hasTorch && torchLevel < 1.0 && nowTsTorch >= torchAdjustCoolUntilRef.current) {
+            await setTorchLevelSafely(1.0, fsmRef.current === 'recover' ? 'recover_boost' : 'poor_quality_boost');
+            torchAdjustCoolUntilRef.current = nowTsTorch + 3000;
+          }
+        } catch {}
         
-        // ✅ CRITICAL: Single STOP gate using only C++ quality with telemetry
+        // ✅ CRITICAL: RECOVER state to tolerate brief dips
+        const isPoorQuality = (!cppGoodQuality && cppConf <= 0.1 && cppSnr <= 3);
         const canStopForQuality = cppQualityReadyRef.current && Date.now() >= qualityStopHoldoffUntilRef.current;
-        if (fsmRef.current === 'running' && 
-            ranMs >= CFG.MIN_RUN_MS && 
-            coolOK && 
-            canStopForQuality &&
-            uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS &&
-            (!cppGoodQuality && cppConf <= 0.1 && cppSnr <= 3)) {
-          
-          console.log(`🔴 Auto-stop: Poor C++ quality (goodQ: ${cppGoodQuality}, conf: ${cppConf.toFixed(3)}, uncoverMs: ${uncoverStableMsRef.current})`);
-          
-          // ✅ CRITICAL: Quality gate telemetry for monitoring
-          logTelemetryEvent('quality_gates', {
-            triggerType: 'cpp_quality_drop',
-            cppGoodQuality,
-            cppConfidence: cppConf,
-            cppSnr: cppSnr,
-            uncoverDuration: uncoverStableMsRef.current,
-            sessionDuration: ranMs,
-            reason: 'poor_cpp_quality_sustained'
-          });
-          
-          await stopAnalysisFSM('cpp_quality_drop');
-          return;
+
+        if (fsmRef.current === 'running' && isPoorQuality) {
+          // Enter RECOVER window first
+          fsmRef.current = 'recover';
+          recoverUntilRef.current = Date.now() + CFG.RECOVER_MS;
+          logFSMTransition('running', 'recover', 'quality_dip');
+          console.log(`🟠 RECOVER start for ${CFG.RECOVER_MS}ms`);
+        }
+
+        if (fsmRef.current === 'recover') {
+          // If quality recovers, go back to running
+          if (!isPoorQuality) {
+            fsmRef.current = 'running';
+            recoverUntilRef.current = 0;
+            logFSMTransition('recover', 'running', 'quality_recovered');
+            console.log('🟢 RECOVER success → running');
+          } else {
+            // If RECOVER window expired and all stop conditions met, stop
+            const recoverExpired = Date.now() >= recoverUntilRef.current;
+            const sustainedUncover = uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS;
+            if (recoverExpired && ranMs >= CFG.MIN_RUN_MS && coolOK && canStopForQuality && sustainedUncover) {
+              console.log(`🔴 Auto-stop: Poor C++ quality sustained after RECOVER (conf: ${cppConf.toFixed(3)}, snr: ${cppSnr.toFixed(1)}, uncoverMs: ${uncoverStableMsRef.current})`);
+              logTelemetryEvent('quality_gates', {
+                triggerType: 'cpp_quality_drop',
+                cppGoodQuality,
+                cppConfidence: cppConf,
+                cppSnr: cppSnr,
+                recoverWindowMs: CFG.RECOVER_MS,
+                uncoverDuration: uncoverStableMsRef.current,
+                sessionDuration: ranMs,
+                reason: 'poor_cpp_quality_sustained_after_recover'
+              });
+              await stopAnalysisFSM('cpp_quality_drop');
+              return;
+            }
+          }
         }
           
           // Status mesajını güncelle + FSM warmup transition
@@ -1647,7 +2018,8 @@ export default function CameraPPGAnalyzer() {
           if (inWarmup) {
             setStatusMessage('⏳ Isınma: pozlama/sinyal oturuyor...');
           } else if ((newMetrics as any).quality?.goodQuality) {
-            setStatusMessage(`✅ Kaliteli sinyal - BPM: ${newMetrics.bpm?.toFixed?.(0) ?? '—'} 💓 ${String(currentBeatCount)} beat`);
+            const bpmText = ((newMetrics as any).bpmUI ?? newMetrics.bpm);
+            setStatusMessage(`✅ Kaliteli sinyal - BPM: ${bpmText?.toFixed?.(0) ?? '—'} 💓 ${String(currentBeatCount)} beat`);
           } else {
             setStatusMessage(`⚠️ Zayıf sinyal - ${(newMetrics as any).quality?.qualityWarning || 'Parmağınızı kameraya daha iyi yerleştirin'}`);
           }
@@ -1790,6 +2162,10 @@ export default function CameraPPGAnalyzer() {
     console.log('Camera device available:', !!device);
   }, [hasPermission, device]);
   
+  // Confidence pill color unified with displayed percentage
+  const effConf = getEffectiveConfidence(metrics?.quality);
+  const confColor = effConf >= 0.7 ? '#4CAF50' : effConf >= 0.4 ? '#FB8C00' : '#f44336';
+
   return (
     <ScrollView style={styles.scroll} contentContainerStyle={styles.container}>
       <Text style={styles.title}>📱 Kamera PPG - Kalp Atışı Ölçümü</Text>
@@ -1861,9 +2237,9 @@ export default function CameraPPGAnalyzer() {
 
 
       {/* PPG Sinyali Gösterimi - Kalp Grafiği */}
-      {ppgSignal.length > 0 && (
+      {(uiSignal.length > 0 || ppgSignal.length > 0) && (
         <View style={styles.signalContainer}>
-          <Text style={styles.signalTitle}>💓 PPG Kalp Grafiği (son {ppgSignal.length} sample)</Text>
+          <Text style={styles.signalTitle}>💓 PPG Kalp Grafiği (son {((waveformMode==='raw' ? ppgSignal.length : uiSignal.length) || 0)} sample)</Text>
           <Text style={styles.signalText}>
             Frame: {frameCount} | Buffer: {frameBufferRef.current.length}
           </Text>
@@ -1871,7 +2247,22 @@ export default function CameraPPGAnalyzer() {
           {/* Gelişmiş PPG Waveform Grafiği - Peak'leri göster */}
           <View style={styles.waveformContainer}>
             {(() => {
-              const window = ppgSignal.slice(-50);
+              const srcPref = waveformMode === 'raw' ? ppgSignal : uiSignal;
+              const src = (srcPref && srcPref.length > 0) ? srcPref : ppgSignal;
+              let window = src.slice(-50);
+              if (waveformMode === 'filtered' && window.length > 2) {
+                const smoothed: number[] = new Array(window.length);
+                const k = 2;
+                for (let i = 0; i < window.length; i++) {
+                  let s = 0, c = 0;
+                  for (let j = -k; j <= k; j++) {
+                    const idx = i + j;
+                    if (idx >= 0 && idx < window.length) { s += window[idx]; c++; }
+                  }
+                  smoothed[i] = s / c;
+                }
+                window = smoothed;
+              }
               const minVal = Math.min(...window);
               const maxVal = Math.max(...window);
               // Single-pass mean/std for the window
@@ -1886,16 +2277,31 @@ export default function CameraPPGAnalyzer() {
               const std = Math.sqrt(Math.max(0, variance));
               const threshold = mean + 0.5 * std;
               
+              // Analyzer peak overlay (yalnızca timestamp push sonrası ve resampled modda sağlıklı)
+              let peakUI = new Set<number>();
+              try {
+                if (tsPushOkRef.current && startOffsetSecRef.current != null && uiSignal.length > 0) {
+                  const nowT = tsBufferRef.current[tsBufferRef.current.length - 1];
+                  const targetFs = 30;
+                  const winSec = window.length / targetFs;
+                  const tStart = nowT - winSec;
+                  const peaks: number[] = Array.isArray(lastPeakIndices) ? lastPeakIndices : [];
+                  const offset = startOffsetSecRef.current;
+                  peaks.forEach((pi) => {
+                    const tPeak = offset + (pi / analyzerFs);
+                    if (tPeak >= tStart && tPeak <= nowT) {
+                      const idx = Math.round((tPeak - tStart) * targetFs);
+                      if (idx >= 0 && idx < window.length) peakUI.add(idx);
+                    }
+                  });
+                }
+              } catch {}
+
               return window.map((value, index, array) => {
                 const normalizedHeight = maxVal > minVal
                   ? ((value - minVal) / (maxVal - minVal)) * 100
                   : 50;
-                let isPeak = false;
-                if (index > 0 && index < array.length - 1) {
-                  const prev = array[index - 1];
-                  const next = array[index + 1];
-                  isPeak = value > threshold && value > prev && value >= next;
-                }
+                const isOverlayPeak = peakUI.has(index);
                 return (
                   <View
                     key={index}
@@ -1903,10 +2309,10 @@ export default function CameraPPGAnalyzer() {
                       styles.waveformBar,
                       {
                         height: Math.max(2, normalizedHeight),
-                        backgroundColor: isPeak ? '#ff0000'
+                        backgroundColor: isOverlayPeak ? '#ff0000'
                           : normalizedHeight > 70 ? '#ff6666'
                           : normalizedHeight > 40 ? '#ffaa00' : '#66ff66',
-                        width: isPeak ? 4 : 3,
+                        width: isOverlayPeak ? 4 : 3,
                       }
                     ]}
                   />
@@ -1948,10 +2354,10 @@ export default function CameraPPGAnalyzer() {
           {metricsTab === 'Özet' && (
             <View>
           <View style={styles.metricsGrid}>
-            <View style={styles.metricBox}>
-              <Text style={styles.metricValue}>{String(metrics.bpm?.toFixed?.(0) ?? '—')}</Text>
-              <Text style={styles.metricLabel}>BPM</Text>
-            </View>
+                <View style={styles.metricBox}>
+                  <Text style={styles.metricValue}>{String(((metrics as any).bpmUI ?? metrics.bpm)?.toFixed?.(0) ?? '—')}</Text>
+                  <Text style={styles.metricLabel}>BPM</Text>
+                </View>
             <View style={styles.metricBox}>
                   <Text style={styles.metricValue}>
                     {useUnifiedConfidence ? 
@@ -2038,7 +2444,6 @@ export default function CameraPPGAnalyzer() {
                 </>
               )}
               <Text style={styles.detailItem}><Text style={styles.detailKey}>SNR dB:</Text> {String(metrics.quality?.snrDb?.toFixed?.(1) ?? '—')}</Text>
-              <Text style={styles.detailItem}><Text style={styles.detailKey}>f0 Hz:</Text> {String((metrics as any)?.quality?.f0Hz?.toFixed?.(2) ?? '—')}</Text>
               <Text style={styles.detailItem}><Text style={styles.detailKey}>Uyarı:</Text> {String(metrics.quality?.qualityWarning ?? '—')}</Text>
             </View>
           )}
@@ -2089,12 +2494,35 @@ export default function CameraPPGAnalyzer() {
                   ))}
                 </View>
               </View>
+
+              {/* Waveform Mode */}
+              <View style={[styles.grid2col, { marginBottom: 16 }]}>
+                <Text style={styles.detailKey}>Waveform Mode:</Text>
+                <View style={{ flexDirection: 'row' }}>
+                  {(['raw','resampled','filtered'] as const).map(mode => (
+                    <TouchableOpacity
+                      key={mode}
+                      style={[
+                        styles.gridButton,
+                        waveformMode === mode ? styles.gridButtonActive : styles.gridButtonInactive
+                      ]}
+                      onPress={() => {
+                        setWaveformMode(mode);
+                        logTelemetryEvent('waveform_mode_change', { mode });
+                      }}
+                    >
+                      <Text style={styles.gridButtonText}>{mode}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
               
               {/* Base Metrics */}
               <View style={styles.grid2col}>
                 <Text style={styles.detailItem}><Text style={styles.detailKey}>RR Sayısı:</Text> {String(Array.isArray((metrics as any)?.rrList) ? (metrics as any).rrList.length : 0)}</Text>
                 <Text style={styles.detailItem}><Text style={styles.detailKey}>Peak Sayısı:</Text> {String(Array.isArray((metrics as any)?.peakList) ? (metrics as any).peakList.length : 0)}</Text>
-                
+                <Text style={styles.detailItem}><Text style={styles.detailKey}>Waveform:</Text> {waveformMode}</Text>
+              
                 {/* RR Correction Stats */}
                 {rrCorrectionEnabled && metrics?.quality?.correctedRRList && (
                   <>
