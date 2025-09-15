@@ -155,7 +155,6 @@ export default function CameraPPGAnalyzer() {
   const [lastPeakIndices, setLastPeakIndices] = useState<number[]>([]);  // Peak takibi için
   const [hapticPeakCount, setHapticPeakCount] = useState(0);  // Haptic tetiklenen peak sayısı
   const [missedPeakCount, setMissedPeakCount] = useState(0);  // Atlanan peak sayısı
-  const [torchOn, setTorchOn] = useState(false); // Auto-controlled
   const [useNativePPG, setUseNativePPG] = useState(true); // Fixed ON - ONLY REAL PPG DATA
   const [roi, setRoi] = useState(0.5); // ✅ Larger ROI for more light collection
   // Use green + chrom for improved SNR and robustness
@@ -252,11 +251,56 @@ export default function CameraPPGAnalyzer() {
   const torchDutyStartRef = useRef<number>(0);
   const torchTotalDutyRef = useRef<number>(0);
   
-  // ✅ CRITICAL FIX: Lower torch to prevent plugin confidence collapse
-  const [torchLevel, setTorchLevel] = useState<number>(0.3); // ✅ LOW torch to prevent overexposure
-  const torchLevels = [0.2, 0.3, 0.4]; // Very conservative levels for stability
-  const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(1); // ✅ Start with LOW (0.3)
-  // Torch thrash-guard state
+  // Central configuration - all magic numbers in one place (moved here to fix declaration order)
+  const CFG = {
+    // Confidence thresholds
+    CONF_HIGH: 0.35,              // Start analysis threshold
+    CONF_LOW: 0.20,               // Stop analysis threshold
+    CONF_HAPTIC: 0.20,            // Haptic feedback threshold
+    COVER_ON: 0.25,               // Finger detected threshold
+    COVER_OFF: 0.04,              // Finger lost threshold
+    COVER_TREND_THRESHOLD: -0.5,  // Cover trend decline threshold
+    COVER_VERY_LOW: 0.03,         // Very low confidence for cover loss
+    
+    // Timing constants (ms)
+    HIGH_DEBOUNCE_MS: 400,        // Start debounce time
+    LOW_DEBOUNCE_MS: 1200,        // Stop debounce time
+    WARMUP_MS: 3000,              // Warmup period
+    MIN_RUN_MS: 7000,             // Minimum run time before stop
+    COOLDOWN_MS: 3000,            // Cooldown between start/stop
+    STABLE_MS_FOR_TORCH_DOWN: 10000, // Time before lowering torch
+    RECOVER_MS: 2000,             // Recovery window for quality dips
+    PRETORCH_DROP_MS: 400,        // Torch ramp-up ignore period
+    TORCH_RAMPUP_MS: 2000,        // Torch confidence protection period
+    TORCH_THROTTLE_MS: 1500,      // Torch change throttle
+    FALLBACK_AFTER_MS: 800,       // Producer watchdog timeout
+    NO_SIGNAL_TIMEOUT_MS: 2000,   // No signal early stop timeout
+    QUALITY_READY_TIMEOUT_MS: 20000, // Max wait for quality ready
+    
+    // Torch levels
+    TORCH_LOW_LEVEL: 0.25,        // Battery-friendly level
+    TORCH_LEVELS: [0.2, 0.3, 0.4], // Progressive torch levels
+    
+    // Timer intervals (ms)
+    MASTER_TICK_MS: 100,          // Master timer tick
+    POLL_INTERVAL_MS: 200,        // Native polling interval
+    UI_UPDATE_FPS: 15,            // UI update frequency
+    TELEMETRY_INTERVAL_MS: 10000, // Telemetry summary interval
+    WATCHDOG_INTERVAL_MS: 1000,   // Watchdog check interval
+    PROBE_TICK_MS: 250,           // SNR probe tick
+    
+    // Buffer sizes
+    BUFFER_SECONDS: 15,           // Signal buffer duration
+    MIN_BUFFER_SECONDS: 8,        // Minimum buffer for analysis
+    WAVEFORM_SAMPLES: 150,        // Waveform display samples
+    CONF_HISTORY_SIZE: 10,        // Confidence history size
+    QUALITY_HISTORY_SIZE: 60,     // Quality history entries
+  } as const;
+  
+  // Torch control - unified configuration
+  const [torchOn, setTorchOn] = useState(false); // Unified torch state
+  const [torchLevel, setTorchLevel] = useState<number>(CFG.TORCH_LEVELS[1]);
+  const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(1);
   const torchTargetRef = useRef<number | null>(null);
   const lastTorchChangeAtRef = useRef(0);
 
@@ -265,7 +309,7 @@ export default function CameraPPGAnalyzer() {
       if (!device?.hasTorch || Platform.OS !== 'ios') return;
       const now = Date.now();
       const cur = torchTargetRef.current ?? torchLevel;
-      const tooSoon = now - lastTorchChangeAtRef.current < 1500; // 1.5s throttle
+      const tooSoon = now - lastTorchChangeAtRef.current < CFG.TORCH_THROTTLE_MS;
       const sameLevel = Math.abs(cur - nextLevel) < 0.05;
       if (tooSoon || sameLevel) return;
 
@@ -273,7 +317,8 @@ export default function CameraPPGAnalyzer() {
       torchTargetRef.current = nextLevel;
       lastTorchChangeAtRef.current = now;
       setTorchLevel(nextLevel);
-      setCurrentTorchLevelIndex(nextLevel >= 0.4 ? 2 : nextLevel >= 0.3 ? 1 : 0);
+      const idx = CFG.TORCH_LEVELS.findIndex(l => Math.abs(l - nextLevel) < 0.05);
+      setCurrentTorchLevelIndex(idx >= 0 ? idx : 1);
       logTelemetryEvent('torch_auto_adjust', { action: cur < nextLevel ? 'up' : 'down', level: nextLevel, reason });
     } catch (e) {
       console.warn('setTorchLevelSafely failed:', e);
@@ -306,25 +351,11 @@ export default function CameraPPGAnalyzer() {
   const unifiedConfCallCountRef = useRef(0);
   // Aggregate for periodic summaries
   const qualityAggRef = useRef({ count: 0, sumConf: 0, sumSnr: 0, recoverCount: 0, stops: 0 });
-  const samplingRate = analyzerFs; // keep analyzer in sync with actual fps
-  const bufferSize = samplingRate * 15; // 15 saniye buffer - daha stabil BPM için
-  const analysisInterval = 1000; // 1000ms'de bir analiz - STABİL sonuçlar için
+  const samplingRate = analyzerFs;
+  const bufferSize = samplingRate * CFG.BUFFER_SECONDS;
+  const analysisInterval = 1000; // Analysis interval in ms
 
   // FSM kontrollü başlat/durdur yardımcıları
-  // Konfig (tek noktadan)
-  const CFG = {
-    CONF_HIGH: 0.35,  // ✅ Conservative - prevent erken warmup'lar
-    CONF_LOW: 0.20,   // ✅ Higher threshold for stability
-    HIGH_DEBOUNCE_MS: 400,   // ✅ Çok daha kısa - hızlı start
-    LOW_DEBOUNCE_MS: 1200,   // ✅ Premature stop önleme
-    WARMUP_MS: 3000,         // ✅ 3s warmup uygun
-    MIN_RUN_MS: 7000,        // ✅ 7s minimum run uygun  
-    COOLDOWN_MS: 3000,       // ✅ 3s cooldown daha güvenli
-    STABLE_MS_FOR_TORCH_DOWN: 10000, // ✅ 10s stable → lower torch
-    TORCH_LOW_LEVEL: 0.25,    // ✅ Ultra-low level after stable to prevent overexposure
-    RECOVER_MS: 2000,        // ✅ Allow 2s brief dips before stopping
-    // PRETORCH_IGNORE_FRAMES kaldırıldı - hiç veri atılmıyor
-  } as const;
 
   const resetStabilityCounters = useCallback(() => {
     coverStableCountRef.current = 0;
@@ -434,8 +465,8 @@ export default function CameraPPGAnalyzer() {
           console.log('🔦 Torch ON (VisionCamera managed)');
         }
         
-        // ✅ P1 FIX: Set pretorch drop period when torch turns on
-        pretorchUntilRef.current = now + PRETORCH_DROP_MS;
+        // Set pretorch drop period when torch turns on
+        pretorchUntilRef.current = now + CFG.PRETORCH_DROP_MS;
         
         logTelemetryEvent('torch_state_guarantee', { 
           torchOn: true, 
@@ -598,31 +629,16 @@ export default function CameraPPGAnalyzer() {
   const isAnalyzingRef = useRef(isAnalyzing);  // ✅ Poll interval staleness önleme
   const lastDataAtRef = useRef(Date.now());    // ✅ Watchdog timer için
   
-  // ✅ P1 FIX: Producer watchdog & fallback ingest
+  // Producer watchdog & fallback ingest
   const lastSampleAtRef = useRef<number>(0);
-  const FALLBACK_AFTER_MS = 800;
   const [enableFallback, setEnableFallback] = useState(false);
   
-  // ✅ CRITICAL: Cover state tracking to prevent fake signals
-  // 🔍 OPTIMIZED: Further lowered thresholds based on real device data
-  const COVER_ON = 0.25;   // Works well for detection
-  const COVER_OFF = 0.04;  // CRITICAL: Very low threshold to prevent false COVER_LOST with torch  
+  // Cover state tracking - unified with CFG constants
   const isCoveredRef = useRef(false);
-  const [coveredForWorklet, setCoveredForWorklet] = useState(false); // For worklet communication
-  
-  // ✅ ADVANCED: Plugin confidence trend tracking for stability
+  const [coveredForWorklet, setCoveredForWorklet] = useState(false);
   const confHistoryRef = useRef<number[]>([]);
-  const CONF_HISTORY_SIZE = 10;
-  
-  // ✅ P1 FIX: No-signal early stop
-  const NO_SIGNAL_TIMEOUT_MS = 2000;
-  const lastSignalCheckRef = useRef<number>(0);
-  
-  // ✅ P1 FIX: Pretorch frame drop - avoid torch/AE ramp-up noise
-  const PRETORCH_DROP_MS = 400;
   const pretorchUntilRef = useRef<number>(0);
-  // ✅ Fail-safe: Maximum time we wait for C++ quality to become ready
-  const QUALITY_READY_TIMEOUT_MS = 20000;
+  const lastSignalCheckRef = useRef<number>(0);
   
   // ✅ DEBUG: Track plugin confidence changes
   const lastLoggedConfRef = useRef<number>(-1);
@@ -641,7 +657,8 @@ export default function CameraPPGAnalyzer() {
   const heavyLogCountRef = useRef(0);
   
   // ✅ CRITICAL: DEV/PROD Analyzer Presets
-  const ANALYZER_PROFILE: 'DEV' | 'PROD' = 'PROD'; 
+  const analyzerProfile = 'PROD' as const; // Change this to 'DEV' for testing
+  const ANALYZER_PROFILE = analyzerProfile as 'DEV' | 'PROD'; // Force union type
   
   const getAnalyzerConfig = useCallback(() => {
     if (ANALYZER_PROFILE === 'DEV') {
@@ -1021,8 +1038,8 @@ export default function CameraPPGAnalyzer() {
     const qualityEntry = { timestamp: now, confidence, snr, acDc, gridQuality };
     signalQualityHistoryRef.current.push(qualityEntry);
     
-    // Keep only last 60 entries (~1 minute at 1s cadence)
-    if (signalQualityHistoryRef.current.length > 60) {
+    // Keep only last entries
+    if (signalQualityHistoryRef.current.length > CFG.QUALITY_HISTORY_SIZE) {
       signalQualityHistoryRef.current.shift();
     }
     
@@ -1281,7 +1298,14 @@ export default function CameraPPGAnalyzer() {
     }
     // TypedArray (Float32Array, Float64Array, etc.)
     if (ArrayBuffer.isView(maybe) && 'length' in maybe && typeof maybe.length === 'number') {
-      return Array.from(maybe as unknown as ArrayLike<number>).map(Number).filter(isFinite);
+      // Safe conversion without double casting
+      const typed = maybe as any;
+      const result: number[] = [];
+      for (let i = 0; i < typed.length; i++) {
+        const val = Number(typed[i]);
+        if (isFinite(val)) result.push(val);
+      }
+      return result;
     }
     return [];
   }, []);
@@ -1313,11 +1337,11 @@ export default function CameraPPGAnalyzer() {
         // ✅ ADVANCED: Smart cover detection with trend analysis
         const prevCovered = isCoveredRef.current;
         
-        // Track confidence history for trend analysis
-        confHistoryRef.current.push(confVal);
-        if (confHistoryRef.current.length > CONF_HISTORY_SIZE) {
-          confHistoryRef.current.shift();
-        }
+          // Track confidence history for trend analysis
+          confHistoryRef.current.push(confVal);
+          if (confHistoryRef.current.length > CFG.CONF_HISTORY_SIZE) {
+            confHistoryRef.current.shift();
+          }
         
         // Calculate confidence trend (average of last 5 vs first 5)
         const history = confHistoryRef.current;
@@ -1331,20 +1355,20 @@ export default function CameraPPGAnalyzer() {
         // 🔍 DEBUG: Log cover detection values for troubleshooting
         if (globalFrameCounter.current % 60 === 0) { // Every 2 seconds at 30fps
           const torchMs = torchDutyStartRef.current ? Date.now() - torchDutyStartRef.current : 0;
-          console.log(`🔍 COVER DEBUG: confVal=${confVal.toFixed(4)}, trend=${trend.toFixed(4)}, torchLevel=${torchLevel}, torchMs=${torchMs}, COVER_OFF=${COVER_OFF}, isCovered=${isCoveredRef.current}`);
+          console.log(`🔍 COVER DEBUG: confVal=${confVal.toFixed(4)}, trend=${trend.toFixed(4)}, torchLevel=${torchLevel}, torchMs=${torchMs}, COVER_OFF=${CFG.COVER_OFF}, isCovered=${isCoveredRef.current}`);
         }
         
         // Smart cover detection: Consider both absolute value and trend
         // 🔥 CRITICAL: Ignore confidence drops during torch ramp-up (first 2s after torch on)
-        const torchJustTurnedOn = torchDutyStartRef.current && (Date.now() - torchDutyStartRef.current) < 2000;
+        const torchJustTurnedOn = torchDutyStartRef.current && (Date.now() - torchDutyStartRef.current) < CFG.TORCH_RAMPUP_MS;
         
-        if (confVal >= COVER_ON) {
+        if (confVal >= CFG.COVER_ON) {
           isCoveredRef.current = true;
-        } else if (confVal <= COVER_OFF) {
+        } else if (confVal <= CFG.COVER_OFF) {
           // Only lose cover if NOT during torch ramp-up period
           if (!torchJustTurnedOn) {
             // Only lose cover if trend is also declining (prevents false positives)
-            if (trend < -0.5 && confVal < 0.03) { // Very steep decline AND extremely low (more tolerant)
+            if (trend < CFG.COVER_TREND_THRESHOLD && confVal < CFG.COVER_VERY_LOW) {
               isCoveredRef.current = false;
             }
           }
@@ -1359,7 +1383,7 @@ export default function CameraPPGAnalyzer() {
         // ✅ CRITICAL: Cover lost - flush all buffers and stop analysis immediately
         // BUT: Don't stop if we're in starting state (more tolerant during startup)
         if (prevCovered && !isCoveredRef.current) {
-          console.log(`🚨 COVER LOST - Flushing all buffers${fsmRef.current === 'starting' ? ' (BUT TOLERANT IN STARTING STATE)' : ' and stopping analysis'} (confVal: ${confVal.toFixed(4)} < ${COVER_OFF})`);
+          console.log(`🚨 COVER LOST - Flushing all buffers${fsmRef.current === 'starting' ? ' (BUT TOLERANT IN STARTING STATE)' : ' and stopping analysis'} (confVal: ${confVal.toFixed(4)} < ${CFG.COVER_OFF})`);
           logTelemetryEvent('cover_state_change', { covered: false, conf: confVal });
           
           // Flush all data buffers to prevent fake signal continuation
@@ -1379,7 +1403,7 @@ export default function CameraPPGAnalyzer() {
             // Don't stop, let it continue trying during startup
           }
         } else if (!prevCovered && isCoveredRef.current) {
-          console.log(`✅ COVER DETECTED - Finger contact established (confVal: ${confVal.toFixed(4)} >= ${COVER_ON})`);
+          console.log(`✅ COVER DETECTED - Finger contact established (confVal: ${confVal.toFixed(4)} >= ${CFG.COVER_ON})`);
           logTelemetryEvent('cover_state_change', { covered: true, conf: confVal });
         }
         let latestSamples: number[] = [];
@@ -1414,7 +1438,7 @@ export default function CameraPPGAnalyzer() {
         
         // ✅ P1 FIX: Producer watchdog - activate fallback if native producer stalls
         const now = Date.now();
-        const noProducer = (now - lastSampleAtRef.current) > FALLBACK_AFTER_MS;
+        const noProducer = (now - lastSampleAtRef.current) > CFG.FALLBACK_AFTER_MS;
         const shouldEnableFallback = noProducer && isAnalyzingRef.current;
         
         if (shouldEnableFallback !== enableFallback) {
@@ -1457,7 +1481,7 @@ export default function CameraPPGAnalyzer() {
           } else {
             // Check for timeout
             const noSignalDuration = now - lastSignalCheckRef.current;
-            if (noSignalDuration > NO_SIGNAL_TIMEOUT_MS) {
+            if (noSignalDuration > CFG.NO_SIGNAL_TIMEOUT_MS) {
               console.log(`⚠️ No-signal early stop: ${noSignalDuration}ms without data (samples: ${latestSamples.length}, covered: ${isCoveredRef.current}, conf: ${confVal})`);
               logTelemetryEvent('no_signal_early_stop', { 
                 duration: noSignalDuration,
@@ -1541,7 +1565,7 @@ export default function CameraPPGAnalyzer() {
           });
           setPpgSignal(prev => {
             const next = [...prev, ...latestSamples];
-            const trimmed = next.length > 150 ? next.slice(-150) : next;
+            const trimmed = next.length > CFG.WAVEFORM_SAMPLES ? next.slice(-CFG.WAVEFORM_SAMPLES) : next;
             // Haptic tetiği yalnızca C++ analizindeki beat artışına göre verilir (aşağıda)
             
             return trimmed;
@@ -1585,7 +1609,7 @@ export default function CameraPPGAnalyzer() {
       } catch (e) {
         // occasional polling errors are non-fatal
       }
-    }, 200);  // 200ms - STABIL polling interval
+    }, CFG.POLL_INTERVAL_MS);
     return () => clearInterval(pollingInterval);
   }, [isActive, useNativePPG, bufferSize]);
 
@@ -1604,12 +1628,12 @@ export default function CameraPPGAnalyzer() {
 
       const now = Date.now();
       // En az 8 saniye veri toplandıktan sonra analiz başlat (STABIL BPM için)
-      const minBufferSize = samplingRate * 8;  // 8 saniye minimum veri - stabil sonuçlar
+      const minBufferSize = samplingRate * CFG.MIN_BUFFER_SECONDS;
       if (analyzerRef.current && (now - lastAnalysisTimeRef.current > analysisInterval) && frameBufferRef.current.length >= minBufferSize) {
         lastAnalysisTimeRef.current = now;
         performRealtimeAnalysis();
       }
-    }, 1000 / 15); // 15 FPS UI update
+    }, 1000 / CFG.UI_UPDATE_FPS);
     
     return () => clearInterval(uiUpdateTimer);
   }, [isActive, analysisInterval, samplingRate, bufferSize, useNativePPG]);
@@ -1629,7 +1653,7 @@ export default function CameraPPGAnalyzer() {
           fsm: fsmRef.current
         });
       }
-    }, 10000);
+    }, CFG.TELEMETRY_INTERVAL_MS);
     return () => clearInterval(t);
   }, [isAnalyzing, logTelemetryEvent]);
 
@@ -1703,7 +1727,7 @@ export default function CameraPPGAnalyzer() {
       }
     };
 
-    probeTimer = setInterval(tick, 250);
+    probeTimer = setInterval(tick, CFG.PROBE_TICK_MS);
     return () => probeTimer && clearInterval(probeTimer);
   }, [enableProbe, logTelemetryEvent]); // ✅ REMOVED: ppgMode to prevent re-triggering
 
@@ -1753,7 +1777,7 @@ export default function CameraPPGAnalyzer() {
         console.log(`📦 Post-pretorch batch: Pushing ${pending.length} accumulated samples`);
         logTelemetryEvent('pretorch_batch_size', {
           batchSize: pending.length,
-          pretorchDuration: PRETORCH_DROP_MS,
+          pretorchDuration: CFG.PRETORCH_DROP_MS,
           timestamp: now
         });
       }
@@ -1954,7 +1978,7 @@ export default function CameraPPGAnalyzer() {
         // ✅ Fail-safe: quality never ready within timeout → stop safely
         if (!cppQualityReadyRef.current) {
           const elapsed = Date.now() - (analyzeStartTsRef.current || 0);
-          if (elapsed >= QUALITY_READY_TIMEOUT_MS) {
+          if (elapsed >= CFG.QUALITY_READY_TIMEOUT_MS) {
             logTelemetryEvent('quality_never_ready_timeout', { elapsedMs: elapsed });
             await stopAnalysisFSM('quality_never_ready');
             return;
@@ -2002,7 +2026,7 @@ export default function CameraPPGAnalyzer() {
         setLastBeatCount(prev => {
           const newly = Math.max(0, currentBeatCount - prev);
           if (newly > 0) {
-            if (fsmRef.current === 'running' && cppGoodQuality && cppConf >= 0.2) {
+            if (fsmRef.current === 'running' && cppGoodQuality && cppConf >= CFG.CONF_HAPTIC) {
               const nowH = Date.now();
               const refractoryMs = 250;
               if (!lastHapticTimeRef.current || nowH - lastHapticTimeRef.current >= refractoryMs) {
@@ -2100,7 +2124,7 @@ export default function CameraPPGAnalyzer() {
             console.log(`🟡 Warmup complete - C++ Conf: ${cppConf.toFixed(3)}, GoodQ: ${cppGoodQuality}, SNR: ${cppSnr.toFixed(1)}, BPM: ${bpmNow.toFixed(1)}, Peaks: ${peaksNow}`);
             
             // ✅ CRITICAL: C++ quality-based warmup validation using consistent cppSnr
-            const hasValidData = (cppGoodQuality && cppConf >= 0.3) || (cppSnr > 5 && peaksNow > 3) || (bpmNow > 40 && bpmNow < 180 && peaksNow > 5);
+            const hasValidData = cppGoodQuality && cppConf >= 0.3;
             const usedFallback = hasValidData && !(cppGoodQuality && cppConf >= 0.3);
 
             if (hasValidData) {
@@ -2118,17 +2142,17 @@ export default function CameraPPGAnalyzer() {
               
               // ✅ iOS-only: Torch boost when warmup extends and fallback is active
               if (Platform.OS === 'ios' && enableFallback && cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
-                const nextIdx = Math.min(currentTorchLevelIndex + 1, torchLevels.length - 1);
+                const nextIdx = Math.min(currentTorchLevelIndex + 1, CFG.TORCH_LEVELS.length - 1);
                 if (nextIdx !== currentTorchLevelIndex) {
                   setCurrentTorchLevelIndex(nextIdx);
-                  setTorchLevel(torchLevels[nextIdx]);
+                  setTorchLevel(CFG.TORCH_LEVELS[nextIdx]);
                   
-                  NativeModules.PPGCameraManager.setTorchLevel(torchLevels[nextIdx]).then(() => {
-                    console.log(`🔥 iOS Torch boost on warmup extend: ${torchLevels[nextIdx]}`);
+                  NativeModules.PPGCameraManager.setTorchLevel(CFG.TORCH_LEVELS[nextIdx]).then(() => {
+                    console.log(`🔥 iOS Torch boost on warmup extend: ${CFG.TORCH_LEVELS[nextIdx]}`);
                     logTelemetryEvent('torch_boost_on_warmup_extend', { 
                       platform: 'ios',
-                      oldLevel: torchLevels[currentTorchLevelIndex],
-                      newLevel: torchLevels[nextIdx],
+                      oldLevel: CFG.TORCH_LEVELS[currentTorchLevelIndex],
+                      newLevel: CFG.TORCH_LEVELS[nextIdx],
                       fallbackActive: enableFallback 
                     });
                   }).catch((e: unknown) => {
@@ -2259,7 +2283,7 @@ export default function CameraPPGAnalyzer() {
           });
         }
       }
-    }, 1000); // Check every second
+    }, CFG.WATCHDOG_INTERVAL_MS);
 
     return () => clearInterval(watchdogInterval);
   }, [stopAnalysisFSM]);
@@ -2350,7 +2374,7 @@ export default function CameraPPGAnalyzer() {
             ⚠️ NO CONTACT - Place finger completely over camera
           </Text>
           <Text style={styles.coverWarningSubtext}>
-            Confidence: {(pluginConfidence || 0).toFixed(3)} (Need: {COVER_ON.toFixed(3)})
+            Confidence: {(pluginConfidence || 0).toFixed(3)} (Need: {CFG.COVER_ON.toFixed(3)})
           </Text>
           <Text style={styles.coverWarningSubtext}>
             💡 Tip: Press finger firmly and keep steady{'\n'}💡 Flash optimized to prevent overexposure
