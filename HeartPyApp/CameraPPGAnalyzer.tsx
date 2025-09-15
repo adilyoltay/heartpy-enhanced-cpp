@@ -163,14 +163,21 @@ export default function CameraPPGAnalyzer() {
   // FSM ve süre-bazlı histerezis sayaçları
   const coverStableCountRef = useRef(0);
   const uncoverStableCountRef = useRef(0);
+  // STOP (C++ quality) stability counters
   const coverStableMsRef = useRef(0);
   const uncoverStableMsRef = useRef(0);
+  // START (plugin confidence) stability counters
+  const startCoverMsRef = useRef(0);
+  const startUncoverMsRef = useRef(0);
   const qualityLowMsRef = useRef(0);
   const lastPluginPollTsRef = useRef<number>(0);  // ✅ Plugin confidence timing
   const lastCppPollTsRef = useRef<number>(0);     // ✅ C++ quality timing
   const lastAutoToggleAtRef = useRef(0);
   const analyzeStartTsRef = useRef(0);
   const warmupUntilRef = useRef(0);
+  // C++ quality readiness and STOP holdoff (to avoid premature stops when quality is unknown)
+  const cppQualityReadyRef = useRef(false);
+  const qualityStopHoldoffUntilRef = useRef(0);
   const fsmRef = useRef<'idle'|'starting'|'running'|'stopping'>('idle');  // ✅ Sadeleştirildi
   // Removed UI control states
 
@@ -284,7 +291,11 @@ export default function CameraPPGAnalyzer() {
     uncoverStableCountRef.current = 0;
     coverStableMsRef.current = 0;
     uncoverStableMsRef.current = 0;
+    startCoverMsRef.current = 0;
+    startUncoverMsRef.current = 0;
     qualityLowMsRef.current = 0;
+    cppQualityReadyRef.current = false;
+    qualityStopHoldoffUntilRef.current = 0;
   }, []);
 
   // ✅ CRITICAL: Camera Lock Functions for SNR improvement
@@ -1141,11 +1152,11 @@ export default function CameraPPGAnalyzer() {
         
   // ✅ DEBUG: Auto-start logic with plugin confidence monitoring
   if (confVal > 0) {
-    console.log(`🔍 Plugin Conf: ${confVal.toFixed(3)} (threshold: ${CFG.CONF_HIGH}) - Cover: ${coverStableMsRef.current}ms`);
+    console.log(`🔍 Plugin Conf: ${confVal.toFixed(3)} (threshold: ${CFG.CONF_HIGH}) - StartCover: ${startCoverMsRef.current}ms`);
   }
   
   // ✅ Force start when frameBuffer full and plugin confidence is 0
-  if (frameBufferRef.current.length >= 400 && fsmRef.current === 'idle' && !isAnalyzing) {
+  if (frameBufferRef.current.length >= samplingRate * 12 && fsmRef.current === 'idle' && !isAnalyzing) {
     const timeSinceLastStart = Date.now() - lastAutoToggleAtRef.current;
     if (timeSinceLastStart > 5000) { // 5s cooldown
       console.log('🚀 FORCE START: frameBuffer full + plugin conf low/0, manual trigger for analysis');
@@ -1160,25 +1171,27 @@ export default function CameraPPGAnalyzer() {
   const pluginDt = lastPluginPollTsRef.current ? Math.max(1, nowTs - lastPluginPollTsRef.current) : 200;
   lastPluginPollTsRef.current = nowTs;
   
-  // ✅ Only track plugin confidence for START trigger (not STOP)
-  if (confVal >= CFG.CONF_HIGH) {
-    coverStableMsRef.current += pluginDt;
-    uncoverStableMsRef.current = 0;
-  } else if (confVal <= CFG.CONF_LOW) {
-    uncoverStableMsRef.current += pluginDt;
-    coverStableMsRef.current = 0;
-  } else {
-    // Middle zone - slow decay
-    coverStableMsRef.current = Math.max(0, coverStableMsRef.current - pluginDt/2);
-    uncoverStableMsRef.current = Math.max(0, uncoverStableMsRef.current - pluginDt/2);
+  // ✅ Only track plugin confidence for START trigger (not STOP). Update only when idle.
+  if (!isAnalyzingRef.current) {
+    if (confVal >= CFG.CONF_HIGH) {
+      startCoverMsRef.current += pluginDt;
+      startUncoverMsRef.current = 0;
+    } else if (confVal <= CFG.CONF_LOW) {
+      startUncoverMsRef.current += pluginDt;
+      startCoverMsRef.current = 0;
+    } else {
+      // Middle zone - slow decay
+      startCoverMsRef.current = Math.max(0, startCoverMsRef.current - pluginDt / 2);
+      startUncoverMsRef.current = Math.max(0, startUncoverMsRef.current - pluginDt / 2);
+    }
   }
   
   // Auto-start triggering based on plugin confidence (START only!)
   const coolOK = Date.now() - lastAutoToggleAtRef.current >= CFG.COOLDOWN_MS;
   
   // START: high confidence + debounce + cooldown
-  if (!isAnalyzingRef.current && coverStableMsRef.current >= CFG.HIGH_DEBOUNCE_MS && coolOK) {
-    console.log(`🟢 Auto-start triggered: conf=${confVal.toFixed(3)}, coverMs=${coverStableMsRef.current}, coolOK=${coolOK}`);
+  if (!isAnalyzingRef.current && startCoverMsRef.current >= CFG.HIGH_DEBOUNCE_MS && coolOK) {
+    console.log(`🟢 Auto-start triggered: conf=${confVal.toFixed(3)}, coverMs=${startCoverMsRef.current}, coolOK=${coolOK}`);
     await startAnalysisFSM();
   }
   
@@ -1204,19 +1217,20 @@ export default function CameraPPGAnalyzer() {
             
             return trimmed;
           });
-          // If timestamps available and analyzer supports, push with timestamps now (optional)
+          // If timestamps available and analyzer supports, push with timestamps (only after pre-torch)
           try {
-            if (latestTs && latestTs.length === latestSamples.length && analyzerRef.current?.pushWithTimestamps) {
+            const nowPush = Date.now();
+            const inPretorchPush = nowPush < (pretorchUntilRef.current || 0);
+            if (!inPretorchPush && latestTs && latestTs.length === latestSamples.length && analyzerRef.current?.pushWithTimestamps) {
               const xs = new Float32Array(latestSamples);
               const ts = new Float64Array(latestTs);
               await analyzerRef.current.pushWithTimestamps(xs, ts);
-              // ✅ ÖNEMLİ: pendingSamplesRef'i temizle çünkü data push edildi!
+              // Clear pending only when we actually pushed to native
               pendingSamplesRef.current = [];
             }
           } catch (e) {
             console.warn('pushWithTimestamps failed, will use regular push:', e);
-            // ✅ Bu normal - rtPushTs mevcut değilse regular push kullanır
-            // Hata durumunda pendingSamplesRef dolu kalır, normal push kullanılır
+            // Normal push pipeline will handle pending samples
           }
         }
         // Otomatik başlat/durdur: süre-bazlı histerezis + cooldown + min-run
@@ -1276,12 +1290,16 @@ export default function CameraPPGAnalyzer() {
   // Face mode disabled: always run red + mean (contact PPG).
 
   // Real-time analiz - incremental streaming push + metric poll
+  // Prevent overlapping analysis cycles
+  const analysisInFlightRef = useRef(false);
+
   const performRealtimeAnalysis = async () => {
-    if (!analyzerRef.current) {
-      console.log('⚠️ Analyzer not initialized!');
+    if (analysisInFlightRef.current || !analyzerRef.current) {
+      if (!analyzerRef.current) console.log('⚠️ Analyzer not initialized!');
       return;
     }
 
+    analysisInFlightRef.current = true;
     console.log('🔄 Starting realtime analysis...');
 
     try {
@@ -1308,7 +1326,9 @@ export default function CameraPPGAnalyzer() {
         });
       }
       
-      console.log(`📥 Pushing ${pending.length} samples to C++ analyzer`);
+      if (pending.length > 0) {
+        console.log(`📥 Pushing ${pending.length} samples to C++ analyzer`);
+      }
       
       // ✅ DEBUG: Sample değerlerini kontrol et
       if (pending.length > 0) {
@@ -1428,7 +1448,8 @@ export default function CameraPPGAnalyzer() {
             const confidence = qualityMetrics.confidence ?? 0;
             const rejectionRate = qualityMetrics.rejectionRate ?? 0;
             const pHalfOverFund = qualityMetrics.pHalfOverFund ?? 0;
-            const rrCount = Array.isArray(qualityMetrics.rrList) ? qualityMetrics.rrList.length : 0;
+            // Use top-level rrList from C++ result for RR count
+            const rrCount = Array.isArray((newMetrics as any)?.rrList) ? (newMetrics as any).rrList.length : 0;
             
             // ✅ CRITICAL: HRV quality criteria using consistent cppSnr naming
             const hrvQualityGate = (
@@ -1474,12 +1495,30 @@ export default function CameraPPGAnalyzer() {
         const now = Date.now();
         const cppDt = lastCppPollTsRef.current ? Math.max(1, now - lastCppPollTsRef.current) : 200;
         lastCppPollTsRef.current = now;
-        
+
+        // ✅ Readiness detection: mark C++ quality as ready once any metric matures
+        const beatsForReady = (newMetrics as any)?.quality?.totalBeats ?? 0;
+        if (!cppQualityReadyRef.current) {
+          if (cppConf > 0.05 || cppSnr > 1 || beatsForReady >= 12) {
+            cppQualityReadyRef.current = true;
+            qualityStopHoldoffUntilRef.current = Date.now() + 3000; // 3s grace for stabilization
+            logTelemetryEvent('cpp_quality_ready', {
+              beats: beatsForReady,
+              cppConf,
+              cppSnr
+            });
+          }
+        }
+
         // ✅ CRITICAL: Update stability counters using C++ timing and consistent naming
-        if (cppGoodQuality && (cppConf >= 0.3 || cppSnr > 6)) {
+        if (!cppQualityReadyRef.current) {
+          // Unknown phase: do not accumulate uncover; let cover decay slowly
+          coverStableMsRef.current = Math.max(0, coverStableMsRef.current - cppDt * 0.5);
+        } else if (cppGoodQuality && (cppConf >= 0.3 || cppSnr > 6)) {
           coverStableMsRef.current += cppDt;
           uncoverStableMsRef.current = 0;
-        } else if (!cppGoodQuality || cppConf <= 0.1) {
+        } else if (!cppGoodQuality && (cppConf <= 0.1 && cppSnr <= 3)) {
+          // Treat as bad only when both are weak
           uncoverStableMsRef.current += cppDt;
           coverStableMsRef.current = 0;
         } else {
@@ -1527,11 +1566,13 @@ export default function CameraPPGAnalyzer() {
         const coolOK = Date.now() - lastAutoToggleAtRef.current >= CFG.COOLDOWN_MS;
         
         // ✅ CRITICAL: Single STOP gate using only C++ quality with telemetry
+        const canStopForQuality = cppQualityReadyRef.current && Date.now() >= qualityStopHoldoffUntilRef.current;
         if (fsmRef.current === 'running' && 
             ranMs >= CFG.MIN_RUN_MS && 
             coolOK && 
+            canStopForQuality &&
             uncoverStableMsRef.current >= CFG.LOW_DEBOUNCE_MS &&
-            (!cppGoodQuality || cppConf <= 0.1)) {
+            (!cppGoodQuality && cppConf <= 0.1 && cppSnr <= 3)) {
           
           console.log(`🔴 Auto-stop: Poor C++ quality (goodQ: ${cppGoodQuality}, conf: ${cppConf.toFixed(3)}, uncoverMs: ${uncoverStableMsRef.current})`);
           
@@ -1565,10 +1606,16 @@ export default function CameraPPGAnalyzer() {
             
             // ✅ CRITICAL: C++ quality-based warmup validation using consistent cppSnr
             const hasValidData = (cppGoodQuality && cppConf >= 0.3) || (cppSnr > 5 && peaksNow > 3) || (bpmNow > 40 && bpmNow < 180 && peaksNow > 5);
-            
+            const usedFallback = hasValidData && !(cppGoodQuality && cppConf >= 0.3);
+
             if (hasValidData) {
-              console.log('🟡 Warmup OK → running (C++ quality validated)');
+              console.log(`🟡 Warmup OK → running (${usedFallback ? 'fallback:bpm+peaks' : 'cpp_quality'})`);
               fsmRef.current = 'running';
+              // If fallback used, hold off STOP briefly to allow C++ quality to mature
+              if (usedFallback) {
+                qualityStopHoldoffUntilRef.current = Date.now() + 3000; // 3s
+                logTelemetryEvent('warmup_fallback_holdoff', { peaksNow, bpmNow, cppConf, cppSnr });
+              }
             } else {
               console.log(`🔴 Warmup failed - C++ Conf: ${cppConf.toFixed(3)}, GoodQ: ${cppGoodQuality}, SNR: ${cppSnr.toFixed(1)} → extending warmup`);
               // ✅ Warmup'ı uzat, hemen durdurmak yerine
@@ -1616,10 +1663,10 @@ export default function CameraPPGAnalyzer() {
     } catch (error) {
       console.error('Analysis error:', error);
       setStatusMessage('❌ Analiz hatası - detay: ' + String(error));
+    } finally {
+      analysisInFlightRef.current = false;
     }
   };
-
-  const pendingActivateRef = useRef(false);
 
   // Analizi başlat/durdur - FSM state'ini güncelle
   const toggleAnalysis = async () => {
@@ -1636,15 +1683,7 @@ export default function CameraPPGAnalyzer() {
     await startAnalysisFSM();
   };
 
-  // Activate camera once device becomes available after permission
-  useEffect(() => {
-    if (isAnalyzing && pendingActivateRef.current && hasPermission && device) {
-      console.log('🟢 Device ready after permission; activating camera');
-      pendingActivateRef.current = false;
-          setIsActive(true);
-      setStatusMessage('Analiz başlatıldı');
-    }
-  }, [isAnalyzing, hasPermission, device]);
+  // (removed) pendingActivateRef path; activation handled by FSM
 
   // ✅ PHASE 1: AppState listener - background handling + torch guarantee
   useEffect(() => {
@@ -1729,16 +1768,11 @@ export default function CameraPPGAnalyzer() {
     return () => clearInterval(watchdogInterval);
   }, [stopAnalysisFSM]);
 
-  // Component unmount temizleme
+  // Component unmount temizleme (tek kapı stopAnalysisFSM ile yönetilir)
   useEffect(() => {
     return () => {
-      if (analyzerRef.current) {
-        try {
-          analyzerRef.current.destroy();
-        } catch (cleanupError) {
-          console.error('Cleanup analyzer destroy failed:', cleanupError);
-        }
-      }
+      // Analyzer destroy ve unlock işlemleri stopAnalysisFSM('unmount') tarafından yapılır.
+      // Burada sadece olası artakalan timerları temizleyelim.
       if (torchTimerRef.current) {
         clearTimeout(torchTimerRef.current);
         torchTimerRef.current = null;
@@ -1775,14 +1809,7 @@ export default function CameraPPGAnalyzer() {
             {...(Platform.OS === 'android' 
               ? { torch: device?.hasTorch && torchOn ? 'on' : 'off' }
               : {})} 
-            // ✅ CRITICAL: Android prop guard - only use supported VisionCamera props
-            {...(Platform.OS === 'android' && cameraLockEnabled && lockExposure && device?.supportsManualExposure ? { 
-              exposure: lockExposure 
-            } : {})}
-            {...(Platform.OS === 'android' && cameraLockEnabled && lockIso && device?.supportsManualISO ? { 
-              iso: lockIso 
-            } : {})}
-            // Note: iOS camera controls handled exclusively by PPGCameraManager
+            // Note: iOS camera controls handled exclusively by PPGCameraManager; avoid non-standard Android props
             // Note: iOS camera controls handled by PPGCameraManager.lockCameraSettings()
             onError={(error) => {
               console.error('🔴 Camera error:', error);
@@ -1843,50 +1870,49 @@ export default function CameraPPGAnalyzer() {
           
           {/* Gelişmiş PPG Waveform Grafiği - Peak'leri göster */}
           <View style={styles.waveformContainer}>
-            {ppgSignal.slice(-50).map((value, index, array) => {
-              // Normalize value to 0-100 height
-              const minVal = Math.min(...ppgSignal);
-              const maxVal = Math.max(...ppgSignal);
-              const normalizedHeight = maxVal > minVal 
-                ? ((value - minVal) / (maxVal - minVal)) * 100 
-                : 50;
-              
-              // Peak detection for visualization
-              let isPeak = false;
-              if (index > 0 && index < array.length - 1) {
-                const prev = array[index - 1];
-                const next = array[index + 1];
-                // ✅ CRITICAL: O(n²) → O(n) optimization - single pass mean + std calculation
-                let sum = 0, sumSq = 0;
-                for (let i = 0; i < array.length; i++) {
-                  const val = array[i];
-                  sum += val;
-                  sumSq += val * val;
-                }
-                const mean = sum / array.length;
-                const variance = (sumSq / array.length) - (mean * mean);
-                const std = Math.sqrt(Math.max(0, variance)); // Ensure non-negative
-                const threshold = mean + 0.5 * std; // Same threshold as haptic
-                
-                isPeak = value > threshold && value > prev && value >= next;
+            {(() => {
+              const window = ppgSignal.slice(-50);
+              const minVal = Math.min(...window);
+              const maxVal = Math.max(...window);
+              // Single-pass mean/std for the window
+              let sum = 0, sumSq = 0;
+              for (let i = 0; i < window.length; i++) {
+                const v = window[i];
+                sum += v;
+                sumSq += v * v;
               }
+              const mean = window.length > 0 ? sum / window.length : 0;
+              const variance = window.length > 0 ? (sumSq / window.length) - (mean * mean) : 0;
+              const std = Math.sqrt(Math.max(0, variance));
+              const threshold = mean + 0.5 * std;
               
-              return (
-                <View
-                  key={index}
-                  style={[
-                    styles.waveformBar,
-                    { 
-                      height: Math.max(2, normalizedHeight),
-                      backgroundColor: isPeak ? '#ff0000' :  // Kırmızı: Peak
-                                     normalizedHeight > 70 ? '#ff6666' : 
-                                     normalizedHeight > 40 ? '#ffaa00' : '#66ff66',
-                      width: isPeak ? 4 : 3, // Peak'ler daha kalın
-                    }
-                  ]}
-                />
-              );
-            })}
+              return window.map((value, index, array) => {
+                const normalizedHeight = maxVal > minVal
+                  ? ((value - minVal) / (maxVal - minVal)) * 100
+                  : 50;
+                let isPeak = false;
+                if (index > 0 && index < array.length - 1) {
+                  const prev = array[index - 1];
+                  const next = array[index + 1];
+                  isPeak = value > threshold && value > prev && value >= next;
+                }
+                return (
+                  <View
+                    key={index}
+                    style={[
+                      styles.waveformBar,
+                      {
+                        height: Math.max(2, normalizedHeight),
+                        backgroundColor: isPeak ? '#ff0000'
+                          : normalizedHeight > 70 ? '#ff6666'
+                          : normalizedHeight > 40 ? '#ffaa00' : '#66ff66',
+                        width: isPeak ? 4 : 3,
+                      }
+                    ]}
+                  />
+                );
+              });
+            })()}
           </View>
           
           {/* PPG Value Range & Peak Stats */}
