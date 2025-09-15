@@ -338,6 +338,23 @@ export default function CameraPPGAnalyzer() {
     qualityStopHoldoffUntilRef.current = 0;
   }, []);
 
+  // ✅ CRITICAL: Move classifyOutcome BEFORE stopAnalysisFSM to fix "used before declaration"
+  const classifyOutcome = useCallback((reason: string): 'success' | 'error' | 'cancelled' => {
+    switch (reason) {
+      case 'stall_watchdog':
+      case 'poll_error':
+      case 'push_error':
+        return 'error';
+      case 'app_background':
+      case 'manual':
+      case 'no_signal_timeout':
+      case 'early_stop_warmup':
+        return 'cancelled';
+      default:
+        return 'success';
+    }
+  }, []);
+
   // ✅ CRITICAL: Camera Lock Functions for SNR improvement
   const lockCameraSettings = useCallback(async () => {
     if (!cameraLockEnabled) return null;
@@ -358,9 +375,9 @@ export default function CameraPPGAnalyzer() {
       console.log('✅ Camera lock result:', result);
       logTelemetryEvent('camera_lock_applied', { settings, result });
       return result;
-    } catch (error) {
+    } catch (error: unknown) {
       console.error('❌ Camera lock failed:', error);
-      logTelemetryEvent('camera_lock_failed', { error: error.message });
+      logTelemetryEvent('camera_lock_failed', { error: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }, [cameraLockEnabled, targetFps, lockExposure, lockIso, lockWhiteBalance, lockFocus, torchLevel]);
@@ -373,9 +390,9 @@ export default function CameraPPGAnalyzer() {
       console.log('✅ Camera unlock result:', result);
       logTelemetryEvent('camera_unlock_applied', { result });
       return result;
-    } catch (error) {
+    } catch (error: unknown) {
       console.error('❌ Camera unlock failed:', error);
-      logTelemetryEvent('camera_unlock_failed', { error: error.message });
+      logTelemetryEvent('camera_unlock_failed', { error: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }, []);
@@ -427,9 +444,9 @@ export default function CameraPPGAnalyzer() {
           pretorchDropUntil: pretorchUntilRef.current
         });
       }
-    } catch (e) {
+    } catch (e: unknown) {
       console.warn('Torch açılamadı:', e);
-      logTelemetryEvent('torch_guarantee_failed', { error: e.message });
+      logTelemetryEvent('torch_guarantee_failed', { error: e instanceof Error ? e.message : String(e) });
     }
     
     // Analyzer'ı başlat
@@ -610,7 +627,7 @@ export default function CameraPPGAnalyzer() {
   const heavyLogCountRef = useRef(0);
   
   // ✅ CRITICAL: DEV/PROD Analyzer Presets
-  const ANALYZER_PROFILE = 'PROD'; // 'DEV' | 'PROD'
+  const ANALYZER_PROFILE: 'DEV' | 'PROD' = 'PROD'; 
   
   const getAnalyzerConfig = useCallback(() => {
     if (ANALYZER_PROFILE === 'DEV') {
@@ -688,22 +705,7 @@ export default function CameraPPGAnalyzer() {
     });
   }, [logTelemetryEvent]);
 
-  // ✅ P1 FIX: Stop outcome classification for better analytics
-  const classifyOutcome = useCallback((reason: string): 'success' | 'error' | 'cancelled' => {
-    switch (reason) {
-      case 'stall_watchdog':
-      case 'poll_error':
-      case 'push_error':
-        return 'error';
-      case 'app_background':
-      case 'manual':
-      case 'no_signal_timeout':
-      case 'early_stop_warmup':
-        return 'cancelled';
-      default:
-        return 'success';
-    }
-  }, []);
+  // ✅ REMOVED: classifyOutcome moved above to fix declaration order
 
   const logSessionOutcome = useCallback((outcome: 'success' | 'error' | 'cancelled', reason: string, metrics?: any) => {
     const sessionDuration = sessionStartRef.current ? Date.now() - sessionStartRef.current : 0;
@@ -1173,6 +1175,20 @@ export default function CameraPPGAnalyzer() {
   
   // (removed) legacy duplicate polling effect; consolidated below with confidence/timestamps
 
+  // ✅ CRITICAL: Move ingestSample BEFORE useFrameProcessor to fix "used before declaration"
+  const ingestSample = useCallback((val: number) => {
+    const v = Number(val);
+    if (!isFinite(v)) return;
+    
+    frameBufferRef.current.push(v);
+    if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
+    pendingSamplesRef.current.push(v);
+    if (pendingSamplesRef.current.length > bufferSize) {
+      pendingSamplesRef.current.splice(0, pendingSamplesRef.current.length - bufferSize);
+    }
+    lastSampleAtRef.current = Date.now();
+  }, [bufferSize]);
+
   // Frame işleme - minimal logs
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
@@ -1221,25 +1237,13 @@ export default function CameraPPGAnalyzer() {
       return maybe.map(Number).filter(isFinite);
     }
     // TypedArray (Float32Array, Float64Array, etc.)
-    if (ArrayBuffer.isView(maybe) && typeof maybe.length === 'number') {
-      return Array.from(maybe as ArrayLike<number>).map(Number).filter(isFinite);
+    if (ArrayBuffer.isView(maybe) && 'length' in maybe && typeof maybe.length === 'number') {
+      return Array.from(maybe as unknown as ArrayLike<number>).map(Number).filter(isFinite);
     }
     return [];
   }, []);
 
-  // ✅ P0 FIX: Fallback ingest MUST be defined BEFORE useFrameProcessor 
-  const ingestSample = useCallback((val: number) => {
-    const v = Number(val);
-    if (!isFinite(v)) return;
-    
-    frameBufferRef.current.push(v);
-    if (frameBufferRef.current.length > bufferSize) frameBufferRef.current.shift();
-    pendingSamplesRef.current.push(v);
-    if (pendingSamplesRef.current.length > bufferSize) {
-      pendingSamplesRef.current.splice(0, pendingSamplesRef.current.length - bufferSize);
-    }
-    lastSampleAtRef.current = Date.now();
-  }, [bufferSize]);
+  // ✅ REMOVED: ingestSample moved above to fix declaration order
 
   useEffect(() => {
     if (!isActive || !useNativePPG) return;
@@ -1569,7 +1573,10 @@ export default function CameraPPGAnalyzer() {
           const S = getStorage();
           if (S?.setItem && device?.id) {
             const bestCfg = { ppgMode: best.mode, ppgGrid, ppgStep, roi };
-            await S.setItem(`hp_best_${device.id}`, JSON.stringify(bestCfg));
+            // ✅ FIXED: Remove await from non-async context
+            S.setItem(`hp_best_${device.id}`, JSON.stringify(bestCfg)).catch(() => {
+              console.warn('Failed to save best profile config');
+            });
             logTelemetryEvent('best_profile_saved', { deviceId: device.id, bestCfg });
           }
         } catch {}
@@ -2007,7 +2014,7 @@ export default function CameraPPGAnalyzer() {
                       newLevel: torchLevels[nextIdx],
                       fallbackActive: enableFallback 
                     });
-                  }).catch((e) => {
+                  }).catch((e: unknown) => {
                     console.warn('iOS Torch boost failed:', e);
                   });
                 }
