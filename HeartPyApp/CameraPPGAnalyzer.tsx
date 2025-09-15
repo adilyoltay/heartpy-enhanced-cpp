@@ -603,6 +603,12 @@ export default function CameraPPGAnalyzer() {
   const FALLBACK_AFTER_MS = 800;
   const [enableFallback, setEnableFallback] = useState(false);
   
+  // ✅ CRITICAL: Cover state tracking to prevent fake signals
+  const COVER_ON = 0.35;   // Start threshold compatibility
+  const COVER_OFF = 0.20;  // Low threshold compatibility  
+  const isCoveredRef = useRef(false);
+  const [coveredForWorklet, setCoveredForWorklet] = useState(false); // For worklet communication
+  
   // ✅ P1 FIX: No-signal early stop
   const NO_SIGNAL_TIMEOUT_MS = 2000;
   const lastSignalCheckRef = useRef<number>(0);
@@ -615,6 +621,9 @@ export default function CameraPPGAnalyzer() {
   
   // ✅ DEBUG: Track plugin confidence changes
   const lastLoggedConfRef = useRef<number>(-1);
+  
+  // ✅ CRITICAL: Probe should run only once to prevent repetitive triggering
+  const probeHasRunRef = useRef(false);
   
   // ✅ isAnalyzingRef'i güncel tut
   useEffect(() => { 
@@ -847,12 +856,25 @@ export default function CameraPPGAnalyzer() {
       out[i] = y;
     }
 
-    // Basit detrend ve ölçekleme (pencere ortalaması çıkar, normalize et)
+    // ✅ CRITICAL: Conditional normalization - prevent fake rhythmic appearance
     const mean = out.reduce((s, v) => s + v, 0) / out.length;
     const zeroed = out.map(v => v - mean);
     const maxAbs = zeroed.reduce((m, v) => Math.max(m, Math.abs(v)), 1);
-    const normed = zeroed.map(v => (v / maxAbs) * 100); // -100..100 ölçeğine getir
-    setUiSignal(normed);
+    
+    // Only normalize to full scale when covered AND good quality
+    const shouldNormalize = isCoveredRef.current && (metrics?.quality?.goodQuality ?? false);
+    let plotted: number[];
+    
+    if (shouldNormalize) {
+      // Full scale normalization when quality is good
+      plotted = zeroed.map(v => (v / maxAbs) * 100);
+    } else {
+      // Low gain to break rhythmic illusion when no contact or poor quality
+      const gain = 10; // Small constant gain
+      plotted = zeroed.map(v => v / (maxAbs || 1) * gain);
+    }
+    
+    setUiSignal(plotted);
   }, []);
 
   // ✅ PHASE 1.4: Unified Confidence Score Calculator
@@ -949,11 +971,27 @@ export default function CameraPPGAnalyzer() {
   }, [logTelemetryEvent]);
 
   const getEffectiveConfidence = useCallback((qualityMetrics: any): number => {
+    // Calculate base unified or simple confidence
+    let unified = 0;
     if (useUnifiedConfidence) {
-      return calculateUnifiedConfidence(qualityMetrics);
+      unified = calculateUnifiedConfidence(qualityMetrics);
+    } else {
+      unified = Math.max(0, Math.min(1, qualityMetrics?.confidence ?? 0));
     }
-    return Math.max(0, Math.min(1, qualityMetrics?.confidence ?? 0));
-  }, [useUnifiedConfidence, calculateUnifiedConfidence]);
+    
+    // ✅ CRITICAL: Add AC/DC ratio as weighted component (prevents fake confidence)
+    const acdc = Number(qualityMetrics?.acDcRatio ?? 0);
+    const acdcNorm = Math.max(0, Math.min(1, acdc / 0.01)); // 1% AC/DC => 1.0 (threshold)
+    
+    // Geometric mean for stricter gating (both unified AND AC/DC must be good)
+    const unifiedWithAcdc = Math.sqrt(Math.max(0, unified) * Math.max(0, acdcNorm));
+    
+    // ✅ CRITICAL: Apply cover confidence as minimum (no finger = confidence 0)
+    const coverConf = Math.max(0, Math.min(1, pluginConfidence || 0));
+    const effectiveConf = Math.min(unifiedWithAcdc, coverConf);
+    
+    return effectiveConf;
+  }, [useUnifiedConfidence, calculateUnifiedConfidence, pluginConfidence]);
 
   // ✅ PHASE 2: Enhanced Multi-ROI Quality Analysis  
   const analyzeSignalQuality = useCallback((qualityMetrics: any) => {
@@ -1203,8 +1241,8 @@ export default function CameraPPGAnalyzer() {
           try {
             const v = plugin.call(frame, { roi, channel: ppgChannel, step: ppgStep, mode: ppgMode, grid: ppgGrid, blend: 'off', torch: !!torchOn }) as number;
             
-            // ✅ P1 FIX: Fallback ingest when native producer stalls
-            if (enableFallback && v != null && typeof v === 'number' && isFinite(v)) {
+            // ✅ CRITICAL: Fallback ingest ONLY when covered (prevents fake signals)
+            if (enableFallback && coveredForWorklet && v != null && typeof v === 'number' && isFinite(v)) {
               runOnJS(ingestSample)(v);
             }
             
@@ -1226,7 +1264,7 @@ export default function CameraPPGAnalyzer() {
         console.log('Frame processor error:', e);
       }
     }
-  }, [useNativePPG, roi, ppgPlugin, ppgChannel, ppgMode, ppgGrid, autoSelect, torchOn, enableFallback, ingestSample]);
+  }, [useNativePPG, roi, ppgPlugin, ppgChannel, ppgMode, ppgGrid, autoSelect, torchOn, enableFallback, coveredForWorklet, ingestSample]);
 
   // Native module polling for real PPG data + timestamps + plugin confidence
   // ✅ P0 FIX: Universal Array/TypedArray → number[] converter  
@@ -1265,6 +1303,38 @@ export default function CameraPPGAnalyzer() {
           }
         } else {
           console.log('📊 Plugin Confidence: NULL or invalid');
+        }
+        
+        // ✅ CRITICAL: Hysteresis cover tracking to prevent fake signals
+        const prevCovered = isCoveredRef.current;
+        if (confVal >= COVER_ON) isCoveredRef.current = true;
+        else if (confVal <= COVER_OFF) isCoveredRef.current = false;
+
+        // Update worklet state for fallback guard
+        if (coveredForWorklet !== isCoveredRef.current) {
+          setCoveredForWorklet(isCoveredRef.current);
+        }
+
+        // ✅ CRITICAL: Cover lost - flush all buffers and stop analysis immediately
+        if (prevCovered && !isCoveredRef.current) {
+          console.log('🚨 COVER LOST - Flushing all buffers and stopping analysis');
+          logTelemetryEvent('cover_state_change', { covered: false, conf: confVal });
+          
+          // Flush all data buffers to prevent fake signal continuation
+          frameBufferRef.current = [];
+          pendingSamplesRef.current = [];
+          setPpgSignal([]);
+          setLastPeakIndices([]);
+          
+          if (fsmRef.current === 'running' || fsmRef.current === 'starting') {
+            stopAnalysisFSM('cover_lost').catch(() => {
+              console.error('Failed to stop on cover lost');
+            });
+            return; // Exit this poll cycle
+          }
+        } else if (!prevCovered && isCoveredRef.current) {
+          console.log('✅ COVER DETECTED - Finger contact established');
+          logTelemetryEvent('cover_state_change', { covered: true, conf: confVal });
         }
         let latestSamples: number[] = [];
         let latestTs: number[] | null = null;
@@ -1330,10 +1400,10 @@ export default function CameraPPGAnalyzer() {
           }
         }
         
-        // ✅ P1 FIX: No-signal early stop - check for complete pipeline stall
+        // ✅ CRITICAL: No-signal early stop - only count NATIVE samples + cover state
         if (isAnalyzingRef.current && (fsmRef.current === 'starting' || fsmRef.current === 'running')) {
-          const hasSignal = latestSamples.length > 0 || pendingSamplesRef.current.length > 0;
-          const hasData = confVal > 0 || hasSignal;
+          const hasSignal = latestSamples.length > 0; // ✅ Only native packets, not fallback
+          const hasData = isCoveredRef.current && hasSignal; // ✅ Cover + native signal required
           
           if (hasData) {
             // Reset timer when we have any kind of signal/data
@@ -1342,12 +1412,12 @@ export default function CameraPPGAnalyzer() {
             // Check for timeout
             const noSignalDuration = now - lastSignalCheckRef.current;
             if (noSignalDuration > NO_SIGNAL_TIMEOUT_MS) {
-              console.log(`⚠️ No-signal early stop: ${noSignalDuration}ms without data (samples: ${latestSamples.length}, pending: ${pendingSamplesRef.current.length}, conf: ${confVal})`);
+              console.log(`⚠️ No-signal early stop: ${noSignalDuration}ms without data (samples: ${latestSamples.length}, covered: ${isCoveredRef.current}, conf: ${confVal})`);
               logTelemetryEvent('no_signal_early_stop', { 
                 duration: noSignalDuration,
                 fsmState: fsmRef.current,
                 sampleCount: latestSamples.length,
-                pendingCount: pendingSamplesRef.current.length,
+                covered: isCoveredRef.current,
                 confidence: confVal
               });
               
@@ -1517,9 +1587,9 @@ export default function CameraPPGAnalyzer() {
     return () => clearInterval(t);
   }, [isAnalyzing, logTelemetryEvent]);
 
-  // ✅ SNR/Confidence Probe: mean vs chrom (kısa A/B test), tek seferlik
+  // ✅ CRITICAL: SNR/Confidence Probe - run only once to prevent repetitive triggering
   useEffect(() => {
-    if (!enableProbe) return;
+    if (!enableProbe || probeHasRunRef.current) return;
     let probeTimer: any = null;
     let phase: 'idle'|'phaseA'|'phaseB'|'done' = 'idle';
     let phaseStart = 0;
@@ -1581,14 +1651,15 @@ export default function CameraPPGAnalyzer() {
           }
         } catch {}
         phase = 'done';
-        // bir daha çalıştırma
+        // ✅ CRITICAL: Mark probe as completed to prevent re-running
+        probeHasRunRef.current = true;
         clearInterval(probeTimer);
       }
     };
 
     probeTimer = setInterval(tick, 250);
     return () => probeTimer && clearInterval(probeTimer);
-  }, [enableProbe, ppgMode, logTelemetryEvent]);
+  }, [enableProbe, logTelemetryEvent]); // ✅ REMOVED: ppgMode to prevent re-triggering
 
   // Sayfa açıldığında izin/cihaz hazırsa kamerayı etkinleştir (torch pulse hazırda)
   useEffect(() => {
@@ -2225,6 +2296,13 @@ export default function CameraPPGAnalyzer() {
 
       {/* Durum */}
       <Text style={styles.status}>{statusMessage}</Text>
+      
+      {/* ✅ CRITICAL: Cover state indicator to show finger contact */}
+      {!isCoveredRef.current && (
+        <View style={styles.coverWarning}>
+          <Text style={styles.coverWarningText}>⚠️ NO CONTACT - Place finger completely over camera</Text>
+        </View>
+      )}
       
       {/* Durum Özeti - FSM State + Güven Skoru */}
       <View style={styles.infoRow}>
@@ -2905,6 +2983,20 @@ const styles = StyleSheet.create({
   badBadgeText: {
     color: 'white',
     fontSize: 12,
+    fontWeight: '600',
+  },
+  // ✅ CRITICAL: Cover warning styles
+  coverWarning: {
+    backgroundColor: '#FF5722',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginVertical: 4,
+    alignItems: 'center',
+  },
+  coverWarningText: {
+    color: 'white',
+    fontSize: 14,
     fontWeight: '600',
   },
 });
