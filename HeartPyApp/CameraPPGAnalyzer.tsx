@@ -604,8 +604,9 @@ export default function CameraPPGAnalyzer() {
   const [enableFallback, setEnableFallback] = useState(false);
   
   // ✅ CRITICAL: Cover state tracking to prevent fake signals
-  const COVER_ON = 0.35;   // Start threshold compatibility
-  const COVER_OFF = 0.20;  // Low threshold compatibility  
+  // 🔍 TEMPORARY: Lowered thresholds for debugging cover detection
+  const COVER_ON = 0.25;   // Lowered from 0.35 for easier detection
+  const COVER_OFF = 0.15;  // Lowered from 0.20 for stability  
   const isCoveredRef = useRef(false);
   const [coveredForWorklet, setCoveredForWorklet] = useState(false); // For worklet communication
   
@@ -1307,6 +1308,12 @@ export default function CameraPPGAnalyzer() {
         
         // ✅ CRITICAL: Hysteresis cover tracking to prevent fake signals
         const prevCovered = isCoveredRef.current;
+        
+        // 🔍 DEBUG: Log cover detection values for troubleshooting
+        if (globalFrameCounter.current % 60 === 0) { // Every 2 seconds at 30fps
+          console.log(`🔍 COVER DEBUG: confVal=${confVal.toFixed(4)}, COVER_ON=${COVER_ON}, COVER_OFF=${COVER_OFF}, isCovered=${isCoveredRef.current}`);
+        }
+        
         if (confVal >= COVER_ON) isCoveredRef.current = true;
         else if (confVal <= COVER_OFF) isCoveredRef.current = false;
 
@@ -1317,7 +1324,7 @@ export default function CameraPPGAnalyzer() {
 
         // ✅ CRITICAL: Cover lost - flush all buffers and stop analysis immediately
         if (prevCovered && !isCoveredRef.current) {
-          console.log('🚨 COVER LOST - Flushing all buffers and stopping analysis');
+          console.log(`🚨 COVER LOST - Flushing all buffers and stopping analysis (confVal: ${confVal.toFixed(4)} < ${COVER_OFF})`);
           logTelemetryEvent('cover_state_change', { covered: false, conf: confVal });
           
           // Flush all data buffers to prevent fake signal continuation
@@ -1333,7 +1340,7 @@ export default function CameraPPGAnalyzer() {
             return; // Exit this poll cycle
           }
         } else if (!prevCovered && isCoveredRef.current) {
-          console.log('✅ COVER DETECTED - Finger contact established');
+          console.log(`✅ COVER DETECTED - Finger contact established (confVal: ${confVal.toFixed(4)} >= ${COVER_ON})`);
           logTelemetryEvent('cover_state_change', { covered: true, conf: confVal });
         }
         let latestSamples: number[] = [];
@@ -1514,12 +1521,12 @@ export default function CameraPPGAnalyzer() {
               tsPushOkRef.current = true;
               if (startOffsetSecRef.current == null && tsSec.length > 0) {
                 startOffsetSecRef.current = tsSec[0];
-              }
+            }
               // UI waveform resampling
               try {
                 resampleForUI(tsSec, Array.from(xs), 30, 3);
-              } catch {}
-            }
+          } catch {}
+        }
           } catch (e) {
             console.warn('pushWithTimestamps failed, will use regular push:', e);
             // Normal push pipeline will handle pending samples
@@ -1960,9 +1967,9 @@ export default function CameraPPGAnalyzer() {
               const nowH = Date.now();
               const refractoryMs = 250;
               if (!lastHapticTimeRef.current || nowH - lastHapticTimeRef.current >= refractoryMs) {
-                try {
-                  const Haptics = getHaptics();
-                  if (Haptics) {
+            try {
+              const Haptics = getHaptics();
+              if (Haptics) {
                     Haptics.trigger(Platform.OS === 'ios' ? 'impactLight' : 'impactMedium', hapticOptions);
                     setHapticPeakCount(h => h + newly);
                   }
@@ -2127,7 +2134,7 @@ export default function CameraPPGAnalyzer() {
       // Tek kapıdan durdur
       await stopAnalysisFSM('manual');
             return;
-    }
+          }
     
     // Tek kapıdan başlat  
     await startAnalysisFSM();
@@ -2161,7 +2168,7 @@ export default function CameraPPGAnalyzer() {
             if (Platform.OS === 'ios' && cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
               await NativeModules.PPGCameraManager.setTorchLevel(torchLevel);
               console.log(`🔦 iOS Torch RE-GUARANTEED ON after foreground - level: ${torchLevel}`);
-            } else {
+        } else {
               console.log('🔦 Torch re-enabled (VisionCamera managed)');
             }
             
@@ -2243,7 +2250,7 @@ export default function CameraPPGAnalyzer() {
   // Confidence pill color unified with displayed percentage
   const effConf = getEffectiveConfidence(metrics?.quality);
   const confColor = effConf >= 0.7 ? '#4CAF50' : effConf >= 0.4 ? '#FB8C00' : '#f44336';
-
+  
   return (
     <ScrollView style={styles.scroll} contentContainerStyle={styles.container}>
       <Text style={styles.title}>📱 Kamera PPG - Kalp Atışı Ölçümü</Text>
@@ -2300,8 +2307,13 @@ export default function CameraPPGAnalyzer() {
       {/* ✅ CRITICAL: Cover state indicator to show finger contact */}
       {!isCoveredRef.current && (
         <View style={styles.coverWarning}>
-          <Text style={styles.coverWarningText}>⚠️ NO CONTACT - Place finger completely over camera</Text>
-        </View>
+          <Text style={styles.coverWarningText}>
+            ⚠️ NO CONTACT - Place finger completely over camera
+          </Text>
+          <Text style={styles.coverWarningSubtext}>
+            Confidence: {(pluginConfidence || 0).toFixed(3)} (Need: {COVER_ON.toFixed(3)})
+          </Text>
+            </View>
       )}
       
       {/* Durum Özeti - FSM State + Güven Skoru */}
@@ -2383,25 +2395,25 @@ export default function CameraPPGAnalyzer() {
               } catch {}
 
               return window.map((value, index, array) => {
-                const normalizedHeight = maxVal > minVal
-                  ? ((value - minVal) / (maxVal - minVal)) * 100
-                  : 50;
+              const normalizedHeight = maxVal > minVal 
+                ? ((value - minVal) / (maxVal - minVal)) * 100 
+                : 50;
                 const isOverlayPeak = peakUI.has(index);
-                return (
-                  <View
-                    key={index}
-                    style={[
-                      styles.waveformBar,
-                      {
-                        height: Math.max(2, normalizedHeight),
+              return (
+                <View
+                  key={index}
+                  style={[
+                    styles.waveformBar,
+                    { 
+                      height: Math.max(2, normalizedHeight),
                         backgroundColor: isOverlayPeak ? '#ff0000'
                           : normalizedHeight > 70 ? '#ff6666'
                           : normalizedHeight > 40 ? '#ffaa00' : '#66ff66',
                         width: isOverlayPeak ? 4 : 3,
-                      }
-                    ]}
-                  />
-                );
+                    }
+                  ]}
+                />
+              );
               });
             })()}
           </View>
@@ -2439,10 +2451,10 @@ export default function CameraPPGAnalyzer() {
           {metricsTab === 'Özet' && (
             <View>
           <View style={styles.metricsGrid}>
-                <View style={styles.metricBox}>
+            <View style={styles.metricBox}>
                   <Text style={styles.metricValue}>{String(((metrics as any).bpmUI ?? metrics.bpm)?.toFixed?.(0) ?? '—')}</Text>
-                  <Text style={styles.metricLabel}>BPM</Text>
-                </View>
+              <Text style={styles.metricLabel}>BPM</Text>
+            </View>
             <View style={styles.metricBox}>
                   <Text style={styles.metricValue}>
                     {useUnifiedConfidence ? 
@@ -2998,5 +3010,11 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 14,
     fontWeight: '600',
+  },
+  coverWarningSubtext: {
+    color: 'white',
+    fontSize: 12,
+    opacity: 0.9,
+    marginTop: 4,
   },
 });
