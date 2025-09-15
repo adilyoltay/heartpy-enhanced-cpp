@@ -240,7 +240,7 @@ export default function CameraPPGAnalyzer() {
   
   // ✅ PHASE 1: Camera Lock Settings
   const [cameraLockEnabled, setCameraLockEnabled] = useState(true);
-  const [lockExposure, setLockExposure] = useState<number | undefined>(1/80); // ✅ Optimized exposure to prevent overexposure
+  const [lockExposure, setLockExposure] = useState<number | undefined>(1/120); // ✅ Shorter exposure to prevent overexposure
   const [lockIso, setLockIso] = useState<number | undefined>(100); // ✅ Lower ISO for less noise
   const [lockWhiteBalance, setLockWhiteBalance] = useState<'auto' | 'sunny' | 'cloudy' | 'fluorescent'>('auto');
   const [lockFocus, setLockFocus] = useState<'auto' | 'manual'>('manual');
@@ -252,10 +252,10 @@ export default function CameraPPGAnalyzer() {
   const torchDutyStartRef = useRef<number>(0);
   const torchTotalDutyRef = useRef<number>(0);
   
-  // ✅ OPTIMIZED: Balanced torch to prevent overexposure
-  const [torchLevel, setTorchLevel] = useState<number>(0.5); // ✅ Balanced level for pink visibility
-  const torchLevels = [0.3, 0.5, 0.8]; // Progressive levels (reduced max to prevent overexposure)
-  const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(1); // ✅ Start with BALANCED (0.5)
+  // ✅ CRITICAL FIX: Lower torch to prevent plugin confidence collapse
+  const [torchLevel, setTorchLevel] = useState<number>(0.3); // ✅ LOW torch to prevent overexposure
+  const torchLevels = [0.2, 0.3, 0.4]; // Very conservative levels for stability
+  const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(1); // ✅ Start with LOW (0.3)
   // Torch thrash-guard state
   const torchTargetRef = useRef<number | null>(null);
   const lastTorchChangeAtRef = useRef(0);
@@ -273,7 +273,7 @@ export default function CameraPPGAnalyzer() {
       torchTargetRef.current = nextLevel;
       lastTorchChangeAtRef.current = now;
       setTorchLevel(nextLevel);
-      setCurrentTorchLevelIndex(nextLevel >= 0.8 ? 2 : nextLevel >= 0.5 ? 1 : 0);
+      setCurrentTorchLevelIndex(nextLevel >= 0.4 ? 2 : nextLevel >= 0.3 ? 1 : 0);
       logTelemetryEvent('torch_auto_adjust', { action: cur < nextLevel ? 'up' : 'down', level: nextLevel, reason });
     } catch (e) {
       console.warn('setTorchLevelSafely failed:', e);
@@ -321,7 +321,7 @@ export default function CameraPPGAnalyzer() {
     MIN_RUN_MS: 7000,        // ✅ 7s minimum run uygun  
     COOLDOWN_MS: 3000,       // ✅ 3s cooldown daha güvenli
     STABLE_MS_FOR_TORCH_DOWN: 10000, // ✅ 10s stable → lower torch
-    TORCH_LOW_LEVEL: 0.6,    // ✅ Battery-friendly level after stable
+    TORCH_LOW_LEVEL: 0.25,    // ✅ Ultra-low level after stable to prevent overexposure
     RECOVER_MS: 2000,        // ✅ Allow 2s brief dips before stopping
     // PRETORCH_IGNORE_FRAMES kaldırıldı - hiç veri atılmıyor
   } as const;
@@ -606,7 +606,7 @@ export default function CameraPPGAnalyzer() {
   // ✅ CRITICAL: Cover state tracking to prevent fake signals
   // 🔍 OPTIMIZED: Further lowered thresholds based on real device data
   const COVER_ON = 0.25;   // Works well for detection
-  const COVER_OFF = 0.10;  // Lowered from 0.15 - device shows ~0.14-0.16 range  
+  const COVER_OFF = 0.04;  // CRITICAL: Very low threshold to prevent false COVER_LOST with torch  
   const isCoveredRef = useRef(false);
   const [coveredForWorklet, setCoveredForWorklet] = useState(false); // For worklet communication
   
@@ -1330,18 +1330,25 @@ export default function CameraPPGAnalyzer() {
         
         // 🔍 DEBUG: Log cover detection values for troubleshooting
         if (globalFrameCounter.current % 60 === 0) { // Every 2 seconds at 30fps
-          console.log(`🔍 COVER DEBUG: confVal=${confVal.toFixed(4)}, trend=${trend.toFixed(4)}, torchLevel=${torchLevel}, COVER_ON=${COVER_ON}, COVER_OFF=${COVER_OFF}, isCovered=${isCoveredRef.current}`);
+          const torchMs = torchDutyStartRef.current ? Date.now() - torchDutyStartRef.current : 0;
+          console.log(`🔍 COVER DEBUG: confVal=${confVal.toFixed(4)}, trend=${trend.toFixed(4)}, torchLevel=${torchLevel}, torchMs=${torchMs}, COVER_OFF=${COVER_OFF}, isCovered=${isCoveredRef.current}`);
         }
         
         // Smart cover detection: Consider both absolute value and trend
+        // 🔥 CRITICAL: Ignore confidence drops during torch ramp-up (first 2s after torch on)
+        const torchJustTurnedOn = torchDutyStartRef.current && (Date.now() - torchDutyStartRef.current) < 2000;
+        
         if (confVal >= COVER_ON) {
           isCoveredRef.current = true;
         } else if (confVal <= COVER_OFF) {
-          // Only lose cover if trend is also declining (prevents false positives)
-          if (trend < -0.05 || confVal < 0.08) { // Steep decline OR very low value
-            isCoveredRef.current = false;
+          // Only lose cover if NOT during torch ramp-up period
+          if (!torchJustTurnedOn) {
+            // Only lose cover if trend is also declining (prevents false positives)
+            if (trend < -0.5 && confVal < 0.03) { // Very steep decline AND extremely low (more tolerant)
+              isCoveredRef.current = false;
+            }
           }
-          // If trend is stable/improving, keep cover status (finger adjustment)
+          // If trend is stable/improving OR torch just turned on, keep cover status (finger adjustment)
         }
 
         // Update worklet state for fallback guard
@@ -1350,8 +1357,9 @@ export default function CameraPPGAnalyzer() {
         }
 
         // ✅ CRITICAL: Cover lost - flush all buffers and stop analysis immediately
+        // BUT: Don't stop if we're in starting state (more tolerant during startup)
         if (prevCovered && !isCoveredRef.current) {
-          console.log(`🚨 COVER LOST - Flushing all buffers and stopping analysis (confVal: ${confVal.toFixed(4)} < ${COVER_OFF})`);
+          console.log(`🚨 COVER LOST - Flushing all buffers${fsmRef.current === 'starting' ? ' (BUT TOLERANT IN STARTING STATE)' : ' and stopping analysis'} (confVal: ${confVal.toFixed(4)} < ${COVER_OFF})`);
           logTelemetryEvent('cover_state_change', { covered: false, conf: confVal });
           
           // Flush all data buffers to prevent fake signal continuation
@@ -1360,11 +1368,15 @@ export default function CameraPPGAnalyzer() {
           setPpgSignal([]);
           setLastPeakIndices([]);
           
-          if (fsmRef.current === 'running' || fsmRef.current === 'starting') {
+          // Stop analysis when cover is lost (BUT NOT during starting state - be tolerant)
+          if (fsmRef.current === 'running') {
             stopAnalysisFSM('cover_lost').catch(() => {
               console.error('Failed to stop on cover lost');
             });
             return; // Exit this poll cycle
+          } else if (fsmRef.current === 'starting') {
+            console.log('⚠️ Cover lost during STARTING state - being tolerant, not stopping');
+            // Don't stop, let it continue trying during startup
           }
         } else if (!prevCovered && isCoveredRef.current) {
           console.log(`✅ COVER DETECTED - Finger contact established (confVal: ${confVal.toFixed(4)} >= ${COVER_ON})`);
@@ -2027,8 +2039,8 @@ export default function CameraPPGAnalyzer() {
           }
           // Boost during recover or poor quality
           const isPoorNow = (!cppGoodQuality && cppConf <= 0.1 && cppSnr <= 3);
-          if ((fsmRef.current === 'recover' || isPoorNow) && Platform.OS === 'ios' && device?.hasTorch && torchLevel < 0.8 && nowTsTorch >= torchAdjustCoolUntilRef.current) {
-            await setTorchLevelSafely(0.8, fsmRef.current === 'recover' ? 'recover_boost' : 'poor_quality_boost');
+          if ((fsmRef.current === 'recover' || isPoorNow) && Platform.OS === 'ios' && device?.hasTorch && torchLevel < 0.4 && nowTsTorch >= torchAdjustCoolUntilRef.current) {
+            await setTorchLevelSafely(0.4, fsmRef.current === 'recover' ? 'recover_boost' : 'poor_quality_boost');
             torchAdjustCoolUntilRef.current = nowTsTorch + 3000;
           }
         } catch {}
