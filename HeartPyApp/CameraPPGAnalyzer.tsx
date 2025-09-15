@@ -240,7 +240,7 @@ export default function CameraPPGAnalyzer() {
   
   // ✅ PHASE 1: Camera Lock Settings
   const [cameraLockEnabled, setCameraLockEnabled] = useState(true);
-  const [lockExposure, setLockExposure] = useState<number | undefined>(1/60); // ✅ Longer exposure for better SNR
+  const [lockExposure, setLockExposure] = useState<number | undefined>(1/80); // ✅ Optimized exposure to prevent overexposure
   const [lockIso, setLockIso] = useState<number | undefined>(100); // ✅ Lower ISO for less noise
   const [lockWhiteBalance, setLockWhiteBalance] = useState<'auto' | 'sunny' | 'cloudy' | 'fluorescent'>('auto');
   const [lockFocus, setLockFocus] = useState<'auto' | 'manual'>('manual');
@@ -252,10 +252,10 @@ export default function CameraPPGAnalyzer() {
   const torchDutyStartRef = useRef<number>(0);
   const torchTotalDutyRef = useRef<number>(0);
   
-  // ✅ CRITICAL: Higher torch for better SNR  
-  const [torchLevel, setTorchLevel] = useState<number>(1.0); // ✅ Start with MAX for best SNR
-  const torchLevels = [0.3, 0.6, 1.0]; // Progressive levels
-  const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(2); // ✅ Start with MAX (1.0)
+  // ✅ OPTIMIZED: Balanced torch to prevent overexposure
+  const [torchLevel, setTorchLevel] = useState<number>(0.5); // ✅ Balanced level for pink visibility
+  const torchLevels = [0.3, 0.5, 0.8]; // Progressive levels (reduced max to prevent overexposure)
+  const [currentTorchLevelIndex, setCurrentTorchLevelIndex] = useState(1); // ✅ Start with BALANCED (0.5)
   // Torch thrash-guard state
   const torchTargetRef = useRef<number | null>(null);
   const lastTorchChangeAtRef = useRef(0);
@@ -273,7 +273,7 @@ export default function CameraPPGAnalyzer() {
       torchTargetRef.current = nextLevel;
       lastTorchChangeAtRef.current = now;
       setTorchLevel(nextLevel);
-      setCurrentTorchLevelIndex(nextLevel >= 1.0 ? 2 : nextLevel >= 0.6 ? 1 : 0);
+      setCurrentTorchLevelIndex(nextLevel >= 0.8 ? 2 : nextLevel >= 0.5 ? 1 : 0);
       logTelemetryEvent('torch_auto_adjust', { action: cur < nextLevel ? 'up' : 'down', level: nextLevel, reason });
     } catch (e) {
       console.warn('setTorchLevelSafely failed:', e);
@@ -1330,7 +1330,7 @@ export default function CameraPPGAnalyzer() {
         
         // 🔍 DEBUG: Log cover detection values for troubleshooting
         if (globalFrameCounter.current % 60 === 0) { // Every 2 seconds at 30fps
-          console.log(`🔍 COVER DEBUG: confVal=${confVal.toFixed(4)}, trend=${trend.toFixed(4)}, COVER_ON=${COVER_ON}, COVER_OFF=${COVER_OFF}, isCovered=${isCoveredRef.current}`);
+          console.log(`🔍 COVER DEBUG: confVal=${confVal.toFixed(4)}, trend=${trend.toFixed(4)}, torchLevel=${torchLevel}, COVER_ON=${COVER_ON}, COVER_OFF=${COVER_OFF}, isCovered=${isCoveredRef.current}`);
         }
         
         // Smart cover detection: Consider both absolute value and trend
@@ -2027,8 +2027,8 @@ export default function CameraPPGAnalyzer() {
           }
           // Boost during recover or poor quality
           const isPoorNow = (!cppGoodQuality && cppConf <= 0.1 && cppSnr <= 3);
-          if ((fsmRef.current === 'recover' || isPoorNow) && Platform.OS === 'ios' && device?.hasTorch && torchLevel < 1.0 && nowTsTorch >= torchAdjustCoolUntilRef.current) {
-            await setTorchLevelSafely(1.0, fsmRef.current === 'recover' ? 'recover_boost' : 'poor_quality_boost');
+          if ((fsmRef.current === 'recover' || isPoorNow) && Platform.OS === 'ios' && device?.hasTorch && torchLevel < 0.8 && nowTsTorch >= torchAdjustCoolUntilRef.current) {
+            await setTorchLevelSafely(0.8, fsmRef.current === 'recover' ? 'recover_boost' : 'poor_quality_boost');
             torchAdjustCoolUntilRef.current = nowTsTorch + 3000;
           }
         } catch {}
@@ -2341,9 +2341,9 @@ export default function CameraPPGAnalyzer() {
             Confidence: {(pluginConfidence || 0).toFixed(3)} (Need: {COVER_ON.toFixed(3)})
           </Text>
           <Text style={styles.coverWarningSubtext}>
-            💡 Tip: Press finger firmly and keep steady
+            💡 Tip: Press finger firmly and keep steady{'\n'}💡 Flash optimized to prevent overexposure
           </Text>
-        </View>
+            </View>
       )}
       
       {/* Durum Özeti - FSM State + Güven Skoru */}
