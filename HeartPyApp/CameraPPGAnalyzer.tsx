@@ -604,11 +604,15 @@ export default function CameraPPGAnalyzer() {
   const [enableFallback, setEnableFallback] = useState(false);
   
   // ✅ CRITICAL: Cover state tracking to prevent fake signals
-  // 🔍 TEMPORARY: Lowered thresholds for debugging cover detection
-  const COVER_ON = 0.25;   // Lowered from 0.35 for easier detection
-  const COVER_OFF = 0.15;  // Lowered from 0.20 for stability  
+  // 🔍 OPTIMIZED: Further lowered thresholds based on real device data
+  const COVER_ON = 0.25;   // Works well for detection
+  const COVER_OFF = 0.10;  // Lowered from 0.15 - device shows ~0.14-0.16 range  
   const isCoveredRef = useRef(false);
   const [coveredForWorklet, setCoveredForWorklet] = useState(false); // For worklet communication
+  
+  // ✅ ADVANCED: Plugin confidence trend tracking for stability
+  const confHistoryRef = useRef<number[]>([]);
+  const CONF_HISTORY_SIZE = 10;
   
   // ✅ P1 FIX: No-signal early stop
   const NO_SIGNAL_TIMEOUT_MS = 2000;
@@ -1306,16 +1310,39 @@ export default function CameraPPGAnalyzer() {
           console.log('📊 Plugin Confidence: NULL or invalid');
         }
         
-        // ✅ CRITICAL: Hysteresis cover tracking to prevent fake signals
+        // ✅ ADVANCED: Smart cover detection with trend analysis
         const prevCovered = isCoveredRef.current;
+        
+        // Track confidence history for trend analysis
+        confHistoryRef.current.push(confVal);
+        if (confHistoryRef.current.length > CONF_HISTORY_SIZE) {
+          confHistoryRef.current.shift();
+        }
+        
+        // Calculate confidence trend (average of last 5 vs first 5)
+        const history = confHistoryRef.current;
+        let trend = 0;
+        if (history.length >= 8) {
+          const first4 = history.slice(0, 4).reduce((a, b) => a + b, 0) / 4;
+          const last4 = history.slice(-4).reduce((a, b) => a + b, 0) / 4;
+          trend = last4 - first4; // Positive = improving, Negative = declining
+        }
         
         // 🔍 DEBUG: Log cover detection values for troubleshooting
         if (globalFrameCounter.current % 60 === 0) { // Every 2 seconds at 30fps
-          console.log(`🔍 COVER DEBUG: confVal=${confVal.toFixed(4)}, COVER_ON=${COVER_ON}, COVER_OFF=${COVER_OFF}, isCovered=${isCoveredRef.current}`);
+          console.log(`🔍 COVER DEBUG: confVal=${confVal.toFixed(4)}, trend=${trend.toFixed(4)}, COVER_ON=${COVER_ON}, COVER_OFF=${COVER_OFF}, isCovered=${isCoveredRef.current}`);
         }
         
-        if (confVal >= COVER_ON) isCoveredRef.current = true;
-        else if (confVal <= COVER_OFF) isCoveredRef.current = false;
+        // Smart cover detection: Consider both absolute value and trend
+        if (confVal >= COVER_ON) {
+          isCoveredRef.current = true;
+        } else if (confVal <= COVER_OFF) {
+          // Only lose cover if trend is also declining (prevents false positives)
+          if (trend < -0.05 || confVal < 0.08) { // Steep decline OR very low value
+            isCoveredRef.current = false;
+          }
+          // If trend is stable/improving, keep cover status (finger adjustment)
+        }
 
         // Update worklet state for fallback guard
         if (coveredForWorklet !== isCoveredRef.current) {
@@ -2313,7 +2340,10 @@ export default function CameraPPGAnalyzer() {
           <Text style={styles.coverWarningSubtext}>
             Confidence: {(pluginConfidence || 0).toFixed(3)} (Need: {COVER_ON.toFixed(3)})
           </Text>
-            </View>
+          <Text style={styles.coverWarningSubtext}>
+            💡 Tip: Press finger firmly and keep steady
+          </Text>
+        </View>
       )}
       
       {/* Durum Özeti - FSM State + Güven Skoru */}
