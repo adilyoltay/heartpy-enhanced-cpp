@@ -304,24 +304,32 @@ export default function CameraPPGAnalyzer() {
   const torchTargetRef = useRef<number | null>(null);
   const lastTorchChangeAtRef = useRef(0);
 
+  // ✅ SIMPLIFIED: Fixed torch level to prevent hanging
   async function setTorchLevelSafely(nextLevel: number, reason: string) {
     try {
       if (!device?.hasTorch || Platform.OS !== 'ios') return;
+      
+      // ✅ CRITICAL: Prevent rapid torch changes that cause hanging
       const now = Date.now();
-      const cur = torchTargetRef.current ?? torchLevel;
-      const tooSoon = now - lastTorchChangeAtRef.current < CFG.TORCH_THROTTLE_MS;
-      const sameLevel = Math.abs(cur - nextLevel) < 0.05;
-      if (tooSoon || sameLevel) return;
+      const tooSoon = now - lastTorchChangeAtRef.current < 2000; // Increased from 1500ms
+      if (tooSoon) {
+        console.log(`⏳ Torch change too soon, skipping (${now - lastTorchChangeAtRef.current}ms ago)`);
+        return;
+      }
 
+      console.log(`🔦 Setting torch to level ${nextLevel} (${reason})`);
       await NativeModules.PPGCameraManager?.setTorchLevel?.(nextLevel);
-      torchTargetRef.current = nextLevel;
+      
       lastTorchChangeAtRef.current = now;
       setTorchLevel(nextLevel);
-      const idx = CFG.TORCH_LEVELS.findIndex(l => Math.abs(l - nextLevel) < 0.05);
-      setCurrentTorchLevelIndex(idx >= 0 ? idx : 1);
-      logTelemetryEvent('torch_auto_adjust', { action: cur < nextLevel ? 'up' : 'down', level: nextLevel, reason });
+      torchTargetRef.current = nextLevel;
+      
+      console.log(`✅ Torch successfully set to ${nextLevel}`);
     } catch (e) {
-      console.warn('setTorchLevelSafely failed:', e);
+      console.error('❌ setTorchLevelSafely failed:', e);
+      // ✅ CRITICAL: Reset torch state on error to prevent hanging
+      setTorchOn(false);
+      setTorchLevel(0);
     }
   }
   
@@ -451,33 +459,39 @@ export default function CameraPPGAnalyzer() {
       await lockCameraSettings();
     }
     
-    // ✅ P1 FIX: Torch guarantee - ALWAYS ensure torch is ON during analysis
+    // ✅ SIMPLIFIED: Single torch activation to prevent hanging
     try {
       if (device?.hasTorch) {
+        console.log('🔦 Activating torch...');
         setTorchOn(true);
-        torchDutyStartRef.current = now;  // ✅ Torch duty tracking
+        torchDutyStartRef.current = now;
         
-        // ✅ CRITICAL: iOS-only torch control via PPGCameraManager
+        // ✅ CRITICAL: Single torch activation - no complex level changes
         if (Platform.OS === 'ios' && cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
-          await NativeModules.PPGCameraManager.setTorchLevel(torchLevel);
-          console.log(`🔦 iOS Torch GUARANTEED ON - level: ${torchLevel}`);
+          // Use fixed optimal level to prevent hanging
+          await NativeModules.PPGCameraManager.setTorchLevel(0.3); // Fixed optimal level
+          setTorchLevel(0.3);
+          console.log('🔦 iOS Torch activated at fixed level 0.3');
         } else {
           console.log('🔦 Torch ON (VisionCamera managed)');
         }
         
-        // Set pretorch drop period when torch turns on
+        // Set pretorch drop period
         pretorchUntilRef.current = now + CFG.PRETORCH_DROP_MS;
         
         logTelemetryEvent('torch_state_guarantee', { 
           torchOn: true, 
-          level: torchLevel,
+          level: 0.3,
           timestamp: now,
           pretorchDropUntil: pretorchUntilRef.current
         });
       }
     } catch (e: unknown) {
-      console.warn('Torch açılamadı:', e);
+      console.error('❌ Torch activation failed:', e);
       logTelemetryEvent('torch_guarantee_failed', { error: e instanceof Error ? e.message : String(e) });
+      // ✅ CRITICAL: Reset state on torch failure
+      setTorchOn(false);
+      setTorchLevel(0);
     }
     
     // Analyzer'ı başlat
@@ -536,14 +550,20 @@ export default function CameraPPGAnalyzer() {
         console.log('🔴 Analyzer destroyed');
       }
       
-      // Clean all timers
-      if (torchTimerRef.current) {
-        clearTimeout(torchTimerRef.current);
-        torchTimerRef.current = null;
-      }
-      if (simulationTimerRef.current) {
-        clearInterval(simulationTimerRef.current);
-        simulationTimerRef.current = null;
+      // ✅ SIMPLIFIED: Clean torch shutdown to prevent hanging
+      try {
+        if (device?.hasTorch && Platform.OS === 'ios' && NativeModules.PPGCameraManager?.setTorchLevel) {
+          console.log('🔦 Turning off torch...');
+          await NativeModules.PPGCameraManager.setTorchLevel(0);
+          setTorchOn(false);
+          setTorchLevel(0);
+          console.log('✅ Torch turned off successfully');
+        }
+      } catch (e) {
+        console.error('❌ Torch shutdown failed:', e);
+        // Force reset torch state
+        setTorchOn(false);
+        setTorchLevel(0);
       }
       
       // Cleanup state
@@ -2051,23 +2071,8 @@ export default function CameraPPGAnalyzer() {
         const ranMs = Date.now() - analyzeStartTsRef.current;
         const coolOK = Date.now() - lastAutoToggleAtRef.current >= CFG.COOLDOWN_MS;
 
-        // ✅ Torch optimization: lower torch after long stable period; boost during recover/poor
-        try {
-          const nowTsTorch = Date.now();
-          // Lower when very stable
-          if (fsmRef.current === 'running' && coverStableMsRef.current >= CFG.STABLE_MS_FOR_TORCH_DOWN && nowTsTorch >= torchAdjustCoolUntilRef.current) {
-            if (Platform.OS === 'ios' && device?.hasTorch && torchLevel > CFG.TORCH_LOW_LEVEL) {
-              await setTorchLevelSafely(CFG.TORCH_LOW_LEVEL, 'stable_quality');
-              torchAdjustCoolUntilRef.current = nowTsTorch + 3000;
-            }
-          }
-          // Boost during recover or poor quality
-          const isPoorNow = (!cppGoodQuality && cppConf <= 0.1 && cppSnr <= 3);
-          if ((fsmRef.current === 'recover' || isPoorNow) && Platform.OS === 'ios' && device?.hasTorch && torchLevel < 0.4 && nowTsTorch >= torchAdjustCoolUntilRef.current) {
-            await setTorchLevelSafely(0.4, fsmRef.current === 'recover' ? 'recover_boost' : 'poor_quality_boost');
-            torchAdjustCoolUntilRef.current = nowTsTorch + 3000;
-          }
-        } catch {}
+        // ✅ SIMPLIFIED: No automatic torch adjustments to prevent hanging
+        // Torch level remains fixed at 0.3 during analysis
         
         // ✅ CRITICAL: RECOVER state to tolerate brief dips
         const isPoorQuality = (!cppGoodQuality && cppConf <= 0.1 && cppSnr <= 3);
@@ -2140,26 +2145,8 @@ export default function CameraPPGAnalyzer() {
               // ✅ Warmup'ı uzat, hemen durdurmak yerine
               warmupUntilRef.current = Date.now() + 2000; // 2s ek süre
               
-              // ✅ iOS-only: Torch boost when warmup extends and fallback is active
-              if (Platform.OS === 'ios' && enableFallback && cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
-                const nextIdx = Math.min(currentTorchLevelIndex + 1, CFG.TORCH_LEVELS.length - 1);
-                if (nextIdx !== currentTorchLevelIndex) {
-                  setCurrentTorchLevelIndex(nextIdx);
-                  setTorchLevel(CFG.TORCH_LEVELS[nextIdx]);
-                  
-                  NativeModules.PPGCameraManager.setTorchLevel(CFG.TORCH_LEVELS[nextIdx]).then(() => {
-                    console.log(`🔥 iOS Torch boost on warmup extend: ${CFG.TORCH_LEVELS[nextIdx]}`);
-                    logTelemetryEvent('torch_boost_on_warmup_extend', { 
-                      platform: 'ios',
-                      oldLevel: CFG.TORCH_LEVELS[currentTorchLevelIndex],
-                      newLevel: CFG.TORCH_LEVELS[nextIdx],
-                      fallbackActive: enableFallback 
-                    });
-                  }).catch((e: unknown) => {
-                    console.warn('iOS Torch boost failed:', e);
-                  });
-                }
-              }
+              // ✅ SIMPLIFIED: No torch boost to prevent hanging
+              // Warmup extended but torch level remains fixed
             }
           }
           
@@ -2214,34 +2201,21 @@ export default function CameraPPGAnalyzer() {
           console.error('Failed to stop analysis on background');
         });
       } else if (nextAppState === 'active' && isAnalyzingRef.current) {
-        // ✅ P1 FIX: Re-prime torch and camera locks on foreground return
-        console.log('✅ App returning to foreground - re-priming torch and camera');
+        // ✅ SIMPLIFIED: Minimal foreground handling to prevent torch hanging
+        console.log('✅ App returning to foreground - minimal torch check');
         
         try {
-          // ✅ iOS-only: Re-apply camera locks on foreground
+          // Only re-apply camera locks, no torch changes
           if (Platform.OS === 'ios') {
             await lockCameraSettings();
           }
           
-          // Guarantee torch is ON
+          // Just ensure torch state is consistent, no level changes
           if (device?.hasTorch && torchOn) {
-            setTorchOn(true); // Re-trigger
-            
-            // ✅ iOS-only: Torch guarantee via PPGCameraManager
-            if (Platform.OS === 'ios' && cameraLockEnabled && NativeModules.PPGCameraManager?.setTorchLevel) {
-              await NativeModules.PPGCameraManager.setTorchLevel(torchLevel);
-              console.log(`🔦 iOS Torch RE-GUARANTEED ON after foreground - level: ${torchLevel}`);
-        } else {
-              console.log('🔦 Torch re-enabled (VisionCamera managed)');
-            }
-            
-            logTelemetryEvent('torch_foreground_guarantee', { 
-              torchOn: true, 
-              level: torchLevel 
-            });
+            console.log('🔦 Torch state verified (no level change)');
           }
         } catch (e) {
-          console.warn('Foreground torch/camera re-prime failed:', e);
+          console.warn('Foreground re-prime failed:', e);
         }
       }
     });
