@@ -7,7 +7,7 @@
 RCT_EXPORT_MODULE();
 
 - (NSArray<NSString *> *)supportedEvents {
-    return @[@"PPGCameraEvent"];
+    return @[@"PPGCameraEvent", @"PPGSample"];
 }
 
 + (BOOL)requiresMainQueueSetup {
@@ -30,6 +30,13 @@ RCT_EXPORT_MODULE();
         } else {
             RCTLogInfo(@"✅ PPGCameraManager: Back camera found: %@", self.captureDevice.localizedName);
         }
+        
+        // Listen for PPG samples from PPGMeanPlugin
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handlePPGSample:)
+                                                     name:@"HeartPyPPGSample"
+                                                   object:nil];
+        RCTLogInfo(@"✅ PPGCameraManager: Listening for HeartPyPPGSample notifications");
     }
     return self;
 }
@@ -310,6 +317,33 @@ RCT_EXPORT_METHOD(getCameraCapabilities:(nonnull RCTPromiseResolveBlock)resolve
     gains.greenGain = fmax(1.0, fmin(self.captureDevice.maxWhiteBalanceGain, gains.greenGain));
     gains.blueGain = fmax(1.0, fmin(self.captureDevice.maxWhiteBalanceGain, gains.blueGain));
     return gains;
+}
+
+RCT_EXPORT_METHOD(processSample:(nonnull NSNumber *)value timestamp:(nonnull NSNumber *)timestamp) {
+    // Forward sample to React Native via event
+    [self sendEventWithName:@"PPGSample" body:@{
+        @"value": value,
+        @"timestamp": timestamp
+    }];
+}
+
+- (void)handlePPGSample:(NSNotification *)notification {
+    NSDictionary *userInfo = notification.userInfo;
+    NSNumber *value = userInfo[@"value"];
+    NSNumber *timestamp = userInfo[@"timestamp"];
+    NSNumber *confidence = userInfo[@"confidence"];
+    
+    if (value && timestamp) {
+        RCTLogInfo(@"📸 PPGCameraManager: Received PPG sample - value: %.3f, timestamp: %.0f, confidence: %.2f", 
+                   value.doubleValue, timestamp.doubleValue, confidence.doubleValue);
+        
+        // Forward sample to React Native via event
+        [self sendEventWithName:@"PPGSample" body:@{
+            @"value": value,
+            @"timestamp": timestamp,
+            @"confidence": confidence ?: @(0.0)
+        }];
+    }
 }
 
 @end

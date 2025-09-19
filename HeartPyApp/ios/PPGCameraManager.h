@@ -12,4 +12,7 @@
 - (void)setTorchLevel:(nonnull NSNumber *)level resolver:(nonnull RCTPromiseResolveBlock)resolve rejecter:(nonnull RCTPromiseRejectBlock)reject;
 - (void)getCameraCapabilities:(nonnull RCTPromiseResolveBlock)resolve rejecter:(nonnull RCTPromiseRejectBlock)reject;
 
+// Sample processing method
+- (void)processSample:(nonnull NSNumber *)value timestamp:(nonnull NSNumber *)timestamp;
+
 @end

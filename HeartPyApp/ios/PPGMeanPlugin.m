@@ -1,5 +1,5 @@
 #import <Foundation/Foundation.h>
-#import "FrameProcessorPlugin.h"
+#import <VisionCamera/FrameProcessorPlugin.h>
 #import <CoreVideo/CoreVideo.h>
 #include <math.h>
 

@@ -1,246 +1,105 @@
-/**
- * Sample React Native App
- * https://github.com/facebook/react-native
- *
- * @format
- */
+import React, {useCallback, useEffect, useRef, useState} from 'react';
+import {SafeAreaView, StatusBar, StyleSheet, View} from 'react-native';
+import {PPGCamera} from './src/components/PPGCamera';
+import {PPGDisplay} from './src/components/PPGDisplay';
+import {PPGAnalyzer} from './src/core/PPGAnalyzer';
+import type {PPGMetrics, PPGSample, PPGState} from './src/types/PPGTypes';
 
-import React, {useEffect, useState} from 'react';
-import type {PropsWithChildren} from 'react';
-import {
-  SafeAreaView,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  useColorScheme,
-  View,
-  TouchableOpacity,
-} from 'react-native';
+function useAnalyzer() {
+  const analyzerRef = useRef<PPGAnalyzer | null>(null);
+  const [metrics, setMetrics] = useState<PPGMetrics | null>(null);
+  const [waveform, setWaveform] = useState<number[]>([]);
+  const [state, setState] = useState<PPGState>('idle');
 
-import {
-  Colors,
-  DebugInstructions,
-  Header,
-  LearnMoreLinks,
-  ReloadInstructions,
-} from 'react-native/Libraries/NewAppScreen';
-import {NativeModules} from 'react-native';
-import HeartPyRunner from './HeartPyRunner';
-import CameraPPGAnalyzer from './CameraPPGAnalyzer';
+  useEffect(() => {
+    console.log('[App] Initializing analyzer');
+    analyzerRef.current = new PPGAnalyzer({
+      onMetrics: (nextMetrics, nextWaveform) => {
+        console.log('[App] Metrics received', {
+          bpm: nextMetrics?.bpm,
+          confidence: nextMetrics?.confidence,
+          snrDb: nextMetrics?.snrDb,
+          waveformSamples: nextWaveform.length,
+        });
+        setMetrics(nextMetrics);
+        setWaveform(nextWaveform);
+      },
+      onStateChange: (nextState) => {
+        console.log('[App] Analyzer state changed', {nextState});
+        setState(nextState);
+      },
+    });
+    return () => {
+      console.log('[App] Cleaning up analyzer');
+      analyzerRef.current?.stop().catch(console.warn);
+      analyzerRef.current = null;
+    };
+  }, []);
 
-// Global JSI binding declaration
-declare global {
-  var __HeartPyAnalyze: ((signal: number[], fs: number, options?: any) => any) | undefined;
-}
+  const start = useCallback(async () => {
+    console.log('[App] Start button pressed, current state:', state);
+    try {
+      await analyzerRef.current?.start();
+      console.log('[App] Start completed successfully');
+    } catch (error) {
+      console.error('[App] Start failed:', error);
+    }
+  }, [state]);
 
-type SectionProps = PropsWithChildren<{
-  title: string;
-}>;
+  const stop = useCallback(async () => {
+    console.log('[App] Stop requested, current state:', state);
+    await analyzerRef.current?.stop();
+    console.log('[App] Stop completed');
+  }, [state]);
 
-function Section({children, title}: SectionProps): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
-  return (
-    <View style={styles.sectionContainer}>
-      <Text
-        style={[
-          styles.sectionTitle,
-          {
-            color: isDarkMode ? Colors.white : Colors.black,
-          },
-        ]}>
-        {title}
-      </Text>
-      <Text
-        style={[
-          styles.sectionDescription,
-          {
-            color: isDarkMode ? Colors.light : Colors.dark,
-          },
-        ]}>
-        {children}
-      </Text>
-    </View>
-  );
+  const sampleCountRef = useRef(0);
+  const addSample = useCallback((sample: PPGSample) => {
+    sampleCountRef.current += 1;
+    
+    // DETAILED LOG: Track every sample
+    console.log('[App] Sample received', {
+      count: sampleCountRef.current,
+      value: sample.value,
+      timestamp: sample.timestamp,
+      state: state,
+    });
+    
+    analyzerRef.current?.addSample(sample);
+  }, [state]);
+
+  return {metrics, waveform, state, start, stop, addSample};
 }
 
 function App(): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
-  const [currentScreen, setCurrentScreen] = useState<'home' | 'camera'>('home');
-
-  const backgroundStyle = {
-    backgroundColor: isDarkMode ? Colors.darker : Colors.lighter,
-  };
-
-  useEffect(() => {
-    // Attempt to install JSI bindings quietly; rely on library's internal fallback.
-    try {
-      console.log('Installing HeartPy JSI (best-effort)...');
-      let installed = false;
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const heartpy = require('react-native-heartpy');
-        if (heartpy && typeof heartpy.installJSI === 'function') {
-          installed = !!heartpy.installJSI();
-        }
-      } catch {}
-      if (!installed && NativeModules.HeartPyModule?.installJSI) {
-        try { installed = !!NativeModules.HeartPyModule.installJSI(); } catch {}
-      }
-      if (installed) {
-        console.log('HeartPy JSI install: ok');
-      } else {
-        console.log('HeartPy JSI not installed; using NativeModule fallback');
-      }
-    } catch (e) {
-      console.warn('HeartPy JSI install error (ignored):', e);
-    }
-  }, []);
-
-  if (currentScreen === 'camera') {
-    return (
-      <SafeAreaView style={[backgroundStyle, { flex: 1 }]}>
-        <StatusBar
-          barStyle={isDarkMode ? 'light-content' : 'dark-content'}
-          backgroundColor={backgroundStyle.backgroundColor}
-        />
-        <View style={styles.headerBar}>
-          <TouchableOpacity 
-            style={styles.backButton} 
-            onPress={() => setCurrentScreen('home')}
-          >
-            <Text style={styles.backButtonText}>← Ana Sayfa</Text>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Real-time PPG Analiz</Text>
-        </View>
-        <CameraPPGAnalyzer />
-      </SafeAreaView>
-    );
-  }
+  const {metrics, waveform, state, start, stop, addSample} = useAnalyzer();
 
   return (
-    <SafeAreaView style={backgroundStyle}>
-      <StatusBar
-        barStyle={isDarkMode ? 'light-content' : 'dark-content'}
-        backgroundColor={backgroundStyle.backgroundColor}
-      />
-      <ScrollView
-        contentInsetAdjustmentBehavior="automatic"
-        style={backgroundStyle}>
-        <Header />
-        <View
-          style={{
-            backgroundColor: isDarkMode ? Colors.black : Colors.white,
-          }}>
-          
-          {/* Kamera PPG Butonu */}
-          <TouchableOpacity 
-            style={styles.cameraButton} 
-            onPress={() => setCurrentScreen('camera')}
-          >
-            <Text style={styles.cameraButtonText}>
-              📱 Kamera ile Kalp Atışı Ölç
-            </Text>
-            <Text style={styles.cameraButtonSubtext}>
-              Real-time PPG analizi ile anlık kalp atışı ve HRV metrikleri
-            </Text>
-          </TouchableOpacity>
-
-          <HeartPyRunner />
-          <Section title="HeartPy Enhanced">
-            <Text>
-              Bu uygulama HeartPy Python kütüphanesinin C++ portunu kullanarak 
-              yüksek performanslı kalp atışı ve HRV analizi sağlar.
-            </Text>
-          </Section>
-          <Section title="Özellikler">
-            <Text>
-              • Real-time PPG analizi{'\n'}
-              • 1000x daha hızlı işleme{'\n'}
-              • JSI ve streaming desteği{'\n'}
-              • Kapsamlı HRV metrikleri{'\n'}
-              • Bilimsel doğrulanmış algoritma
-            </Text>
-          </Section>
-          <Section title="Debug">
-            <DebugInstructions />
-          </Section>
-        </View>
-      </ScrollView>
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar barStyle="light-content" />
+      <View style={styles.container}>
+        <PPGDisplay
+          metrics={metrics}
+          waveform={waveform}
+          state={state}
+          onStart={start}
+          onStop={stop}
+        />
+        <PPGCamera onSample={addSample} isActive={state !== 'idle'} />
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  sectionContainer: {
-    marginTop: 32,
-    paddingHorizontal: 24,
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#000',
   },
-  sectionTitle: {
-    fontSize: 24,
-    fontWeight: '600',
-  },
-  sectionDescription: {
-    marginTop: 8,
-    fontSize: 18,
-    fontWeight: '400',
-  },
-  highlight: {
-    fontWeight: '700',
-  },
-  // Kamera özelliği stilleri
-  headerBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e0e0e0',
-  },
-  backButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    backgroundColor: '#f0f0f0',
-    borderRadius: 8,
-    marginRight: 16,
-  },
-  backButtonText: {
-    fontSize: 16,
-    color: '#007AFF',
-    fontWeight: '600',
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  cameraButton: {
-    backgroundColor: '#4CAF50',
-    margin: 16,
-    padding: 20,
-    borderRadius: 12,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
-    elevation: 5,
-  },
-  cameraButtonText: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 8,
-  },
-  cameraButtonSubtext: {
-    fontSize: 14,
-    color: 'rgba(255,255,255,0.9)',
-    textAlign: 'center',
-    lineHeight: 20,
+  container: {
+    flex: 1,
+    padding: 16,
+    gap: 24,
+    backgroundColor: '#000',
   },
 });
 

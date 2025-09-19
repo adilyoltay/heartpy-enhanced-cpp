@@ -19,6 +19,12 @@ target 'HeartPyApp' do
 
   # Manual HeartPy pod
   pod 'HeartPy', :path => '../../react-native-heartpy/ios'
+  
+  # Manual VisionCamera pod for frame processor
+  pod 'VisionCamera', :path => '../node_modules/react-native-vision-camera'
+  
+  # Manual Reanimated pod (required for proper initialization)
+  pod 'RNReanimated', :path => '../node_modules/react-native-reanimated'
 
   use_react_native!(
     :path => config[:reactNativePath],
