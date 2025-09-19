@@ -4,6 +4,7 @@
 export interface PPGSample {
   readonly value: number;
   readonly timestamp: number;
+  readonly confidence?: number; // Optional confidence from PPGMeanPlugin
 }
 
 export type PPGQuality = 'good' | 'poor' | 'unknown';

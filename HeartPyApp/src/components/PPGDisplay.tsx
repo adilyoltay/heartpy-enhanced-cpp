@@ -19,10 +19,12 @@ export function PPGDisplay({
   onStart,
   onStop,
 }: Props): JSX.Element {
-  // BPM Quality Gating: Only show BPM when measurement is reliable
+  // BPM Quality Gating: Softened reliability check - rely on goodQuality + SNR instead of strict confidence
   const isBpmReliable = metrics && 
     metrics.quality.totalBeats >= 8 && 
-    metrics.confidence > 0.6;
+    metrics.quality.goodQuality === true && // Primary quality gate
+    metrics.snrDb > 8 && // SNR threshold
+    metrics.confidence > 0.4; // Softened confidence threshold (was 0.7)
   
   const bpm = isBpmReliable ? metrics.bpm.toFixed(1) : '--';
   const confidence = metrics ? (metrics.confidence * 100).toFixed(0) : '--';
@@ -34,7 +36,8 @@ export function PPGDisplay({
   const lastPickTimeRef = useRef<number>(0);
   
   useEffect(() => {
-    if (metrics && metrics.bpm > 0 && state === 'running') {
+    // CRITICAL: Only trigger haptic when BPM is reliable AND signal quality is excellent
+    if (metrics && isBpmReliable && state === 'running' && metrics.snrDb > 8) {
       const currentBpm = metrics.bpm;
       const currentTime = Date.now();
       
@@ -50,26 +53,43 @@ export function PPGDisplay({
             ignoreAndroidSystemSettings: false,
           });
           lastPickTimeRef.current = currentTime;
-          console.log('💓 Heart beat detected - BPM:', currentBpm, 'Haptic triggered');
+          console.log('💓 Heart beat detected - BPM:', currentBpm, 'SNR:', metrics.snrDb.toFixed(1), 'Haptic triggered');
         }
       }
       
       lastBpmRef.current = currentBpm;
+    } else if (metrics && !isBpmReliable) {
+      // Reset haptic tracking when BPM becomes unreliable
+      lastBpmRef.current = null;
+      console.log('💓 Haptic disabled - BPM unreliable (confidence:', metrics.confidence.toFixed(2), 'SNR:', metrics.snrDb.toFixed(1), ')');
     }
-  }, [metrics, state]);
+  }, [metrics, state, isBpmReliable]);
   
   // Use HeartPy peakList directly (no duplication)
   const pickPoints = metrics?.peakList || [];
 
   return (
     <View style={styles.container}>
+      {/* Poor Signal Alert */}
+      {state === 'running' && metrics && !isBpmReliable && (
+        <View style={styles.poorSignalAlert}>
+          <Text style={styles.poorSignalText}>
+            ⚠️ Sinyal kalitesi düşük! Parmak pozisyonunu kontrol edin.
+          </Text>
+        </View>
+      )}
+      
       {/* Status Message */}
       {state === 'running' && !isBpmReliable && (
         <View style={styles.statusMessage}>
           <Text style={styles.statusText}>
             {metrics && metrics.quality.totalBeats < 8 
               ? `Ölçüm hazırlanıyor... (${metrics.quality.totalBeats}/8 kalp atışı)`
-              : metrics && metrics.confidence <= 0.6
+              : metrics && !metrics.quality.goodQuality
+              ? `Kalite kontrolü başarısız...`
+              : metrics && metrics.snrDb <= 8
+              ? `SNR çok düşük... (${metrics.snrDb.toFixed(1)} dB)`
+              : metrics && metrics.confidence <= 0.4
               ? `Sinyal kalitesi düşük... (${(metrics.confidence * 100).toFixed(0)}%)`
               : 'Ölçüm hazırlanıyor...'
             }
@@ -94,27 +114,23 @@ export function PPGDisplay({
           const max = Math.max(...waveformSlice);
           const span = max - min || 1;
           
-          return waveformSlice.map((value, index) => {
-            const height = ((value - min) / span) * 80 + 4;
-            
-            // Check if this index corresponds to a HeartPy peak
-            // HeartPy peakList contains absolute sample indices
-            // We need to map them to our relative waveform indices
-            const waveformStart = Math.max(0, waveform.length - PPG_CONFIG.ui.waveformSamples);
-            const absoluteIndex = waveformStart + index;
-            const isPickPoint = pickPoints.includes(absoluteIndex);
-            
-            return (
-              <View 
-                key={index} 
-                style={[
-                  styles.waveformBar, 
-                  {height},
-                  isPickPoint && styles.waveformBarPick
-                ]} 
-              />
-            );
-          });
+                 return waveformSlice.map((value, index) => {
+                   const height = ((value - min) / span) * 80 + 4;
+                   
+                   // Check if this index corresponds to a HeartPy peak (now in relative coordinates)
+                   const isPickPoint = pickPoints.includes(index);
+                   
+                   return (
+                     <View 
+                       key={index} 
+                       style={[
+                         styles.waveformBar, 
+                         {height},
+                         isPickPoint && styles.waveformBarPick
+                       ]} 
+                     />
+                   );
+                 });
         })()}
       </View>
 
@@ -169,6 +185,20 @@ function Metric({
 const styles = StyleSheet.create({
   container: {
     gap: 16,
+  },
+  poorSignalAlert: {
+    backgroundColor: '#F44336',
+    padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#D32F2F',
+  },
+  poorSignalText: {
+    color: '#FFF',
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   statusMessage: {
     backgroundColor: '#FFA726',

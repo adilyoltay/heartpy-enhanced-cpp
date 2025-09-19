@@ -1,5 +1,6 @@
 import {RealtimeAnalyzer} from 'react-native-heartpy';
 import {PPG_CONFIG} from './PPGConfig';
+import {RingBuffer} from './RingBuffer';
 import type {PPGMetrics} from '../types/PPGTypes';
 
 // Override QualityInfo to include streaming metrics
@@ -38,6 +39,11 @@ type HeartPyResult = {
 
 export class HeartPyWrapper {
   private analyzer: RealtimeAnalyzer | null = null;
+  private bufferRef: RingBuffer<number> | null = null; // Reference to analyzer's buffer
+
+  setBufferRef(buffer: RingBuffer<number>): void {
+    this.bufferRef = buffer;
+  }
 
   async create(sampleRate: number): Promise<void> {
     console.log('[HeartPyWrapper] Create called with sampleRate:', sampleRate);
@@ -173,11 +179,30 @@ export class HeartPyWrapper {
       signalQuality = 'poor';
     }
 
+    // CRITICAL: Filter peak list and convert to relative indices for UI display
+    const bufferSize = this.bufferRef?.getSize() || 0;
+    const waveformLength = PPG_CONFIG.ui.waveformSamples; // 150 samples
+    const waveformStart = Math.max(0, bufferSize - waveformLength);
+    
+    // Filter peaks within the current waveform window and convert to relative indices
+    const filteredPeakList = (result.peakList || [])
+      .filter(peakIndex => peakIndex >= waveformStart && peakIndex < bufferSize)
+      .map(peakIndex => peakIndex - waveformStart); // Convert to relative index (0-149)
+    
+    console.log('[HeartPyWrapper] Peak list filtering', {
+      originalPeaks: result.peakList?.length || 0,
+      filteredPeaks: filteredPeakList.length,
+      waveformStart: waveformStart,
+      bufferSize: bufferSize,
+      waveformLength: waveformLength,
+      relativePeaks: filteredPeakList,
+    });
+
     return {
       bpm,
       confidence,
       snrDb,
-      peakList: result.peakList || [],
+      peakList: filteredPeakList,
       quality: {
         goodQuality,
         signalQuality,
@@ -200,5 +225,24 @@ export class HeartPyWrapper {
     }
     await this.analyzer.destroy();
     this.analyzer = null;
+  }
+
+  async reset(): Promise<void> {
+    if (!this.analyzer) {
+      console.warn('[HeartPyWrapper] Cannot reset - analyzer not initialized');
+      return;
+    }
+    
+    try {
+      console.log('[HeartPyWrapper] Resetting analyzer session');
+      // Note: RealtimeAnalyzer doesn't have a direct reset method
+      // We'll recreate it instead
+      await this.destroy();
+      await this.create(PPG_CONFIG.analysis.sampleRate);
+      console.log('[HeartPyWrapper] Analyzer session reset successfully');
+    } catch (error) {
+      console.error('[HeartPyWrapper] Reset failed:', error);
+      throw error;
+    }
   }
 }

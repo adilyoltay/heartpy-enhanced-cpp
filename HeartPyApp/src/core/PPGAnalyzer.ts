@@ -41,6 +41,7 @@ export class PPGAnalyzer {
       this.setState('starting');
       console.log('[PPGAnalyzer] Creating HeartPy wrapper...');
       await this.wrapper.create(PPG_CONFIG.analysis.sampleRate);
+      this.wrapper.setBufferRef(this.buffer); // Set buffer reference for peak filtering
       console.log('[PPGAnalyzer] HeartPy wrapper created successfully');
 
       this.setState('running');
@@ -89,6 +90,9 @@ export class PPGAnalyzer {
       return;
     }
     
+    // CRITICAL: Check poor signal conditions BEFORE pushing to prevent self-comparison
+    this.checkPoorSignalConditions(sample);
+    
     this.buffer.push(sample.value);
     this.pending.push(sample.value);
     this.pendingTimestamps.push(sample.timestamp);
@@ -116,6 +120,34 @@ export class PPGAnalyzer {
         bufferSize: this.buffer.getSize(),
         pendingSize: this.pending.length,
       });
+    }
+  }
+
+  private checkPoorSignalConditions(sample: PPGSample): void {
+    // Check for poor signal conditions that require reset
+    // Note: Camera confidence is always ~0.85, so we'll rely on metrics-based detection instead
+    const shouldReset = 
+      (this.pendingTimestamps.length > 0 && 
+       sample.timestamp - this.pendingTimestamps[this.pendingTimestamps.length - 1] > 1.0); // Gap > 1s
+    
+    if (shouldReset) {
+      console.log('[PPGAnalyzer] Poor signal detected (timestamp gap), resetting buffers', {
+        timestampGap: this.pendingTimestamps.length > 0 ? 
+          sample.timestamp - this.pendingTimestamps[this.pendingTimestamps.length - 1] : 'N/A',
+      });
+      
+      // Reset all buffers and HeartPy session
+      this.buffer.clear();
+      this.pending.length = 0;
+      this.pendingTimestamps.length = 0;
+      this.sampleCount = 0;
+      
+      // Reset HeartPy wrapper if available
+      if (this.wrapper) {
+        this.wrapper.reset().catch(error => {
+          console.warn('[PPGAnalyzer] Failed to reset HeartPy wrapper:', error);
+        });
+      }
     }
   }
 

@@ -79,18 +79,22 @@ export function PPGCamera({onSample, isActive}: Props): JSX.Element {
     }
 
     const eventEmitter = new NativeEventEmitter(PPGCameraManager);
-    const subscription = eventEmitter.addListener('PPGSample', (event) => {
-      console.log('[PPGCamera] Received sample from NativeModules', event);
-      
-      // FPS Monitoring: Calculate FPS from JS event timestamps (safe from worklet context)
-      calculateFPS(event.timestamp);
-      
-      const sample: PPGSample = {
-        value: event.value,
-        timestamp: event.timestamp,
-      };
-      onSample(sample);
-    });
+           const subscription = eventEmitter.addListener('PPGSample', (event) => {
+             console.log('[PPGCamera] Received sample from NativeModules', event);
+             
+             // FPS Monitoring: Calculate FPS from JS event timestamps (safe from worklet context)
+             calculateFPS(event.timestamp);
+             
+             // NOTE: Camera confidence is always ~0.85, so we don't filter here
+             // Poor signal detection is handled by PPGAnalyzer based on metrics/SNR
+             
+             const sample: PPGSample = {
+               value: event.value,
+               timestamp: event.timestamp,
+               confidence: event.confidence,
+             };
+             onSample(sample);
+           });
 
     return () => {
       console.log('[PPGCamera] Clearing NativeModules event listener');

@@ -13,10 +13,10 @@ export const PPG_CONFIG = {
   analysis: {
     sampleRate: 30,
     bufferSize: 450,
-    analysisWindow: 150,
+    analysisWindow: 90, // Reduced from 150 to 90 samples (3s instead of 5s) for faster response
   },
   ui: {
-    updateInterval: 100,
+    updateInterval: 50, // Reduced from 100ms to 50ms for faster UI updates
     waveformSamples: 150,
   },
   debug: {
