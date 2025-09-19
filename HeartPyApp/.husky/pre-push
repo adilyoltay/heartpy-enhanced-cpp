@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# PPG Acceptance Test Hook
+echo "🔍 Running PPG acceptance tests..."
+
+# Check if log file exists
+if [ -f "artifacts/latest_session.log" ]; then
+  echo "📄 Found latest session log, running tests..."
+  npm run check:ppg -- artifacts/latest_session.log
+else
+  echo "⚠️  No session log found, skipping PPG tests"
+  echo "   To capture logs: react-native run-ios | tee artifacts/latest_session.log"
+fi

@@ -76,3 +76,38 @@
 - **BPM**: 40-180 arası (stabil)
 - **Peak Count**: 2-5 peak (150 sample window'da)
 - **Recovery Time**: < 3s (saturasyon sonrası)
+
+## 🤖 **Automated Acceptance Testing**
+
+### **Log Capture**
+```bash
+# Capture a representative session log
+react-native run-ios --simulator="iPhone 15" | tee ../artifacts/ppg_session.log
+
+# Or capture from Metro bundler
+npx react-native start | tee ../artifacts/metro_session.log
+```
+
+### **Run Acceptance Tests**
+```bash
+# Run the automated test suite
+npm run check:ppg -- ../artifacts/ppg_session.log
+
+# Exit codes: 0 = all tests pass, 1 = any test fails
+```
+
+### **Test Coverage**
+- ✅ **Sample Stream Flow**: Valid samples, pushWithTimestamps calls
+- ✅ **HeartPy Warm-up**: Native confidence preservation, BPM calculation
+- ✅ **Peak Filtering**: Real buffer length usage, peak index calculation
+- ✅ **UI Haptic Feedback**: Confidence-based gating, reliability checks
+- ✅ **Error Handling**: No critical errors, graceful failure handling
+
+### **CI Integration**
+```bash
+# Add to pre-push hook (Husky)
+npm run check:ppg -- artifacts/latest_session.log
+
+# Add to CI pipeline
+npm run check:ppg -- artifacts/ci_session.log
+```
