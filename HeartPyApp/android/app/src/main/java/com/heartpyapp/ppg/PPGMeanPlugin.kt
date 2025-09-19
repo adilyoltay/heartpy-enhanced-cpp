@@ -20,6 +20,8 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
   private val gHist = DoubleArray(HIST_N)
   private val bHist = DoubleArray(HIST_N)
   private val yHist = DoubleArray(HIST_N)
+  private val vHist = DoubleArray(HIST_N)
+  private var dcMean = Double.NaN
   private var histPos = 0
   private var histCount = 0
   override fun callback(frame: Frame, params: Map<String, Any?>?): Any? {
@@ -64,8 +66,6 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       val startX = ((width - roiW) / 2).coerceAtLeast(0)
       val startY = ((height - roiH) / 2).coerceAtLeast(0)
 
-      var sum = 0L
-      var count = 0L
       // Sample grid step for speed
       val xStep = step
       val yStep = step
@@ -75,6 +75,9 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       var weightedSum = 0.0
       var weightTotal = 0.0
       var confAccum = 0.0
+      var spatialSum = 0.0
+      var spatialSqSum = 0.0
+      var spatialSamples = 0.0
       var wSumR = 0.0; var wSumG = 0.0; var wSumB = 0.0; var wSumY = 0.0
 
       val uPlane = planes.getOrNull(1)
@@ -118,6 +121,9 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
               if (G < 0.0) G = 0.0; if (G > 255.0) G = 255.0
               if (B < 0.0) B = 0.0; if (B > 255.0) B = 255.0
               sR += R; sG += G; sB += B; sY += Y; cntD += 1.0
+              spatialSum += Y
+              spatialSqSum += Y * Y
+              spatialSamples += 1.0
             }
           }
           if (cntD <= 0.0) continue
@@ -152,14 +158,20 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       val Bagg = if (weightTotal > 0.0) wSumB / weightTotal else Double.NaN
       val Yagg = if (weightTotal > 0.0) wSumY / weightTotal else Double.NaN
 
+      val spatialMean = if (spatialSamples > 0.0) spatialSum / spatialSamples else Double.NaN
+      val spatialVar = if (spatialSamples > 0.0) (spatialSqSum / spatialSamples) - spatialMean * spatialMean else 0.0
+      val spatialStd = if (spatialVar.isNaN() || spatialVar <= 0.0) 0.0 else kotlin.math.sqrt(spatialVar)
+      val contrastScore = (spatialStd / 12.0).coerceIn(0.0, 1.0)
+
       if (Ragg.isFinite() && Gagg.isFinite() && Bagg.isFinite() && Yagg.isFinite()) {
-        rHist[histPos] = Ragg; gHist[histPos] = Gagg; bHist[histPos] = Bagg; yHist[histPos] = Yagg
+        rHist[histPos] = Ragg; gHist[histPos] = Gagg; bHist[histPos] = Bagg; yHist[histPos] = Yagg; vHist[histPos] = resultMean
         histPos = (histPos + 1) % HIST_N
         if (histCount < HIST_N) histCount++
       }
 
       // Compute out sample
       var chromVal = Double.NaN
+      var chromAmp = 0.0
       if (histCount >= 8) {
         val N = histCount
         // CHROM rolling alpha over history
@@ -181,6 +193,7 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
         }
         val stdX = kotlin.math.sqrt(varX / kotlin.math.max(1, N - 1).toDouble())
         val stdY = kotlin.math.sqrt(varY / kotlin.math.max(1, N - 1).toDouble())
+        chromAmp = stdX
         val alpha = if (stdY > 1e-6) stdX / stdY else 1.0
         val lastIdx = (histPos - 1 + HIST_N) % HIST_N
         val Xcur = 3.0 * rHist[lastIdx] - 2.0 * gHist[lastIdx]
@@ -231,6 +244,29 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
         chromVal = (128.0 + k * Sc).coerceIn(0.0, 255.0)
       }
 
+      var windowMean = resultMean
+      var temporalScore = 0.2
+      if (histCount >= 6) {
+        val window = kotlin.math.min(histCount, 30)
+        var meanHist = 0.0
+        for (i in 0 until window) {
+          val idx = (histPos - 1 - i + HIST_N) % HIST_N
+          meanHist += vHist[idx]
+        }
+        meanHist /= window.toDouble()
+        windowMean = meanHist
+        var varHist = 0.0
+        for (i in 0 until window) {
+          val idx = (histPos - 1 - i + HIST_N) % HIST_N
+          val d = vHist[idx] - meanHist
+          varHist += d * d
+        }
+        val stdHist = kotlin.math.sqrt(varHist / kotlin.math.max(1, window - 1).toDouble())
+        temporalScore = (stdHist / 6.0).coerceIn(0.0, 1.0)
+      }
+      if (!temporalScore.isFinite()) temporalScore = 0.0
+      val amplitudeScore = (chromAmp / 35.0).coerceIn(0.0, 1.0)
+
       // Dynamic exposure gating via percentiles of Y history
       var expoGate = 1.0
       if (histCount >= 16) {
@@ -247,13 +283,20 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
         val gSat = ((255.0 - p90) / 20.0).coerceIn(0.0, 1.0)
         expoGate = kotlin.math.min(gDark, gSat)
       }
-      val baseConf = if (weightTotal > 0.0) confAccum / weightTotal else 0.0
-      val confChrom = (0.5 * baseConf + 0.5 * expoGate).coerceIn(0.0, 1.0)
-      val confMean = expoGate.coerceIn(0.0, 1.0)
+      val expoScore = expoGate.coerceIn(0.0, 1.0)
+      val patchScore = if (weightTotal > 0.0) (confAccum / weightTotal).coerceIn(0.0, 1.0) else expoScore
+      val spatialGate = (0.6 * expoScore + 0.4 * contrastScore).coerceIn(0.0, 1.0)
+      val dynamicMix = (0.7 * temporalScore + 0.3 * amplitudeScore).coerceIn(0.0, 1.0)
+      val reliability = kotlin.math.sqrt((spatialGate * dynamicMix).coerceIn(0.0, 1.0))
+      val baseConf = (0.3 * patchScore + 0.7 * reliability).coerceIn(0.0, 1.0)
+      val confMean = baseConf
+      val confChrom = (0.6 * baseConf + 0.4 * dynamicMix).coerceIn(0.0, 1.0)
 
       // Default by mode
       var outVal = if (mode == "mean" || !chromVal.isFinite()) resultMean else chromVal
       var outConf = if (mode == "mean" || !chromVal.isFinite()) confMean else confChrom
+      var blendWeight = 0.0
+      var blendUsed = false
 
       // Auto crossfade based on confidence and torch hint
       if (autoBlend && (resultMean.isFinite() || chromVal.isFinite())) {
@@ -266,10 +309,38 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
         val cv = if (chromVal.isFinite()) chromVal else 0.0
         outVal = (1.0 - w) * mv + w * cv
         outConf = (1.0 - w) * confMean + w * confChrom
+        blendWeight = w
+        blendUsed = true
       }
 
+      if (!windowMean.isFinite() && resultMean.isFinite()) windowMean = resultMean
+      if (!dcMean.isFinite() && windowMean.isFinite()) dcMean = windowMean
+      val prevDc = if (dcMean.isFinite()) dcMean else windowMean
+      val alphaDc = if (histCount >= 16) 0.03 else 0.06
+      val nextDc = if (windowMean.isFinite()) prevDc + alphaDc * (windowMean - prevDc) else prevDc
+      dcMean = nextDc
+      val meanComponent = if (resultMean.isFinite() && nextDc.isFinite()) ((resultMean - nextDc) / 120.0).coerceIn(-1.2, 1.2) else Double.NaN
+      val chromComponent = if (chromVal.isFinite()) ((chromVal - 128.0) / 160.0).coerceIn(-1.2, 1.2) else Double.NaN
+      val pushRaw = when {
+        blendUsed -> {
+          val mc = if (meanComponent.isFinite()) meanComponent else 0.0
+          val cc = if (chromComponent.isFinite()) chromComponent else 0.0
+          (1.0 - blendWeight) * mc + blendWeight * cc
+        }
+        mode == "chrom" || mode == "pos" -> chromComponent
+        else -> meanComponent
+      }
+      var finalSample = pushRaw
+      if (!finalSample.isFinite()) finalSample = Double.NaN
+      var confidenceOut = outConf.coerceIn(0.0, 1.0)
+      val amplitudeGate = (spatialGate * dynamicMix).coerceIn(0.0, 1.0)
+      if (amplitudeGate < 0.05) confidenceOut = kotlin.math.min(confidenceOut, amplitudeGate * 0.8)
+      val absSample = if (finalSample.isFinite()) kotlin.math.abs(finalSample) else 0.0
+      if (absSample < 0.01) confidenceOut *= absSample * 50.0
+      val pushSample = if (!finalSample.isFinite() || amplitudeGate < 0.02) Double.NaN else finalSample.coerceIn(-1.2, 1.2)
+
       // Publish sample + ts (seconds) to native buffer
-      if (outVal.isFinite()) {
+      if (pushSample.isFinite()) {
         try {
           // Frame timestamp'i kullan, yoksa system time kullan
           val tsNanos = try { 
@@ -281,14 +352,14 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
           
           // Debug: Her 30 frame'de bir timestamp log'la
           if (histCount % 30 == 0) {
-            android.util.Log.d("PPGPlugin", "PPG value: $outVal, ts: $tsSec, conf: $outConf")
+            android.util.Log.d("PPGPlugin", "PPG value: $pushSample, ts: $tsSec, conf: $confidenceOut")
           }
           
-          HeartPyModule.addPPGSampleWithTs(outVal, tsSec)
+          HeartPyModule.addPPGSampleWithTs(pushSample, tsSec)
         } catch (_: Throwable) {}
       }
-      try { HeartPyModule.addPPGSampleConfidence(outConf) } catch (_: Throwable) {}
-      outVal
+      try { HeartPyModule.addPPGSampleConfidence(confidenceOut) } catch (_: Throwable) {}
+      pushSample
     } catch (t: Throwable) {
       java.lang.Double.NaN
     }

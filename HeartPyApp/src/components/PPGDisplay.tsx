@@ -19,12 +19,18 @@ export function PPGDisplay({
   onStart,
   onStop,
 }: Props): JSX.Element {
-  // BPM Quality Gating: Softened reliability check - rely on goodQuality + SNR instead of strict confidence
-  const isBpmReliable = metrics && 
-    metrics.quality.totalBeats >= 8 && 
-    metrics.quality.goodQuality === true && // Primary quality gate
-    metrics.snrDb > 8 && // SNR threshold
-    metrics.confidence > 0.4; // Softened confidence threshold (was 0.7)
+  // BPM Quality Gating: rely on HeartPy goodQuality + SNR, require moderate confidence (~0.5)
+  const isBpmReliable = metrics &&
+    metrics.quality.totalBeats >= 8 &&
+    metrics.quality.goodQuality === true &&
+    metrics.snrDb > 8 &&
+    metrics.confidence >= 0.5;
+  
+  // Warm-up state: HeartPy is still calculating SNR/confidence
+  const isWarmingUp = metrics && 
+    metrics.quality.totalBeats < 8 && 
+    metrics.snrDb <= 0 && 
+    metrics.confidence <= 0.1;
   
   const bpm = isBpmReliable ? metrics.bpm.toFixed(1) : '--';
   const confidence = metrics ? (metrics.confidence * 100).toFixed(0) : '--';
@@ -83,13 +89,15 @@ export function PPGDisplay({
       {state === 'running' && !isBpmReliable && (
         <View style={styles.statusMessage}>
           <Text style={styles.statusText}>
-            {metrics && metrics.quality.totalBeats < 8 
+            {isWarmingUp
+              ? `HeartPy hazırlanıyor... (${metrics?.quality.totalBeats || 0}/8 beat)`
+              : metrics && metrics.quality.totalBeats < 8 
               ? `Ölçüm hazırlanıyor... (${metrics.quality.totalBeats}/8 kalp atışı)`
               : metrics && !metrics.quality.goodQuality
               ? `Kalite kontrolü başarısız...`
               : metrics && metrics.snrDb <= 8
               ? `SNR çok düşük... (${metrics.snrDb.toFixed(1)} dB)`
-              : metrics && metrics.confidence <= 0.4
+              : metrics && metrics.confidence < 0.5
               ? `Sinyal kalitesi düşük... (${(metrics.confidence * 100).toFixed(0)}%)`
               : 'Ölçüm hazırlanıyor...'
             }

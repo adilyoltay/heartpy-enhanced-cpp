@@ -67,18 +67,21 @@
   double outConfidence = NAN;
   // Rolling history for CHROM/POS (aggregated ROI means)
   static const int HP_HIST_N = 64;
-  static double rHist[HP_HIST_N];
-  static double gHist[HP_HIST_N];
-  static double bHist[HP_HIST_N];
-  static double yHist[HP_HIST_N];
-  static int histPos = 0;
-  static int histCount = 0;
+static double rHist[HP_HIST_N];
+static double gHist[HP_HIST_N];
+static double bHist[HP_HIST_N];
+static double yHist[HP_HIST_N];
+static double vHist[HP_HIST_N];
+static int histPos = 0;
+static int histCount = 0;
+static double dcMean = NAN;
 
   // Multi-ROI aggregation with simple exposure-based weighting
   double weightedSum = 0.0;
   double weightTotal = 0.0;
   double confAccum = 0.0;
   double wSumR = 0.0, wSumG = 0.0, wSumB = 0.0, wSumY = 0.0;
+  double spatialSum = 0.0, spatialSqSum = 0.0, spatialSamples = 0.0;
 
   if (type == kCVPixelFormatType_32BGRA) {
     uint8_t* base = (uint8_t*)CVPixelBufferGetBaseAddress(pixelBuffer);
@@ -120,6 +123,9 @@
         double w = fmax(1e-6, expScore);
         weightedSum += w * value; weightTotal += w; confAccum += w * conf;
         wSumR += w * Rm; wSumG += w * Gm; wSumB += w * Bm; wSumY += w * Ym;
+        spatialSum += Ym;
+        spatialSqSum += Ym * Ym;
+        spatialSamples += 1.0;
       }
     }
   } else {
@@ -164,6 +170,9 @@
         double w = fmax(1e-6, expScore);
         weightedSum += w * value; weightTotal += w; confAccum += w * conf;
         wSumR += w * Rm; wSumG += w * Gm; wSumB += w * Bm; wSumY += w * Ym;
+        spatialSum += Ym;
+        spatialSqSum += Ym * Ym;
+        spatialSamples += 1.0;
       }
     }
   }
@@ -174,15 +183,22 @@
   double Bagg = (weightTotal > 0.0) ? (wSumB / weightTotal) : NAN;
   double Yagg = (weightTotal > 0.0) ? (wSumY / weightTotal) : NAN;
 
+  double spatialMean = (spatialSamples > 0.0) ? (spatialSum / spatialSamples) : NAN;
+  double spatialVar = (spatialSamples > 0.0) ? (spatialSqSum / spatialSamples) - spatialMean * spatialMean : 0.0;
+  if (!isfinite(spatialVar) || spatialVar < 0.0) spatialVar = 0.0;
+  double spatialStd = sqrt(spatialVar);
+  double contrastScore = fmin(1.0, fmax(0.0, spatialStd / 12.0));
+
   // Update rolling history
   if (isfinite(Ragg) && isfinite(Gagg) && isfinite(Bagg) && isfinite(Yagg)) {
-    rHist[histPos] = Ragg; gHist[histPos] = Gagg; bHist[histPos] = Bagg; yHist[histPos] = Yagg;
+    rHist[histPos] = Ragg; gHist[histPos] = Gagg; bHist[histPos] = Bagg; yHist[histPos] = Yagg; vHist[histPos] = Yagg;
     histPos = (histPos + 1) % HP_HIST_N;
     if (histCount < HP_HIST_N) histCount++;
   }
 
   // Compute outSample based on mode using rolling alpha (CHROM) or POS
   double chromVal = NAN;
+  double chromAmp = 0.0;
   if (histCount >= 8) {
     // Build arrays over available window
     int N = histCount;
@@ -206,6 +222,7 @@
     }
     stdX = sqrt(stdX / fmax(1, N - 1));
     stdYc = sqrt(stdYc / fmax(1, N - 1));
+    chromAmp = stdX;
     double alpha = (stdYc > 1e-6) ? (stdX / stdYc) : 1.0;
 
     // Current X,Y values
@@ -268,6 +285,30 @@
   // Default selection by mode
   outSample = isfinite(mean) ? mean : chromVal;
   if (![mode isEqualToString:@"mean"] && isfinite(chromVal)) outSample = chromVal;
+  double blendWeight = 0.0; bool blendUsed = false;
+
+  double windowMean = isfinite(Yagg) ? Yagg : mean;
+  double temporalScore = 0.2;
+  if (histCount >= 6) {
+    int window = MIN(histCount, 30);
+    double meanHist = 0.0;
+    for (int i = 0; i < window; ++i) {
+      int idx = (histPos - 1 - i + HP_HIST_N) % HP_HIST_N;
+      meanHist += vHist[idx];
+    }
+    meanHist /= (double)window;
+    windowMean = meanHist;
+    double varHist = 0.0;
+    for (int i = 0; i < window; ++i) {
+      int idx = (histPos - 1 - i + HP_HIST_N) % HP_HIST_N;
+      double d = vHist[idx] - meanHist;
+      varHist += d * d;
+    }
+    double stdHist = sqrt(varHist / fmax(1, window - 1));
+    temporalScore = fmin(1.0, fmax(0.0, stdHist / 6.0));
+  }
+  if (!isfinite(temporalScore) || temporalScore < 0.0) temporalScore = 0.0;
+  double amplitudeScore = fmin(1.0, fmax(0.0, chromAmp / 35.0));
 
   // Dynamic exposure gating via Y percentiles
   double expoGate = 1.0;
@@ -292,15 +333,14 @@
     expoGate = fmin(gDark, gSat);
   }
 
-  // Amplitude proxy based on CHROM/POS magnitude history
-  double ampConf = 0.0;
-  if (histCount >= 8) {
-    // reuse Xcur,Ycur for CHROM; approximate magnitude as stdX
-    ampConf = fmin(1.0, (/*stdX proxy*/ 1.0) * 0.8);
-  }
-  double baseConf = (weightTotal > 0.0) ? (confAccum / weightTotal) : 0.0;
-  double confChrom = fmin(1.0, fmax(0.0, 0.5 * baseConf + 0.5 * expoGate));
-  double confMean = expoGate;
+  double expoScore = fmin(1.0, fmax(0.0, expoGate));
+  double patchScore = (weightTotal > 0.0) ? fmin(1.0, fmax(0.0, confAccum / weightTotal)) : expoScore;
+  double spatialGate = fmin(1.0, fmax(0.0, 0.6 * expoScore + 0.4 * contrastScore));
+  double dynamicMix = fmin(1.0, fmax(0.0, 0.7 * temporalScore + 0.3 * amplitudeScore));
+  double reliability = sqrt(fmin(1.0, fmax(0.0, spatialGate * dynamicMix)));
+  double baseConf = fmin(1.0, fmax(0.0, 0.3 * patchScore + 0.7 * reliability));
+  double confMean = baseConf;
+  double confChrom = fmin(1.0, fmax(0.0, 0.6 * baseConf + 0.4 * dynamicMix));
   // Auto blend: crossfade mean vs chrom/pos using confidence and torch hint
   if (autoBlend && (isfinite(chromVal) || isfinite(mean))) {
     double wTorch = torchOnHint ? 0.0 : 1.0;
@@ -310,34 +350,57 @@
     if (!isfinite(mean)) w = 1.0;
     outSample = (1.0 - w) * (isfinite(mean) ? mean : 0.0) + w * (isfinite(chromVal) ? chromVal : 0.0);
     outConfidence = (1.0 - w) * confMean + w * confChrom;
+    blendWeight = w; blendUsed = true;
   } else {
     outConfidence = fmin(1.0, fmax(0.0, 0.5 * baseConf + 0.5 * expoGate));
   }
 
+  if (!isfinite(windowMean) && isfinite(mean)) windowMean = mean;
+  if (!isfinite(dcMean) && isfinite(windowMean)) dcMean = windowMean;
+  double prevDc = isfinite(dcMean) ? dcMean : windowMean;
+  double alphaDc = (histCount >= 16) ? 0.03 : 0.06;
+  double nextDc = isfinite(windowMean) ? prevDc + alphaDc * (windowMean - prevDc) : prevDc;
+  dcMean = nextDc;
+  double meanComponent = (isfinite(mean) && isfinite(nextDc)) ? fmax(-1.2, fmin(1.2, (mean - nextDc) / 120.0)) : NAN;
+  double chromComponent = isfinite(chromVal) ? fmax(-1.2, fmin(1.2, (chromVal - 128.0) / 160.0)) : NAN;
+  double finalSample = NAN;
+  if (blendUsed) {
+    double mc = isfinite(meanComponent) ? meanComponent : 0.0;
+    double cc = isfinite(chromComponent) ? chromComponent : 0.0;
+    finalSample = (1.0 - blendWeight) * mc + blendWeight * cc;
+  } else if ([mode isEqualToString:@"chrom"] || [mode isEqualToString:@"pos"]) {
+    finalSample = chromComponent;
+  } else {
+    finalSample = meanComponent;
+  }
+  double confidenceOut = fmin(1.0, fmax(0.0, outConfidence));
+  double amplitudeGate = fmin(1.0, fmax(0.0, spatialGate * dynamicMix));
+  if (amplitudeGate < 0.05) confidenceOut = fmin(confidenceOut, amplitudeGate * 0.8);
+  double absSample = (isfinite(finalSample) ? fabs(finalSample) : 0.0);
+  if (absSample < 0.01) confidenceOut *= absSample * 50.0;
+  double pushSample = (!isfinite(finalSample) || amplitudeGate < 0.02) ? NAN : fmax(-1.2, fmin(1.2, finalSample));
+
   CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-  if (!isfinite(outSample)) outSample = NAN;
-  
+
   // Post native notification so HeartPyModule can collect real samples without JS bridge
   @try {
     static int notificationCount = 0;
     notificationCount++;
-    
-    NSDictionary* userInfo = @{ @"value": @(outSample),
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"confidence": @(outConfidence) };
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"HeartPyPPGSample"
-                                                        object:nil
-                                                      userInfo:userInfo];
-    
-  // Debug log periodically
-  if (notificationCount % 30 == 0) {  // ✅ Daha sık log (her 30 frame'de bir)
-    NSLog(@"📸 PPGMeanPlugin posted notification #%d with value: %.1f, confidence: %.2f, outSample: %.1f", 
-          notificationCount, mean, outConfidence, outSample);
-    NSLog(@"   📊 weightedSum: %.1f, weightTotal: %.1f, chromVal: %.1f, mode: %@", 
-          weightedSum, weightTotal, chromVal, mode);
-  }
+    if (isfinite(pushSample)) {
+      NSDictionary* userInfo = @{ @"value": @(pushSample),
+                                  @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+                                  @"confidence": @(confidenceOut) };
+      [[NSNotificationCenter defaultCenter] postNotificationName:@"HeartPyPPGSample"
+                                                          object:nil
+                                                        userInfo:userInfo];
+
+      if (notificationCount % 30 == 0) {
+        NSLog(@"📸 PPGMeanPlugin posted notification #%d value: %.3f confidence: %.2f",
+              notificationCount, pushSample, confidenceOut);
+      }
+    }
   } @catch (__unused id e) {}
-  return @(outSample);
+  return @(pushSample);
 }
 
 VISION_EXPORT_FRAME_PROCESSOR(PPGMeanPlugin, ppgMean)

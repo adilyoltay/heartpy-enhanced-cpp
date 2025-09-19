@@ -119,7 +119,10 @@ export class PPGAnalyzer {
     }
     
     // CRITICAL: Check poor signal conditions BEFORE pushing to prevent self-comparison
-    this.checkPoorSignalConditions(sample);
+    const resetTriggered = this.checkPoorSignalConditions(sample);
+    if (resetTriggered) {
+      return;
+    }
     
     this.buffer.push(sample.value);
     this.pending.push(sample.value);
@@ -151,7 +154,7 @@ export class PPGAnalyzer {
     }
   }
 
-  private checkPoorSignalConditions(sample: PPGSample): void {
+  private checkPoorSignalConditions(sample: PPGSample): boolean {
     // Check for poor signal conditions that require reset
     // Note: Camera confidence is always ~0.85, so we'll rely on metrics-based detection instead
     const shouldReset = 
@@ -176,7 +179,9 @@ export class PPGAnalyzer {
           console.warn('[PPGAnalyzer] Failed to reset HeartPy wrapper:', error);
         });
       }
+      return true;
     }
+    return false;
   }
 
   private async tick(): Promise<void> {
