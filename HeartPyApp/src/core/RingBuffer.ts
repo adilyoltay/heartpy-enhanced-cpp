@@ -39,4 +39,16 @@ export class RingBuffer<T> {
   getSize(): number {
     return this.length;
   }
+
+  getLength(): number {
+    return this.length;
+  }
+
+  getTailIndex(): number {
+    return (this.head + this.length - 1) % this.capacity;
+  }
+
+  getHeadIndex(): number {
+    return this.head;
+  }
 }

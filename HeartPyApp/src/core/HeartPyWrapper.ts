@@ -40,9 +40,14 @@ type HeartPyResult = {
 export class HeartPyWrapper {
   private analyzer: RealtimeAnalyzer | null = null;
   private bufferRef: RingBuffer<number> | null = null; // Reference to analyzer's buffer
+  private lastCameraConfidence: number = 0.85; // Track camera confidence for fallback
 
   setBufferRef(buffer: RingBuffer<number>): void {
     this.bufferRef = buffer;
+  }
+
+  updateCameraConfidence(confidence: number): void {
+    this.lastCameraConfidence = confidence;
   }
 
   async create(sampleRate: number): Promise<void> {
@@ -64,10 +69,10 @@ export class HeartPyWrapper {
       const windowSeconds = PPG_CONFIG.analysis.analysisWindow / sampleRate;
       const segmentWindowBeats = Math.max(4, Math.round((windowSeconds * 80) / 60));
       
-      // CRITICAL: Configure Welch window for 3s analysis window
+      // CRITICAL: Configure Welch window to match our analysis window
       const welchConfig = {
-        wsizeSec: 3, // Match our 90-sample window (3s at 30fps)
-        nfft: 128,   // Smaller FFT for faster computation
+        wsizeSec: windowSeconds, // Use actual window size (3s for 90 samples at 30fps)
+        nfft: Math.max(64, Math.pow(2, Math.ceil(Math.log2(windowSeconds * sampleRate)))), // Power of 2, minimum 64
         overlap: 0.5, // 50% overlap for smoother PSD
       };
       
@@ -177,9 +182,18 @@ export class HeartPyWrapper {
       });
     }
     
-    // Use native values if available, otherwise synthetic fallback
-    const confidence = typeof nativeConfidence === 'number' && nativeConfidence > 0 ? nativeConfidence : 
-      (goodQuality ? Math.max(0.7, 1 - rejectionRate) : Math.min(0.3, 1 - rejectionRate));
+    // CONFIDENCE FALLBACK: Preserve native warm-up confidence (0 = warm-up)
+    let confidence: number;
+    if (typeof nativeConfidence === 'number') {
+      // Native confidence is available (including 0 for warm-up)
+      confidence = nativeConfidence;
+    } else if (this.lastCameraConfidence > 0.1) {
+      // Use camera confidence only when native confidence is undefined/NaN
+      confidence = this.lastCameraConfidence;
+    } else {
+      // Synthetic fallback
+      confidence = goodQuality ? Math.max(0.7, 1 - rejectionRate) : Math.min(0.3, 1 - rejectionRate);
+    }
     
     const snrDb = typeof nativeSnrDb === 'number' && nativeSnrDb > 0 ? nativeSnrDb : 
       (goodQuality && typeof result.totalPower === 'number' && typeof result.hf === 'number' && typeof result.lf === 'number' && 
@@ -196,25 +210,27 @@ export class HeartPyWrapper {
       signalQuality = 'poor';
     }
 
-    // CRITICAL: Filter peak list and convert to relative indices for UI display
-    // Use HeartPy's actual buffer size, not our RingBuffer size
-    const heartPyBufferSize = PPG_CONFIG.analysis.bufferSize; // 450 samples (15s at 30fps)
-    const waveformLength = PPG_CONFIG.ui.waveformSamples; // 150 samples
-    const waveformStart = Math.max(0, heartPyBufferSize - waveformLength);
-    
-    // Filter peaks within the current waveform window and convert to relative indices
-    const filteredPeakList = (result.peakList || [])
-      .filter(peakIndex => peakIndex >= waveformStart && peakIndex < heartPyBufferSize)
-      .map(peakIndex => peakIndex - waveformStart); // Convert to relative index (0-149)
-    
-    console.log('[HeartPyWrapper] Peak list filtering', {
-      originalPeaks: result.peakList?.length || 0,
-      filteredPeaks: filteredPeakList.length,
-      waveformStart: waveformStart,
-      heartPyBufferSize: heartPyBufferSize,
-      waveformLength: waveformLength,
-      relativePeaks: filteredPeakList,
-    });
+    // CRITICAL: Filter peak list based on actual ring buffer state
+    let filteredPeakList: number[] = [];
+    if (this.bufferRef && result.peakList && result.peakList.length > 0) {
+      const actualBufferLength = this.bufferRef.getLength();
+      const waveformLength = PPG_CONFIG.ui.waveformSamples; // 150 samples
+      const waveformStart = Math.max(0, actualBufferLength - waveformLength);
+      
+      // Filter peaks within the current waveform window and convert to relative indices
+      filteredPeakList = result.peakList
+        .filter(peakIndex => peakIndex >= waveformStart && peakIndex < actualBufferLength)
+        .map(peakIndex => peakIndex - waveformStart); // Convert to relative index (0-149)
+      
+      console.log('[HeartPyWrapper] Peak list filtering (real buffer)', {
+        originalPeaks: result.peakList.length,
+        filteredPeaks: filteredPeakList.length,
+        actualBufferLength,
+        waveformStart,
+        waveformLength,
+        relativePeaks: filteredPeakList,
+      });
+    }
 
     return {
       bpm,

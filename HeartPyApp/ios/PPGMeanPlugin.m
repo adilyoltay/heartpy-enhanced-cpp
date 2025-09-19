@@ -191,7 +191,7 @@ static double dcMean = NAN;
 
   // Update rolling history
   if (isfinite(Ragg) && isfinite(Gagg) && isfinite(Bagg) && isfinite(Yagg)) {
-    rHist[histPos] = Ragg; gHist[histPos] = Gagg; bHist[histPos] = Bagg; yHist[histPos] = Yagg; vHist[histPos] = Yagg;
+    rHist[histPos] = Ragg; gHist[histPos] = Gagg; bHist[histPos] = Bagg; yHist[histPos] = Yagg; vHist[histPos] = mean;
     histPos = (histPos + 1) % HP_HIST_N;
     if (histCount < HP_HIST_N) histCount++;
   }
@@ -358,7 +358,18 @@ static double dcMean = NAN;
   if (!isfinite(windowMean) && isfinite(mean)) windowMean = mean;
   if (!isfinite(dcMean) && isfinite(windowMean)) dcMean = windowMean;
   double prevDc = isfinite(dcMean) ? dcMean : windowMean;
+  
+  // IMPROVED DC TRACKING: Faster adaptation during saturation/large changes
+  double dcError = fabs(windowMean - prevDc);
   double alphaDc = (histCount >= 16) ? 0.03 : 0.06;
+  
+  // Accelerate DC adaptation for large errors (saturation recovery)
+  if (dcError > 20.0) {
+    alphaDc = fmin(0.15, alphaDc * 3.0); // 3x faster for large errors
+  } else if (dcError > 10.0) {
+    alphaDc = fmin(0.10, alphaDc * 2.0); // 2x faster for medium errors
+  }
+  
   double nextDc = isfinite(windowMean) ? prevDc + alphaDc * (windowMean - prevDc) : prevDc;
   dcMean = nextDc;
   double meanComponent = (isfinite(mean) && isfinite(nextDc)) ? fmax(-1.2, fmin(1.2, (mean - nextDc) / 120.0)) : NAN;
@@ -375,10 +386,24 @@ static double dcMean = NAN;
   }
   double confidenceOut = fmin(1.0, fmax(0.0, outConfidence));
   double amplitudeGate = fmin(1.0, fmax(0.0, spatialGate * dynamicMix));
-  if (amplitudeGate < 0.05) confidenceOut = fmin(confidenceOut, amplitudeGate * 0.8);
+  
+  // IMPROVED SATURATION HANDLING: Reject samples during poor signal conditions
+  if (amplitudeGate < 0.05) {
+    confidenceOut = fmin(confidenceOut, amplitudeGate * 0.8);
+  }
+  
+  // Additional check for very low contrast (finger removed)
+  if (spatialStd < 2.0 || contrastScore < 0.1) {
+    confidenceOut = fmin(confidenceOut, 0.1); // Force low confidence
+  }
+  
   double absSample = (isfinite(finalSample) ? fabs(finalSample) : 0.0);
   if (absSample < 0.01) confidenceOut *= absSample * 50.0;
-  double pushSample = (!isfinite(finalSample) || amplitudeGate < 0.02) ? NAN : fmax(-1.2, fmin(1.2, finalSample));
+  
+  // FIXED: Don't drop samples during warm-up, let HeartPy decide quality
+  // Only drop samples for truly invalid conditions (NaN, extremely low amplitude)
+  double pushSample = (!isfinite(finalSample) || amplitudeGate < 0.01) ? 
+    NAN : fmax(-1.2, fmin(1.2, finalSample));
 
   CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 

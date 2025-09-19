@@ -86,7 +86,16 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
 
     const eventEmitter = new NativeEventEmitter(PPGCameraManager);
            const subscription = eventEmitter.addListener('PPGSample', (event) => {
-             console.log('[PPGCamera] Received sample from NativeModules', event);
+             // FIXED: Reduce log flooding for NaN values during warm-up
+             if (typeof event.value === 'number' && !isNaN(event.value)) {
+               console.log('[PPGCamera] Received valid sample from NativeModules', {
+                 value: event.value,
+                 timestamp: event.timestamp,
+                 confidence: event.confidence,
+               });
+             } else {
+               console.log('[PPGCamera] Received NaN sample (warm-up/low signal)');
+             }
              
              // FPS Monitoring: Calculate FPS from JS event timestamps (safe from worklet context)
              calculateFPS(event.timestamp);

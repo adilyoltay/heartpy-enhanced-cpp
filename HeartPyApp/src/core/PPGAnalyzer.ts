@@ -124,6 +124,11 @@ export class PPGAnalyzer {
       return;
     }
     
+    // Update camera confidence in HeartPyWrapper for fallback
+    if (sample.confidence !== undefined && this.wrapper) {
+      this.wrapper.updateCameraConfidence(sample.confidence);
+    }
+    
     this.buffer.push(sample.value);
     this.pending.push(sample.value);
     this.pendingTimestamps.push(sample.timestamp);

@@ -337,7 +337,10 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       if (amplitudeGate < 0.05) confidenceOut = kotlin.math.min(confidenceOut, amplitudeGate * 0.8)
       val absSample = if (finalSample.isFinite()) kotlin.math.abs(finalSample) else 0.0
       if (absSample < 0.01) confidenceOut *= absSample * 50.0
-      val pushSample = if (!finalSample.isFinite() || amplitudeGate < 0.02) Double.NaN else finalSample.coerceIn(-1.2, 1.2)
+      
+      // FIXED: Don't drop samples during warm-up, let HeartPy decide quality
+      // Only drop samples for truly invalid conditions (NaN, extremely low amplitude)
+      val pushSample = if (!finalSample.isFinite() || amplitudeGate < 0.01) Double.NaN else finalSample.coerceIn(-1.2, 1.2)
 
       // Publish sample + ts (seconds) to native buffer
       if (pushSample.isFinite()) {
