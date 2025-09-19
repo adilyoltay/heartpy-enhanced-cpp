@@ -29,6 +29,11 @@ function useAnalyzer() {
         console.log('[App] Analyzer state changed', {nextState});
         setState(nextState);
       },
+      onFpsUpdate: (fps) => {
+        console.log('[App] FPS updated', {fps: fps.toFixed(1)});
+        // Note: FPS is tracked but not displayed in UI yet
+        // Could be added to metrics display if needed
+      },
     });
     return () => {
       console.log('[App] Cleaning up analyzer');
@@ -70,11 +75,15 @@ function useAnalyzer() {
     analyzerRef.current?.addSample(sample);
   }, [state]);
 
-  return {metrics, waveform, state, start, stop, addSample};
+  const updateSampleRate = useCallback((fps: number) => {
+    analyzerRef.current?.updateSampleRate(fps);
+  }, []);
+
+  return {metrics, waveform, state, start, stop, addSample, updateSampleRate};
 }
 
 function App(): React.JSX.Element {
-  const {metrics, waveform, state, start, stop, addSample} = useAnalyzer();
+  const {metrics, waveform, state, start, stop, addSample, updateSampleRate} = useAnalyzer();
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -87,7 +96,11 @@ function App(): React.JSX.Element {
           onStart={start}
           onStop={stop}
         />
-        <PPGCamera onSample={addSample} isActive={state !== 'idle'} />
+        <PPGCamera 
+          onSample={addSample} 
+          isActive={state !== 'idle'} 
+          onFpsUpdate={updateSampleRate}
+        />
       </View>
     </SafeAreaView>
   );

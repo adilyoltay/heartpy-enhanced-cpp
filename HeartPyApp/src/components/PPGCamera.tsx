@@ -18,9 +18,10 @@ const {PPGCameraManager} = NativeModules;
 type Props = {
   onSample: (sample: PPGSample) => void;
   isActive: boolean;
+  onFpsUpdate?: (fps: number) => void; // FPS callback for dynamic sampleRate
 };
 
-export function PPGCamera({onSample, isActive}: Props): JSX.Element {
+export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element {
   const device = useCameraDevice('back');
   const {hasPermission, requestPermission} = useCameraPermission();
   const enableProcessorTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -47,6 +48,11 @@ export function PPGCamera({onSample, isActive}: Props): JSX.Element {
       
       if (Number.isFinite(fps) && fps > 0) {
         fpsRef.current = fps;
+        
+        // Notify parent component about FPS update
+        if (onFpsUpdate) {
+          onFpsUpdate(fps);
+        }
         
         // Log FPS periodically
         if (PPG_CONFIG.debug.enabled && frameTimestamps.current.length % 30 === 0) {

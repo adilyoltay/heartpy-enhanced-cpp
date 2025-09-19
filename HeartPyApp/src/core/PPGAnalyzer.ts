@@ -6,6 +6,7 @@ import {RingBuffer} from './RingBuffer';
 interface AnalyzerOptions {
   onMetrics: (metrics: PPGMetrics, waveform: number[]) => void;
   onStateChange?: (state: PPGState) => void;
+  onFpsUpdate?: (fps: number) => void; // FPS callback for dynamic sampleRate
 }
 
 export class PPGAnalyzer {
@@ -20,14 +21,41 @@ export class PPGAnalyzer {
   private sampleCount = 0; // Sample counter for accurate throttling
   private readonly onMetrics: (metrics: PPGMetrics, waveform: number[]) => void;
   private readonly onStateChange?: (state: PPGState) => void;
+  private readonly onFpsUpdate?: (fps: number) => void;
+  private currentSampleRate: number = PPG_CONFIG.analysis.sampleRate; // Track current sampleRate
 
   constructor(options: AnalyzerOptions) {
     this.onMetrics = options.onMetrics;
     this.onStateChange = options.onStateChange;
+    this.onFpsUpdate = options.onFpsUpdate;
   }
 
   getState(): PPGState {
     return this.state;
+  }
+
+  updateSampleRate(fps: number): void {
+    // Calculate EMA (Exponential Moving Average) for stable sampleRate
+    const alpha = 0.1; // Smoothing factor
+    const smoothedFps = this.currentSampleRate * (1 - alpha) + fps * alpha;
+    
+    // Only update if significant change (>5% difference)
+    const changePercent = Math.abs(smoothedFps - this.currentSampleRate) / this.currentSampleRate;
+    if (changePercent > 0.05) {
+      console.log('[PPGAnalyzer] SampleRate update', {
+        oldRate: this.currentSampleRate.toFixed(1),
+        newRate: smoothedFps.toFixed(1),
+        rawFps: fps.toFixed(1),
+        changePercent: (changePercent * 100).toFixed(1) + '%',
+      });
+      
+      this.currentSampleRate = smoothedFps;
+      
+      // Notify parent component
+      if (this.onFpsUpdate) {
+        this.onFpsUpdate(smoothedFps);
+      }
+    }
   }
 
   async start(): Promise<void> {
