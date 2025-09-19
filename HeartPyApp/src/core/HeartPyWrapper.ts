@@ -87,39 +87,50 @@ export class HeartPyWrapper {
       throw new Error('HeartPy analyzer not initialized');
     }
     
-    // Convert to typed arrays for better performance and GC
-    const samplesArray = samples instanceof Float32Array ? samples : new Float32Array(samples);
-    const timestampsArray = timestamps instanceof Float64Array ? timestamps : new Float64Array(timestamps);
-    
-    console.log('[HeartPyWrapper] pushWithTimestamps', {
-      sampleCount: samplesArray.length,
-      timestampCount: timestampsArray.length,
-      firstValue: samplesArray[0],
-      firstTimestamp: timestampsArray[0],
-    });
-    
-    await this.analyzer.pushWithTimestamps(samplesArray, timestampsArray);
+    try {
+      // Convert to typed arrays for better performance and GC
+      const samplesArray = samples instanceof Float32Array ? samples : new Float32Array(samples);
+      const timestampsArray = timestamps instanceof Float64Array ? timestamps : new Float64Array(timestamps);
+      
+      console.log('[HeartPyWrapper] pushWithTimestamps', {
+        sampleCount: samplesArray.length,
+        timestampCount: timestampsArray.length,
+        firstValue: samplesArray[0],
+        firstTimestamp: timestampsArray[0],
+      });
+      
+      await this.analyzer.pushWithTimestamps(samplesArray, timestampsArray);
+    } catch (error) {
+      console.error('[HeartPyWrapper] pushWithTimestamps failed', error);
+      // Re-throw with more context
+      if (error instanceof Error && error.message.includes('destroyed')) {
+        throw new Error('RealtimeAnalyzer destroyed during pushWithTimestamps');
+      }
+      throw error;
+    }
   }
 
   async poll(): Promise<PPGMetrics | null> {
     if (!this.analyzer) {
       throw new Error('HeartPy analyzer not initialized');
     }
-    console.log('[HeartPyWrapper] poll request');
-    const result = await this.analyzer.poll();
-    console.log('[HeartPyWrapper] poll response', {
-      hasResult: !!result,
-      bpm: result?.bpm,
-      quality: result?.quality,
-      hf: result?.hf,
-      lf: result?.lf,
-      totalPower: result?.totalPower,
-    });
-    if (!result) {
-      return null;
-    }
+    
+    try {
+      console.log('[HeartPyWrapper] poll request');
+      const result = await this.analyzer.poll();
+      console.log('[HeartPyWrapper] poll response', {
+        hasResult: !!result,
+        bpm: result?.bpm,
+        quality: result?.quality,
+        hf: result?.hf,
+        lf: result?.lf,
+        totalPower: result?.totalPower,
+      });
+      if (!result) {
+        return null;
+      }
 
-    const bpm = typeof result.bpm === 'number' ? result.bpm : 0;
+      const bpm = typeof result.bpm === 'number' ? result.bpm : 0;
 
     // HeartPy provides real confidence/snrDb in quality object
     const quality = result.quality ?? {};
@@ -173,6 +184,14 @@ export class HeartPyWrapper {
         totalBeats,
       },
     };
+    } catch (error) {
+      console.error('[HeartPyWrapper] poll failed', error);
+      // Re-throw with more context
+      if (error instanceof Error && error.message.includes('destroyed')) {
+        throw new Error('RealtimeAnalyzer destroyed during poll');
+      }
+      throw error;
+    }
   }
 
   async destroy(): Promise<void> {

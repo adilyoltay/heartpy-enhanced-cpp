@@ -79,12 +79,14 @@ export class PPGAnalyzer {
   }
 
   addSample(sample: PPGSample): void {
-    if (this.state === 'idle') {
-      console.warn('[PPGAnalyzer] Sample received while idle, dropping');
+    // CRITICAL: Only accept samples when running to prevent race condition during stop
+    if (this.state !== 'running') {
+      console.warn('[PPGAnalyzer] Sample received while not running, dropping', {
+        state: this.state,
+        sampleValue: sample.value,
+        sampleTimestamp: sample.timestamp,
+      });
       return;
-    }
-    if (this.state === 'starting') {
-      console.log('[PPGAnalyzer] Buffering sample during startup');
     }
     
     this.buffer.push(sample.value);
@@ -118,6 +120,19 @@ export class PPGAnalyzer {
   }
 
   private async tick(): Promise<void> {
+    // CRITICAL: State check to prevent race condition during stop
+    if (this.state !== 'running') {
+      console.log('[PPGAnalyzer] Tick called while not running, clearing pending data', {
+        state: this.state,
+        pendingSamples: this.pending.length,
+        pendingTimestamps: this.pendingTimestamps.length,
+      });
+      // Clear pending data to prevent stale samples from being processed
+      this.pending.length = 0;
+      this.pendingTimestamps.length = 0;
+      return;
+    }
+
     try {
       if (this.pending.length > 0) {
         console.log('[PPGAnalyzer] Flushing pending samples', {
@@ -159,7 +174,13 @@ export class PPGAnalyzer {
       }
     } catch (error) {
       console.warn('[PPGAnalyzer] tick error', error);
-      await this.stop();
+      // Don't call stop() again to prevent recursive stop calls
+      if (error instanceof Error && error.message.includes('destroyed')) {
+        console.log('[PPGAnalyzer] RealtimeAnalyzer destroyed, clearing state');
+        this.pending.length = 0;
+        this.pendingTimestamps.length = 0;
+        this.setState('idle');
+      }
     }
   }
 
