@@ -16,6 +16,7 @@ export class PPGAnalyzer {
   );
   private timer: NodeJS.Timeout | null = null;
   private readonly pending: number[] = [];
+  private readonly pendingTimestamps: number[] = [];
   private sampleCount = 0; // Sample counter for accurate throttling
   private readonly onMetrics: (metrics: PPGMetrics, waveform: number[]) => void;
   private readonly onStateChange?: (state: PPGState) => void;
@@ -72,6 +73,7 @@ export class PPGAnalyzer {
     }
     await this.wrapper.destroy();
     this.pending.length = 0;
+    this.pendingTimestamps.length = 0; // CRITICAL: Clear timestamps to prevent sync issues
     this.buffer.clear();
     this.setState('idle');
   }
@@ -87,10 +89,15 @@ export class PPGAnalyzer {
     
     this.buffer.push(sample.value);
     this.pending.push(sample.value);
+    this.pendingTimestamps.push(sample.timestamp);
     if (this.pending.length > PPG_CONFIG.analysis.bufferSize) {
       this.pending.splice(
         0,
         this.pending.length - PPG_CONFIG.analysis.bufferSize,
+      );
+      this.pendingTimestamps.splice(
+        0,
+        this.pendingTimestamps.length - PPG_CONFIG.analysis.bufferSize,
       );
     }
     
@@ -116,9 +123,30 @@ export class PPGAnalyzer {
         console.log('[PPGAnalyzer] Flushing pending samples', {
           pending: this.pending.length,
         });
-        const chunk = new Float32Array(this.pending);
-        this.pending.length = 0;
-        await this.wrapper.push(chunk);
+        // Use REAL timestamps from PPGMeanPlugin (already in seconds)
+        const samples = this.pending.splice(0);
+        const timestamps = this.pendingTimestamps.splice(0);
+        
+        // CRITICAL: Validate array lengths to prevent HeartPyModule.rtPushTs rejection
+        if (samples.length !== timestamps.length) {
+          console.error('[PPGAnalyzer] Length mismatch detected', {
+            samplesLength: samples.length,
+            timestampsLength: timestamps.length,
+          });
+          // Clear both arrays to resync
+          this.pending.length = 0;
+          this.pendingTimestamps.length = 0;
+          return;
+        }
+        
+        console.log('[PPGAnalyzer] Using real timestamps', {
+          sampleCount: samples.length,
+          timestampCount: timestamps.length,
+          firstTimestamp: timestamps[0],
+          lastTimestamp: timestamps[timestamps.length - 1],
+        });
+        
+        await this.wrapper.pushWithTimestamps(samples, timestamps);
       }
       const metrics = await this.wrapper.poll();
       if (metrics) {

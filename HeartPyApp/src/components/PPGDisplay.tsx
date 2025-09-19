@@ -19,7 +19,12 @@ export function PPGDisplay({
   onStart,
   onStop,
 }: Props): JSX.Element {
-  const bpm = metrics ? metrics.bpm.toFixed(1) : '--';
+  // BPM Quality Gating: Only show BPM when measurement is reliable
+  const isBpmReliable = metrics && 
+    metrics.quality.totalBeats >= 8 && 
+    metrics.confidence > 0.6;
+  
+  const bpm = isBpmReliable ? metrics.bpm.toFixed(1) : '--';
   const confidence = metrics ? (metrics.confidence * 100).toFixed(0) : '--';
   const snr = metrics ? metrics.snrDb.toFixed(1) : '--';
   const quality = metrics ? metrics.quality.signalQuality : 'unknown';
@@ -58,6 +63,20 @@ export function PPGDisplay({
 
   return (
     <View style={styles.container}>
+      {/* Status Message */}
+      {state === 'running' && !isBpmReliable && (
+        <View style={styles.statusMessage}>
+          <Text style={styles.statusText}>
+            {metrics && metrics.quality.totalBeats < 8 
+              ? `Ölçüm hazırlanıyor... (${metrics.quality.totalBeats}/8 kalp atışı)`
+              : metrics && metrics.confidence <= 0.6
+              ? `Sinyal kalitesi düşük... (${(metrics.confidence * 100).toFixed(0)}%)`
+              : 'Ölçüm hazırlanıyor...'
+            }
+          </Text>
+        </View>
+      )}
+      
       <View style={styles.metricsRow}>
         <Metric label="BPM" value={bpm} suffix="" />
         <Metric label="Güven" value={confidence} suffix="%" />
@@ -150,6 +169,18 @@ function Metric({
 const styles = StyleSheet.create({
   container: {
     gap: 16,
+  },
+  statusMessage: {
+    backgroundColor: '#FFA726',
+    padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  statusText: {
+    color: '#000',
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   metricsRow: {
     flexDirection: 'row',

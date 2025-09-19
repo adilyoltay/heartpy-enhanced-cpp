@@ -82,6 +82,25 @@ export class HeartPyWrapper {
     await this.analyzer.push(samples);
   }
 
+  async pushWithTimestamps(samples: number[] | Float32Array, timestamps: number[] | Float64Array): Promise<void> {
+    if (!this.analyzer) {
+      throw new Error('HeartPy analyzer not initialized');
+    }
+    
+    // Convert to typed arrays for better performance and GC
+    const samplesArray = samples instanceof Float32Array ? samples : new Float32Array(samples);
+    const timestampsArray = timestamps instanceof Float64Array ? timestamps : new Float64Array(timestamps);
+    
+    console.log('[HeartPyWrapper] pushWithTimestamps', {
+      sampleCount: samplesArray.length,
+      timestampCount: timestampsArray.length,
+      firstValue: samplesArray[0],
+      firstTimestamp: timestampsArray[0],
+    });
+    
+    await this.analyzer.pushWithTimestamps(samplesArray, timestampsArray);
+  }
+
   async poll(): Promise<PPGMetrics | null> {
     if (!this.analyzer) {
       throw new Error('HeartPy analyzer not initialized');
@@ -129,8 +148,12 @@ export class HeartPyWrapper {
       (goodQuality ? Math.max(0.7, 1 - rejectionRate) : Math.min(0.3, 1 - rejectionRate));
     
     const snrDb = typeof nativeSnrDb === 'number' ? nativeSnrDb : 
-      (goodQuality && result.totalPower > 0 ? 
-        Math.log10(Math.max(result.hf + result.lf, 0.01) / Math.max(result.totalPower - result.hf - result.lf, 0.01)) * 10 : -10);
+      (goodQuality && typeof result.totalPower === 'number' && typeof result.hf === 'number' && typeof result.lf === 'number' && 
+       result.totalPower > 0 && result.hf >= 0 && result.lf >= 0 ? 
+        (() => {
+          const calculatedSnr = Math.log10(Math.max(result.hf + result.lf, 0.01) / Math.max(result.totalPower - result.hf - result.lf, 0.01)) * 10;
+          return Number.isFinite(calculatedSnr) ? calculatedSnr : -10;
+        })() : -10);
 
     let signalQuality: 'good' | 'poor' | 'unknown' = 'unknown';
     if (goodQuality && confidence > 0.6) {

@@ -1,4 +1,4 @@
-import React, {useEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {NativeEventEmitter, NativeModules, Platform, StyleSheet, Text, View} from 'react-native';
 import {
   Camera,
@@ -26,6 +26,41 @@ export function PPGCamera({onSample, isActive}: Props): JSX.Element {
   const enableProcessorTimerRef = useRef<NodeJS.Timeout | null>(null);
   const torchTimerRef = useRef<NodeJS.Timeout | null>(null);
   
+  // FPS Monitoring
+  const frameTimestamps = useRef<number[]>([]);
+  const fpsRef = useRef<number>(0);
+  
+  // Calculate FPS from frame timestamps
+  const calculateFPS = useCallback((timestamp: number) => {
+    frameTimestamps.current.push(timestamp);
+    
+    // Keep only last 30 timestamps (1 second at 30fps)
+    if (frameTimestamps.current.length > 30) {
+      frameTimestamps.current.shift();
+    }
+    
+    // Calculate FPS if we have enough samples
+    if (frameTimestamps.current.length >= 10) {
+      const timeSpan = frameTimestamps.current[frameTimestamps.current.length - 1] - frameTimestamps.current[0];
+      const frameCount = frameTimestamps.current.length - 1;
+      const fps = frameCount / timeSpan; // Keep in seconds (VisionCamera timestamps are in seconds)
+      
+      if (Number.isFinite(fps) && fps > 0) {
+        fpsRef.current = fps;
+        
+        // Log FPS periodically
+        if (PPG_CONFIG.debug.enabled && frameTimestamps.current.length % 30 === 0) {
+          console.log('[PPGCamera] FPS calculated:', {
+            fps: fps.toFixed(1),
+            frameCount,
+            timeSpan: timeSpan.toFixed(3) + 's',
+          });
+        }
+      }
+    }
+  }, []);
+
+  
   // SAMPLE FLOW DEBUG: Check onSample prop
   useEffect(() => {
     console.log('[PPGCamera] Props received', {
@@ -46,6 +81,10 @@ export function PPGCamera({onSample, isActive}: Props): JSX.Element {
     const eventEmitter = new NativeEventEmitter(PPGCameraManager);
     const subscription = eventEmitter.addListener('PPGSample', (event) => {
       console.log('[PPGCamera] Received sample from NativeModules', event);
+      
+      // FPS Monitoring: Calculate FPS from JS event timestamps (safe from worklet context)
+      calculateFPS(event.timestamp);
+      
       const sample: PPGSample = {
         value: event.value,
         timestamp: event.timestamp,
@@ -57,7 +96,7 @@ export function PPGCamera({onSample, isActive}: Props): JSX.Element {
       console.log('[PPGCamera] Clearing NativeModules event listener');
       subscription.remove();
     };
-  }, [onSample]);
+  }, [onSample, calculateFPS]);
 
   useEffect(() => {
     console.log('[PPGCamera] Permission status:', hasPermission);
@@ -110,6 +149,9 @@ export function PPGCamera({onSample, isActive}: Props): JSX.Element {
       }
       const timestamp = frame.timestamp ?? Date.now();
       console.log('[PPGCamera] Frame processor: emitting sample', {value, timestamp});
+      
+      // WORKLET CRASH FIX: FPS monitoring moved to JS event listener
+      // No runOnJS calls from frame processor to prevent iOS crashes
       
       // NATIVE NOTIFICATION: PPGMeanPlugin sends NSNotification, PPGCameraManager forwards to JS
       // No worklet callback needed - samples come via NativeModules event

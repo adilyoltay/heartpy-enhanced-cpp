@@ -1,6 +1,9 @@
 // PPG Configuration Constants
 // All configuration values in one place with type safety
 
+// Environment-based debug flag
+const isDebugMode = __DEV__ || process.env.NODE_ENV === 'development';
+
 export const PPG_CONFIG = {
   camera: {
     fps: 30,
@@ -17,7 +20,7 @@ export const PPG_CONFIG = {
     waveformSamples: 150,
   },
   debug: {
-    enabled: true, // Set to true for verbose logging
+    enabled: isDebugMode, // Auto-enable in development, disable in production
     sampleLogThrottle: 30, // Log every Nth sample
   },
 } as const;
