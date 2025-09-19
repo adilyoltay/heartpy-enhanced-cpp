@@ -35,4 +35,8 @@ export class RingBuffer<T> {
   isFull(): boolean {
     return this.length === this.capacity;
   }
+
+  getSize(): number {
+    return this.length;
+  }
 }

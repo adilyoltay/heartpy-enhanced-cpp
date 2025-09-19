@@ -16,6 +16,7 @@ export class PPGAnalyzer {
   );
   private timer: NodeJS.Timeout | null = null;
   private readonly pending: number[] = [];
+  private sampleCount = 0; // Sample counter for accurate throttling
   private readonly onMetrics: (metrics: PPGMetrics, waveform: number[]) => void;
   private readonly onStateChange?: (state: PPGState) => void;
 
@@ -43,6 +44,10 @@ export class PPGAnalyzer {
 
       this.setState('running');
       console.log('[PPGAnalyzer] Starting timer with interval:', PPG_CONFIG.ui.updateInterval);
+      
+      // Reset sample counter on start
+      this.sampleCount = 0;
+      
       this.timer = setInterval(() => {
         this.tick().catch((error) => {
           console.error('[PPGAnalyzer] Tick error:', error);
@@ -80,15 +85,6 @@ export class PPGAnalyzer {
       console.log('[PPGAnalyzer] Buffering sample during startup');
     }
     
-    // DETAILED LOG: Track sample flow
-    console.log('[PPGAnalyzer] Sample received', {
-      value: sample.value,
-      timestamp: sample.timestamp,
-      state: this.state,
-      bufferSize: this.buffer.length,
-      pendingSize: this.pending.length,
-    });
-    
     this.buffer.push(sample.value);
     this.pending.push(sample.value);
     if (this.pending.length > PPG_CONFIG.analysis.bufferSize) {
@@ -96,6 +92,21 @@ export class PPGAnalyzer {
         0,
         this.pending.length - PPG_CONFIG.analysis.bufferSize,
       );
+    }
+    
+    // Increment sample counter for accurate throttling
+    this.sampleCount++;
+    
+    // THROTTLED LOG: Use sample counter for accurate N-th sample logging
+    if (PPG_CONFIG.debug.enabled && this.sampleCount % PPG_CONFIG.debug.sampleLogThrottle === 0) {
+      console.log('[PPGAnalyzer] Sample received', {
+        sampleCount: this.sampleCount,
+        value: sample.value,
+        timestamp: sample.timestamp,
+        state: this.state,
+        bufferSize: this.buffer.getSize(),
+        pendingSize: this.pending.length,
+      });
     }
   }
 

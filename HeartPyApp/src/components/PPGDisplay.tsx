@@ -68,34 +68,35 @@ export function PPGDisplay({
       <View style={styles.waveform}>
         {waveform.length === 0 ? (
           <Text style={styles.waveformEmpty}>Örnek bekleniyor…</Text>
-        ) : (
-          waveform
-            .slice(-PPG_CONFIG.ui.waveformSamples)
-            .map((value, index, arr) => {
-              const min = Math.min(...arr);
-              const max = Math.max(...arr);
-              const span = max - min || 1;
-              const height = ((value - min) / span) * 80 + 4;
-              
-              // Check if this index corresponds to a HeartPy peak
-              // HeartPy peakList contains absolute sample indices
-              // We need to map them to our relative waveform indices
-              const waveformStart = Math.max(0, waveform.length - PPG_CONFIG.ui.waveformSamples);
-              const absoluteIndex = waveformStart + index;
-              const isPickPoint = pickPoints.includes(absoluteIndex);
-              
-              return (
-                <View 
-                  key={index} 
-                  style={[
-                    styles.waveformBar, 
-                    {height},
-                    isPickPoint && styles.waveformBarPick
-                  ]} 
-                />
-              );
-            })
-        )}
+        ) : (() => {
+          // OPTIMIZATION: Precompute min/max to avoid O(n²) in map
+          const waveformSlice = waveform.slice(-PPG_CONFIG.ui.waveformSamples);
+          const min = Math.min(...waveformSlice);
+          const max = Math.max(...waveformSlice);
+          const span = max - min || 1;
+          
+          return waveformSlice.map((value, index) => {
+            const height = ((value - min) / span) * 80 + 4;
+            
+            // Check if this index corresponds to a HeartPy peak
+            // HeartPy peakList contains absolute sample indices
+            // We need to map them to our relative waveform indices
+            const waveformStart = Math.max(0, waveform.length - PPG_CONFIG.ui.waveformSamples);
+            const absoluteIndex = waveformStart + index;
+            const isPickPoint = pickPoints.includes(absoluteIndex);
+            
+            return (
+              <View 
+                key={index} 
+                style={[
+                  styles.waveformBar, 
+                  {height},
+                  isPickPoint && styles.waveformBarPick
+                ]} 
+              />
+            );
+          });
+        })()}
       </View>
 
       <View style={styles.controls}>

@@ -70,6 +70,22 @@ export type QualityInfo = {
 	rejectionRate: number;
 	goodQuality: boolean;
 	qualityWarning?: string;
+	// Streaming quality metrics (from C++ core)
+	confidence?: number;
+	snrDb?: number;
+	f0Hz?: number;
+	maPercActive?: number;
+	doublingFlag?: boolean;
+	softDoublingFlag?: boolean;
+	doublingHintFlag?: boolean;
+	hardFallbackActive?: boolean;
+	rrFallbackModeActive?: boolean;
+	refractoryMsActive?: number;
+	minRRBoundMs?: number;
+	pairFrac?: number;
+	rrShortFrac?: number;
+	rrLongMs?: number;
+	pHalfOverFund?: number;
 };
 
 export type HeartPyResult = {

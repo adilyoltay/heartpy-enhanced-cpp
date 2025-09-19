@@ -16,4 +16,8 @@ export const PPG_CONFIG = {
     updateInterval: 100,
     waveformSamples: 150,
   },
+  debug: {
+    enabled: true, // Set to true for verbose logging
+    sampleLogThrottle: 30, // Log every Nth sample
+  },
 } as const;

@@ -1,5 +1,40 @@
 import {RealtimeAnalyzer} from 'react-native-heartpy';
+import {PPG_CONFIG} from './PPGConfig';
 import type {PPGMetrics} from '../types/PPGTypes';
+
+// Override QualityInfo to include streaming metrics
+type QualityInfo = {
+  totalBeats: number;
+  rejectedBeats: number;
+  rejectionRate: number;
+  goodQuality: boolean;
+  qualityWarning?: string;
+  // Streaming quality metrics (from C++ core)
+  confidence?: number;
+  snrDb?: number;
+  f0Hz?: number;
+  maPercActive?: number;
+  doublingFlag?: boolean;
+  softDoublingFlag?: boolean;
+  doublingHintFlag?: boolean;
+  hardFallbackActive?: boolean;
+  rrFallbackModeActive?: boolean;
+  refractoryMsActive?: number;
+  minRRBoundMs?: number;
+  pairFrac?: number;
+  rrShortFrac?: number;
+  rrLongMs?: number;
+  pHalfOverFund?: number;
+};
+
+type HeartPyResult = {
+  bpm: number;
+  hf: number;
+  lf: number;
+  totalPower: number;
+  quality: QualityInfo;
+  peakList: number[];
+};
 
 export class HeartPyWrapper {
   private analyzer: RealtimeAnalyzer | null = null;
@@ -67,7 +102,7 @@ export class HeartPyWrapper {
 
     const bpm = typeof result.bpm === 'number' ? result.bpm : 0;
 
-    // HeartPy doesn't provide confidence/snrDb directly, calculate from available data
+    // HeartPy provides real confidence/snrDb in quality object
     const quality = result.quality ?? {};
     const goodQuality = quality.goodQuality === true;
     const totalBeats =
@@ -75,12 +110,27 @@ export class HeartPyWrapper {
     const rejectionRate =
       typeof quality.rejectionRate === 'number' ? quality.rejectionRate : 1;
 
-    // HeartPy provides confidence and snrDb directly in quality
-    const confidence = typeof quality.confidence === 'number' ? quality.confidence : 
+    // PRIORITIZE native confidence/snrDb from HeartPy C++ core
+    const nativeConfidence = (quality as any).confidence;
+    const nativeSnrDb = (quality as any).snrDb;
+    
+    // DEBUG: Log native vs synthetic values
+    if (PPG_CONFIG.debug.enabled) {
+      console.log('[HeartPyWrapper] Native metrics:', {
+        nativeConfidence,
+        nativeSnrDb,
+        goodQuality,
+        rejectionRate,
+      });
+    }
+    
+    // Use native values if available, otherwise synthetic fallback
+    const confidence = typeof nativeConfidence === 'number' ? nativeConfidence : 
       (goodQuality ? Math.max(0.7, 1 - rejectionRate) : Math.min(0.3, 1 - rejectionRate));
     
-    const snrDb = typeof quality.snrDb === 'number' ? quality.snrDb : 
-      (goodQuality && totalPower > 0 ? Math.log10(Math.max(hf + lf, 0.01) / Math.max(totalPower - hf - lf, 0.01)) * 10 : -10);
+    const snrDb = typeof nativeSnrDb === 'number' ? nativeSnrDb : 
+      (goodQuality && result.totalPower > 0 ? 
+        Math.log10(Math.max(result.hf + result.lf, 0.01) / Math.max(result.totalPower - result.hf - result.lf, 0.01)) * 10 : -10);
 
     let signalQuality: 'good' | 'poor' | 'unknown' = 'unknown';
     if (goodQuality && confidence > 0.6) {

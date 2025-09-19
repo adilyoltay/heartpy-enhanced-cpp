@@ -3,6 +3,7 @@ import {SafeAreaView, StatusBar, StyleSheet, View} from 'react-native';
 import {PPGCamera} from './src/components/PPGCamera';
 import {PPGDisplay} from './src/components/PPGDisplay';
 import {PPGAnalyzer} from './src/core/PPGAnalyzer';
+import {PPG_CONFIG} from './src/core/PPGConfig';
 import type {PPGMetrics, PPGSample, PPGState} from './src/types/PPGTypes';
 
 function useAnalyzer() {
@@ -56,13 +57,15 @@ function useAnalyzer() {
   const addSample = useCallback((sample: PPGSample) => {
     sampleCountRef.current += 1;
     
-    // DETAILED LOG: Track every sample
-    console.log('[App] Sample received', {
-      count: sampleCountRef.current,
-      value: sample.value,
-      timestamp: sample.timestamp,
-      state: state,
-    });
+    // THROTTLED LOG: Only log every Nth sample when debug enabled
+    if (PPG_CONFIG.debug.enabled && sampleCountRef.current % PPG_CONFIG.debug.sampleLogThrottle === 0) {
+      console.log('[App] Sample received', {
+        count: sampleCountRef.current,
+        value: sample.value,
+        timestamp: sample.timestamp,
+        state: state,
+      });
+    }
     
     analyzerRef.current?.addSample(sample);
   }, [state]);
