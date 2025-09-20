@@ -66,40 +66,51 @@ export function PPGDisplay({
   // Pick detection and haptic feedback
   const lastBpmRef = useRef<number | null>(null);
   const lastPickTimeRef = useRef<number>(0);
+  const lastPeakCountRef = useRef<number>(0);
+  const lastPeakMaxRef = useRef<number>(-1);
   
   useEffect(() => {
-    // FIXED: More robust haptic feedback logic
-    if (metrics && state === 'running') {
-      const currentBpm = metrics.bpm;
-      const currentTime = Date.now();
+    // Enhanced haptic feedback: trigger on new peaks with rate limiting
+    if (!metrics || state !== 'running') return;
 
-      // FIXED: Trigger haptic on new reliable readings, not just BPM changes
-      if (isReliable && currentBpm > 0 && snrDb > PPG_CONFIG.snrDbThresholdUI) {
-        const timeSinceLastPick = currentTime - lastPickTimeRef.current;
-        const expectedInterval = 60000 / currentBpm; // ms between beats
+    const currentBpm = metrics.bpm;
+    const peaks = metrics.peakList || [];
+    const currentTime = Date.now();
 
-        // FIXED: Trigger haptic on first reliable reading OR significant BPM change
-        const shouldTriggerHaptic = (
-          lastBpmRef.current === null || // First reliable reading
-          (Math.abs(currentBpm - lastBpmRef.current) > 5 && // Significant BPM change
-           timeSinceLastPick > expectedInterval * 0.8) // Rate limiting
-        );
+    if (isReliable && currentBpm > 0 && snrDb > PPG_CONFIG.snrDbThresholdUI) {
+      const expectedInterval = 60000 / currentBpm; // ms between beats
+      const timeSinceLast = currentTime - lastPickTimeRef.current;
 
-        if (shouldTriggerHaptic) {
-          ReactNativeHapticFeedback.trigger('impactLight', {
-            enableVibrateFallback: true,
-            ignoreAndroidSystemSettings: false,
-          });
-          lastPickTimeRef.current = currentTime;
-          console.log('💓 Heart beat detected - BPM:', currentBpm.toFixed(1), 'SNR:', snrDb.toFixed(1), 'Haptic triggered');
-        }
+      // Detect new peak appearance near the tail of the window
+      const peakCount = peaks.length;
+      const peakMax = peakCount > 0 ? Math.max(...peaks) : -1;
+      const newPeakAppeared =
+        (peakCount > lastPeakCountRef.current && timeSinceLast > expectedInterval * 0.5) ||
+        (peakMax > lastPeakMaxRef.current && timeSinceLast > expectedInterval * 0.5);
 
-        lastBpmRef.current = currentBpm;
-      } else if (metrics && !isReliable && lastBpmRef.current !== null) {
-        // FIXED: Reset haptic tracking when BPM becomes unreliable
-        lastBpmRef.current = null;
-        console.log('💓 Haptic disabled - BPM unreliable (reliability:', reliability.toFixed(2), 'SNR:', snrDb.toFixed(1), ')');
+      const bpmChangedSignificantly =
+        lastBpmRef.current !== null && Math.abs(currentBpm - lastBpmRef.current) > 5 && timeSinceLast > expectedInterval * 0.8;
+
+      const firstReliable = lastBpmRef.current === null;
+
+      if (newPeakAppeared || bpmChangedSignificantly || firstReliable) {
+        ReactNativeHapticFeedback.trigger('impactLight', {
+          enableVibrateFallback: true,
+          ignoreAndroidSystemSettings: false,
+        });
+        lastPickTimeRef.current = currentTime;
+        console.log('💓 Heart beat detected - BPM:', currentBpm.toFixed(1), 'SNR:', snrDb.toFixed(1), 'Haptic triggered');
       }
+
+      lastPeakCountRef.current = peakCount;
+      lastPeakMaxRef.current = peakMax;
+      lastBpmRef.current = currentBpm;
+    } else if (!isReliable && lastBpmRef.current !== null) {
+      // Reset tracking when unreliable to avoid false triggers
+      lastBpmRef.current = null;
+      lastPeakCountRef.current = 0;
+      lastPeakMaxRef.current = -1;
+      console.log('💓 Haptic disabled - BPM unreliable (reliability:', reliability.toFixed(2), 'SNR:', snrDb.toFixed(1), ')');
     }
   }, [metrics, state, isReliable, snrDb, reliability]);
   
