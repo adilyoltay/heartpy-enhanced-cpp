@@ -213,7 +213,7 @@ export class HeartPyWrapper {
       }
 
       const rawPeakList = Array.isArray(native?.peakList) ? native.peakList : [];
-      const peakList = this.normalizePeaks(rawPeakList);
+      const peakList = this.normalizePeaks(rawPeakList, result);
 
       if (PPG_CONFIG.debug.enabled) {
         console.log('[HeartPyWrapper] Native peak data', {
@@ -301,7 +301,7 @@ export class HeartPyWrapper {
     return 20 * Math.log10(Math.max(snr, 1e-6));
   }
 
-  private normalizePeaks(rawPeaks: number[]): number[] {
+  private normalizePeaks(rawPeaks: number[], result?: any): number[] {
     if (!Array.isArray(rawPeaks) || rawPeaks.length === 0) {
       if (PPG_CONFIG.debug.enabled) {
         console.log('[HeartPyWrapper] Peak normalization: no raw peaks', {rawPeaks});
@@ -344,52 +344,32 @@ export class HeartPyWrapper {
     const windowStart = Math.max(0, bufferLength - windowSize);
     const windowEnd = bufferLength;
 
-    // P1 ENHANCEMENT: Use native bridge data if available
-    // Check if we have peakListRaw and windowStartAbs from native bridge
-    const nativePeakListRaw = (this.lastResult as any)?.peakListRaw;
-    const nativeWindowStartAbs = (this.lastResult as any)?.windowStartAbs;
+    // P0 CRITICAL FIX: Use current result data instead of stale lastResult
+    // Check if we have peakListRaw and windowStartAbs from current native bridge data
+    const nativePeakListRaw = result?.peakListRaw;
+    const nativeWindowStartAbs = result?.windowStartAbs;
     
     let adjustedPeaks = sanitizedPeaks;
     
-    if (Array.isArray(nativePeakListRaw) && typeof nativeWindowStartAbs === 'number') {
-      // Use native bridge data for more accurate peak normalization
+    // P0 CRITICAL FIX: Disable faulty nativeWindowStartAbs logic temporarily
+    // The nativeWindowStartAbs value is incorrect (overflow/error value like 18446744073709552000)
+    // Revert to simple and reliable relative index logic
+    if (bufferLength >= windowSize) {
+      // P0 CRITICAL FIX: Simple and reliable peak normalization
+      // When buffer is full, shift peaks to align with current display window
+      const processingWindowStart = Math.max(0, bufferLength - PPG_CONFIG.analysisWindow);
+      adjustedPeaks = sanitizedPeaks.map(p => p + processingWindowStart);
+      
       if (PPG_CONFIG.debug.enabled) {
-        console.log('[HeartPyWrapper] Using native bridge data for peak normalization', {
-          nativePeakListRaw,
-          nativeWindowStartAbs,
-          originalPeaks: sanitizedPeaks
+        console.log('[HeartPyWrapper] Peak index correction applied (simplified)', {
+          originalPeaks: sanitizedPeaks,
+          processingWindowStart,
+          adjustedPeaks,
+          windowStart,
+          windowEnd,
+          bufferLength,
+          windowSize
         });
-      }
-      
-      // Map native peaks to display window
-      adjustedPeaks = nativePeakListRaw
-        .filter((peak): peak is number => typeof peak === 'number' && Number.isFinite(peak))
-        .map(peak => peak - nativeWindowStartAbs + windowStart)
-        .filter(peak => peak >= windowStart && peak < windowEnd);
-    } else if (bufferLength >= windowSize) {
-      // P0 FIX: Correct peak index normalization for window-relative indices
-      // When buffer is full, native peaks are often relative to the current processing window
-      // We need to map them to the display window correctly
-      const maxPeak = Math.max(...sanitizedPeaks);
-      const minPeak = Math.min(...sanitizedPeaks);
-      
-      // If all peaks are below windowStart, they're likely relative to processing window start
-      if (maxPeak < windowStart) {
-        // Shift peaks to align with current display window
-        const processingWindowStart = Math.max(0, bufferLength - PPG_CONFIG.analysisWindow);
-        const shift = processingWindowStart;
-        adjustedPeaks = sanitizedPeaks.map(p => p + shift);
-        
-        if (PPG_CONFIG.debug.enabled) {
-          console.log('[HeartPyWrapper] Peak index correction applied', {
-            originalPeaks: sanitizedPeaks,
-            processingWindowStart,
-            shift,
-            adjustedPeaks,
-            windowStart,
-            windowEnd
-          });
-        }
       }
     }
 

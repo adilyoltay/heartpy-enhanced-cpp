@@ -76,7 +76,10 @@ export function PPGDisplay({
     const currentTime = Date.now();
     const totalBeats = metrics.quality?.totalBeats || 0;
 
-    if (isReliable && currentBpm > 0 && snrDb > PPG_CONFIG.snrDbThresholdUI) {
+    // P0 CRITICAL FIX: More flexible reliability conditions for haptic feedback
+    const isReliableForHaptic = reliability >= 0.5 && snrDb > -8; // Relaxed thresholds for haptic
+    
+    if (isReliableForHaptic && currentBpm > 0) {
       const expectedInterval = 60000 / currentBpm; // ms between beats
       const timeSinceLast = currentTime - lastPickTimeRef.current;
       
@@ -86,24 +89,24 @@ export function PPGDisplay({
       const firstReliable = lastBpmRef.current === null;
       
       if ((beatDetected && timeSinceLast > minInterval) || firstReliable) {
-        // P0 FIX: Strengthen haptic feedback for better perception
-        ReactNativeHapticFeedback.trigger('impactMedium', {
+        // P0 CRITICAL FIX: Increase haptic intensity for better perception
+        ReactNativeHapticFeedback.trigger('impactHeavy', {
           enableVibrateFallback: true,
-          ignoreAndroidSystemSettings: true, // FIXED: Allow stronger Android vibration
+          ignoreAndroidSystemSettings: true, // Force stronger Android vibration
         });
         lastPickTimeRef.current = currentTime;
-        console.log('💓 Heart beat detected - BPM:', currentBpm.toFixed(1), 'SNR:', snrDb.toFixed(1), 'TotalBeats:', totalBeats, 'Haptic triggered');
+        console.log('💓 Heart beat detected - BPM:', currentBpm.toFixed(1), 'SNR:', snrDb.toFixed(1), 'TotalBeats:', totalBeats, 'Reliability:', reliability.toFixed(2), 'Haptic triggered');
       }
 
       lastBpmRef.current = currentBpm;
       lastTotalBeatsRef.current = totalBeats;
-    } else if (!isReliable && lastBpmRef.current !== null) {
+    } else if (!isReliableForHaptic && lastBpmRef.current !== null) {
       // Reset tracking when unreliable to avoid false triggers
       lastBpmRef.current = null;
       lastTotalBeatsRef.current = 0;
       console.log('💓 Haptic disabled - BPM unreliable (reliability:', reliability.toFixed(2), 'SNR:', snrDb.toFixed(1), ')');
     }
-  }, [metrics, state, isReliable, snrDb, reliability]);
+  }, [metrics, state, reliability, snrDb]);
   
   // Use HeartPy peakList directly (no duplication)
   const pickPoints = metrics?.peakList || [];
