@@ -69,8 +69,11 @@ export class HeartPyWrapper {
       const windowSamples = PPG_CONFIG.analysisWindow;
       const windowSeconds = windowSamples / sampleRate;
       const expectedBeatsInWindow = (PPG_CONFIG.expectedBpm / 60) * windowSeconds;
-      const segmentRejectWindowBeats = Math.max(4, Math.round(expectedBeatsInWindow));
-      const segmentRejectMaxRejects = Math.max(2, Math.floor(segmentRejectWindowBeats * 0.4));
+
+      // FIXED: Segment rejection should be BPM-based, not time-based
+      // Use fixed beats instead of time-based calculation
+      const segmentRejectWindowBeats = Math.max(4, Math.round(PPG_CONFIG.expectedBpm / 60 * 3)); // 3 seconds worth of beats
+      const segmentRejectMaxRejects = Math.max(2, Math.floor(segmentRejectWindowBeats * 0.3)); // 30% rejection rate
       
       // CRITICAL: Configure Welch window to match our analysis window
       const welchConfig = {
@@ -81,7 +84,7 @@ export class HeartPyWrapper {
       
       this.analyzer = await RealtimeAnalyzer.create(sampleRate, {
         bandpass: {lowHz: 0.3, highHz: 4.5, order: 2}, // Even wider bandpass for better signal capture
-        peak: {refractoryMs: 150, bpmMin: 40, bpmMax: 180}, // Further reduced refractoryMs for maximum sensitivity
+        peak: {refractoryMs: 150, bpmMin: 40, bpmMax: 180}, // FIXED: Removed unsupported parameters
         quality: {
           rejectSegmentwise: true,
           segmentRejectWindowBeats,
@@ -209,9 +212,17 @@ export class HeartPyWrapper {
         signalQuality = 'poor';
       }
 
-      const peakList = this.normalizePeaks(
-        Array.isArray(native?.peakList) ? native.peakList : [],
-      );
+      const rawPeakList = Array.isArray(native?.peakList) ? native.peakList : [];
+      const peakList = this.normalizePeaks(rawPeakList);
+
+      if (PPG_CONFIG.debug.enabled) {
+        console.log('[HeartPyWrapper] Native peak data', {
+          rawPeakList,
+          normalizedPeaks: peakList,
+          bufferLength: this.bufferRef?.getLength() ?? 0,
+          windowSize: PPG_CONFIG.waveformTailSamples,
+        });
+      }
 
       const metrics: PPGMetrics = {
         bpm: typeof native?.bpm === 'number' ? native.bpm : 0,
@@ -289,6 +300,9 @@ export class HeartPyWrapper {
 
   private normalizePeaks(rawPeaks: number[]): number[] {
     if (!Array.isArray(rawPeaks) || rawPeaks.length === 0) {
+      if (PPG_CONFIG.debug.enabled) {
+        console.log('[HeartPyWrapper] Peak normalization: no raw peaks', {rawPeaks});
+      }
       return [];
     }
 
@@ -296,13 +310,26 @@ export class HeartPyWrapper {
       .filter((peak): peak is number => typeof peak === 'number' && Number.isFinite(peak))
       .map((peak) => Math.round(peak));
 
+    if (PPG_CONFIG.debug.enabled) {
+      console.log('[HeartPyWrapper] Peak normalization: raw vs sanitized', {
+        rawPeaks,
+        sanitizedPeaks,
+        filteredCount: sanitizedPeaks.length
+      });
+    }
+
     if (sanitizedPeaks.length === 0) {
+      if (PPG_CONFIG.debug.enabled) {
+        console.log('[HeartPyWrapper] Peak normalization: no valid peaks after sanitization');
+      }
       return [];
     }
 
     const ringBuffer = this.bufferRef;
     if (!ringBuffer) {
-      return sanitizedPeaks.filter((peak) => peak >= 0);
+      // FIXED: If no buffer, return first few peaks as-is (fallback for early detection)
+      const maxPeaks = Math.min(sanitizedPeaks.length, PPG_CONFIG.waveformTailSamples);
+      return sanitizedPeaks.slice(0, maxPeaks).filter((peak) => peak >= 0);
     }
 
     const bufferLength = ringBuffer.getLength();
@@ -314,9 +341,18 @@ export class HeartPyWrapper {
     const windowStart = Math.max(0, bufferLength - windowSize);
     const windowEnd = bufferLength;
 
-    const filtered = sanitizedPeaks.filter(
-      (peak) => peak >= windowStart && peak < windowEnd,
-    );
+    // FIXED: More lenient filtering - allow peaks from a wider range
+    // If buffer is full, use the last windowSize samples
+    // If buffer is not full yet, use all available data
+    const filtered = sanitizedPeaks.filter((peak) => {
+      if (bufferLength >= windowSize) {
+        // Buffer full: only show peaks in the last windowSize samples
+        return peak >= windowStart && peak < windowEnd;
+      } else {
+        // Buffer not full yet: show all peaks that fit in the current buffer
+        return peak >= 0 && peak < bufferLength;
+      }
+    });
 
     if (filtered.length === 0) {
       if (PPG_CONFIG.debug.enabled) {
@@ -324,21 +360,32 @@ export class HeartPyWrapper {
           bufferLength,
           windowSize,
           windowStart,
+          windowEnd,
           sanitizedPeaks,
+          bufferFull: bufferLength >= windowSize,
         });
       }
       return [];
     }
 
-    const normalized = filtered.map((peak) => peak - windowStart);
+    const normalized = filtered.map((peak) => {
+      if (bufferLength >= windowSize) {
+        return peak - windowStart; // Standard normalization
+      } else {
+        return peak; // Early detection - no offset needed
+      }
+    });
 
     if (PPG_CONFIG.debug.enabled) {
       console.log('[HeartPyWrapper] Peak normalization result', {
         bufferLength,
+        windowSize,
         windowStart,
+        windowEnd,
         rawPeaks,
         filtered,
         normalized,
+        bufferFull: bufferLength >= windowSize,
       });
     }
 

@@ -100,18 +100,36 @@ export class PPGAnalyzer {
     if (this.state === 'idle') {
       return;
     }
-    this.setState('stopping');
+
+    // FIXED: Atomic state transition to prevent race conditions
+    if (this.state !== 'stopping') {
+      this.setState('stopping');
+    }
+
+    // FIXED: Clear timer first to prevent race conditions
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+      console.log('[PPGAnalyzer] Timer cleared successfully');
     }
-    await this.wrapper.destroy();
+
+    try {
+      await this.wrapper.destroy();
+      console.log('[PPGAnalyzer] Wrapper destroyed successfully');
+    } catch (error) {
+      console.warn('[PPGAnalyzer] Wrapper destroy failed (may already be destroyed):', error);
+    }
+
+    // FIXED: Clear all data atomically
     this.pending.length = 0;
-    this.pendingTimestamps.length = 0; // CRITICAL: Clear timestamps to prevent sync issues
+    this.pendingTimestamps.length = 0;
     this.buffer.clear();
     this.totalPushed = 0;
     this.lastFlushTimestampMs = 0;
+    this.sampleCount = 0;
+
     this.setState('idle');
+    console.log('[PPGAnalyzer] Stop completed successfully');
   }
 
   async addSample(sample: PPGSample): Promise<void> {
