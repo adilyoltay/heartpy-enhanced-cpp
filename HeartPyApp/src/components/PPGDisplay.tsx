@@ -1,4 +1,4 @@
-import React, {useEffect, useRef} from 'react';
+import React, {useEffect, useMemo, useRef} from 'react';
 import {StyleSheet, Text, TouchableOpacity, View} from 'react-native';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import type {PPGMetrics, PPGState} from '../types/PPGTypes';
@@ -66,50 +66,41 @@ export function PPGDisplay({
   // Pick detection and haptic feedback
   const lastBpmRef = useRef<number | null>(null);
   const lastPickTimeRef = useRef<number>(0);
-  const lastPeakCountRef = useRef<number>(0);
-  const lastPeakMaxRef = useRef<number>(-1);
+  const lastTotalBeatsRef = useRef<number>(0);
   
   useEffect(() => {
-    // Enhanced haptic feedback: trigger on new peaks with rate limiting
+    // P0 FIX: Decouple haptic trigger from peak filtering - use totalBeats count instead
     if (!metrics || state !== 'running') return;
 
     const currentBpm = metrics.bpm;
-    const peaks = metrics.peakList || [];
     const currentTime = Date.now();
+    const totalBeats = metrics.quality?.totalBeats || 0;
 
     if (isReliable && currentBpm > 0 && snrDb > PPG_CONFIG.snrDbThresholdUI) {
       const expectedInterval = 60000 / currentBpm; // ms between beats
       const timeSinceLast = currentTime - lastPickTimeRef.current;
-
-      // Detect new peak appearance near the tail of the window
-      const peakCount = peaks.length;
-      const peakMax = peakCount > 0 ? Math.max(...peaks) : -1;
-      const newPeakAppeared =
-        (peakCount > lastPeakCountRef.current && timeSinceLast > expectedInterval * 0.5) ||
-        (peakMax > lastPeakMaxRef.current && timeSinceLast > expectedInterval * 0.5);
-
-      const bpmChangedSignificantly =
-        lastBpmRef.current !== null && Math.abs(currentBpm - lastBpmRef.current) > 5 && timeSinceLast > expectedInterval * 0.8;
-
+      
+      // P0 FIX: Simple time-based debounce (300ms minimum) instead of complex BPM rate limiting
+      const minInterval = 300; // ms
+      const beatDetected = totalBeats > lastTotalBeatsRef.current;
       const firstReliable = lastBpmRef.current === null;
-
-      if (newPeakAppeared || bpmChangedSignificantly || firstReliable) {
-        ReactNativeHapticFeedback.trigger('impactLight', {
+      
+      if ((beatDetected && timeSinceLast > minInterval) || firstReliable) {
+        // P0 FIX: Strengthen haptic feedback for better perception
+        ReactNativeHapticFeedback.trigger('impactMedium', {
           enableVibrateFallback: true,
-          ignoreAndroidSystemSettings: false,
+          ignoreAndroidSystemSettings: true, // FIXED: Allow stronger Android vibration
         });
         lastPickTimeRef.current = currentTime;
-        console.log('💓 Heart beat detected - BPM:', currentBpm.toFixed(1), 'SNR:', snrDb.toFixed(1), 'Haptic triggered');
+        console.log('💓 Heart beat detected - BPM:', currentBpm.toFixed(1), 'SNR:', snrDb.toFixed(1), 'TotalBeats:', totalBeats, 'Haptic triggered');
       }
 
-      lastPeakCountRef.current = peakCount;
-      lastPeakMaxRef.current = peakMax;
       lastBpmRef.current = currentBpm;
+      lastTotalBeatsRef.current = totalBeats;
     } else if (!isReliable && lastBpmRef.current !== null) {
       // Reset tracking when unreliable to avoid false triggers
       lastBpmRef.current = null;
-      lastPeakCountRef.current = 0;
-      lastPeakMaxRef.current = -1;
+      lastTotalBeatsRef.current = 0;
       console.log('💓 Haptic disabled - BPM unreliable (reliability:', reliability.toFixed(2), 'SNR:', snrDb.toFixed(1), ')');
     }
   }, [metrics, state, isReliable, snrDb, reliability]);

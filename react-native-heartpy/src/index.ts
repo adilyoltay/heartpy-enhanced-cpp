@@ -325,7 +325,10 @@ export async function rtPoll(handle: number): Promise<HeartPyMetrics | null> {
     const t1 = Date.now();
     const p = Native.rtPoll(handle);
     nmCalls++;
-    return p?.then?.((res: any) => { recordDuration(pollDurationsMs, Date.now() - t1); return res; }) ?? p;
+    return p?.then?.((res: any) => {
+        recordDuration(pollDurationsMs, Date.now() - t1);
+        return (res ?? null);
+    }) ?? p;
 }
 
 export async function rtDestroy(handle: number): Promise<void> {

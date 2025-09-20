@@ -341,20 +341,40 @@ export class HeartPyWrapper {
     const windowStart = Math.max(0, bufferLength - windowSize);
     const windowEnd = bufferLength;
 
-    // Heuristic: Some native peak lists can be absolute indices since start.
-    // If values are far outside the current buffer range, shift them so the
-    // latest peak aligns with the end of the current window.
-    const maxPeak = Math.max(...sanitizedPeaks);
-    const minPeak = Math.min(...sanitizedPeaks);
-    const looksAbsolute = minPeak >= windowSize || maxPeak > bufferLength * 2;
-    const targetEnd = bufferLength >= windowSize ? windowEnd - 1 : Math.max(0, bufferLength - 1);
-    const shift = looksAbsolute ? Math.max(0, maxPeak - targetEnd) : 0;
-    const shiftedPeaks = shift > 0 ? sanitizedPeaks.map((p) => p - shift) : sanitizedPeaks;
+    // P0 FIX: Correct peak index normalization for window-relative indices
+    // When buffer is full, native peaks are often relative to the current processing window
+    // We need to map them to the display window correctly
+    let adjustedPeaks = sanitizedPeaks;
+    
+    if (bufferLength >= windowSize) {
+      // Buffer is full - peaks are likely relative to current processing window
+      const maxPeak = Math.max(...sanitizedPeaks);
+      const minPeak = Math.min(...sanitizedPeaks);
+      
+      // If all peaks are below windowStart, they're likely relative to processing window start
+      if (maxPeak < windowStart) {
+        // Shift peaks to align with current display window
+        const processingWindowStart = Math.max(0, bufferLength - PPG_CONFIG.analysisWindow);
+        const shift = processingWindowStart;
+        adjustedPeaks = sanitizedPeaks.map(p => p + shift);
+        
+        if (PPG_CONFIG.debug.enabled) {
+          console.log('[HeartPyWrapper] Peak index correction applied', {
+            originalPeaks: sanitizedPeaks,
+            processingWindowStart,
+            shift,
+            adjustedPeaks,
+            windowStart,
+            windowEnd
+          });
+        }
+      }
+    }
 
     // FIXED: More lenient filtering - allow peaks from a wider range
     // If buffer is full, use the last windowSize samples
     // If buffer is not full yet, use all available data
-    const filtered = shiftedPeaks.filter((peak) => {
+    const filtered = adjustedPeaks.filter((peak) => {
       if (bufferLength >= windowSize) {
         // Buffer full: only show peaks in the last windowSize samples
         return peak >= windowStart && peak < windowEnd;
@@ -372,6 +392,7 @@ export class HeartPyWrapper {
           windowStart,
           windowEnd,
           sanitizedPeaks,
+          adjustedPeaks,
           bufferFull: bufferLength >= windowSize,
         });
       }
@@ -394,8 +415,7 @@ export class HeartPyWrapper {
         windowEnd,
         rawPeaks,
         sanitizedPeaks,
-        looksAbsolute,
-        shift,
+        adjustedPeaks,
         filtered,
         normalized,
         bufferFull: bufferLength >= windowSize,
