@@ -22,10 +22,10 @@ export function PPGDisplay({
   const totalBeats = metrics?.quality.totalBeats ?? 0;
   const snrDb = metrics?.snrDb ?? -10;
   const reliability = metrics?.confidence ?? 0;
-  const hasResult = metrics?.hasResult ?? false;
+  const goodQuality = metrics?.quality.goodQuality ?? false;
 
   // FIXED: More robust reliability check - use multiple factors
-  const isReliable = hasResult &&
+  const isReliable = goodQuality &&
                     reliability >= PPG_CONFIG.reliabilityThreshold &&
                     snrDb >= PPG_CONFIG.snrDbThresholdUI;
 
