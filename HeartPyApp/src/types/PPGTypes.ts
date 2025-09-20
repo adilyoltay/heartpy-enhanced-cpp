@@ -15,6 +15,7 @@ export interface PPGMetrics {
   readonly snrDb: number;
   readonly hasResult: boolean;
   readonly peakList: readonly number[];
+  readonly processingWindowStart: number; // P0 FIX: Add processingWindowStart for accurate peak positioning
   readonly quality: {
     readonly goodQuality: boolean;
     readonly signalQuality: PPGQuality;

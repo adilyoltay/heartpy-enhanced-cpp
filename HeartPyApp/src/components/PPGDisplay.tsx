@@ -108,8 +108,15 @@ export function PPGDisplay({
     }
   }, [metrics, state, reliability, snrDb]);
   
-  // Use HeartPy peakList directly (no duplication)
+  // P0 FIX: Use processingWindowStart for accurate peak positioning
   const pickPoints = metrics?.peakList || [];
+  const processingWindowStart = metrics?.processingWindowStart || 0;
+  
+  // Convert relative peak indices to absolute positions for accurate rendering
+  const absolutePickPoints = pickPoints.map(peakIndex => {
+    // Peak index is relative to the processing window, convert to absolute position
+    return peakIndex + processingWindowStart;
+  });
 
   return (
     <View style={styles.container}>
@@ -163,7 +170,7 @@ export function PPGDisplay({
                    const height = ((value - min) / span) * 80 + 4;
                    
                    // Check if this index corresponds to a HeartPy peak (now in relative coordinates)
-                   const isPickPoint = pickPoints.includes(index);
+                   const isPickPoint = absolutePickPoints.includes(index);
                    
                    return (
                      <View 

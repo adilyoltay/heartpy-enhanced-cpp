@@ -230,6 +230,8 @@ export class HeartPyWrapper {
         snrDb: normalizedSnrDb,
         hasResult: goodQuality,
         peakList,
+        processingWindowStart: bufferLength >= PPG_CONFIG.analysisWindow ? 
+          Math.max(0, bufferLength - PPG_CONFIG.analysisWindow) : 0, // P0 FIX: Add processingWindowStart for UI
         quality: {
           goodQuality,
           signalQuality,

@@ -71,6 +71,12 @@ export class PPGAnalyzer {
     try {
       this.setState('starting');
       console.log('[PPGAnalyzer] Creating HeartPy wrapper...');
+      
+      // P0 CRITICAL FIX: Reset currentSampleRate to prevent stale FPS from previous session
+      // This ensures warm-up period is calculated correctly (6s * 30fps = 180 samples, not 6s * 15fps = 90 samples)
+      this.currentSampleRate = PPG_CONFIG.sampleRate; // Reset to default
+      console.log('[PPGAnalyzer] Sample rate reset to default:', this.currentSampleRate.toFixed(1));
+      
       // P1 FIX: Use dynamic sample rate based on measured FPS instead of fixed config
       const sampleRate = this.currentSampleRate > 0 ? this.currentSampleRate : PPG_CONFIG.sampleRate;
       await this.wrapper.create(sampleRate);

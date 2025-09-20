@@ -32,9 +32,9 @@ struct Options {
     bool breathingAsBpm = false; // false: Hz (HeartPy), true: breaths/min
 
 	// Peak detection
-	double refractoryMs = 250.0; // minimum distance between peaks
-	double thresholdScale = 0.5; // adaptive threshold scale
-	double bpmMin = 40.0;
+	double refractoryMs = 150.0; // P1 FIX: Reduced from 250ms to 150ms for better sensitivity
+	double thresholdScale = 0.3; // P1 FIX: Reduced from 0.5 to 0.3 for more sensitive peak detection
+	double bpmMin = 35.0; // P1 FIX: Lowered from 40 to 35 for broader range
 	double bpmMax = 180.0;
 
 	// HP-style thresholding (rolling_mean + ma_perc lift)
