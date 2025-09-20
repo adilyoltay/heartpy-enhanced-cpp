@@ -231,7 +231,7 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
     if (!cameraRef.current) return;
     try {
       setAndroidTorchMode(mode);
-      cameraRef.current.setTorch(mode);
+      (cameraRef.current as any).setTorch(mode);
       if (PPG_CONFIG.debug.enabled) {
         console.log('[PPGCamera] Android torch set', {mode});
       }

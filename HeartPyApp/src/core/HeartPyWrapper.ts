@@ -167,17 +167,17 @@ export class HeartPyWrapper {
       const native = result as Partial<HeartPyResult>;
       const quality = native?.quality ?? {};
 
-      const goodQuality = quality.goodQuality === true;
+      const goodQuality = (quality as any).goodQuality === true;
       const totalBeats =
-        typeof quality.totalBeats === 'number' ? quality.totalBeats : 0;
+        typeof (quality as any).totalBeats === 'number' ? (quality as any).totalBeats : 0;
       const rejectionRateRaw =
-        typeof quality.rejectionRate === 'number'
-          ? quality.rejectionRate
+        typeof (quality as any).rejectionRate === 'number'
+          ? (quality as any).rejectionRate
           : undefined;
 
       let snrDb =
-        typeof quality.snrDb === 'number' && quality.snrDb !== 0
-          ? quality.snrDb
+        typeof (quality as any).snrDb === 'number' && (quality as any).snrDb !== 0
+          ? (quality as any).snrDb
           : undefined;
 
       if (snrDb == null) {
