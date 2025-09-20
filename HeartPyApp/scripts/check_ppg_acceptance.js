@@ -153,8 +153,8 @@ class PPGAcceptanceChecker {
     // HeartPy Warm-up Tests
     console.log('\n🔍 Testing HeartPy Warm-up...');
     this.test('Native confidence preserved', () => {
-      // HeartPyWrapper logs confidence values during warm-up (should start at 0)
-      const matches = this.logContent.match(/LOG\s+\[HeartPyWrapper\].*confidence.*0/g);
+      // HeartPyWrapper logs: "LOG  [HeartPyWrapper] Native metrics:" with object containing "confidence": 0
+      const matches = this.logContent.match(/LOG\s+\[HeartPyWrapper\]\s+Native\s+metrics:.*"confidence":\s*0/g);
       return matches && matches.length >= 3;
     }, 'Native confidence = 0 preserved during warm-up');
     
@@ -208,7 +208,7 @@ class PPGAcceptanceChecker {
     // Peak Filtering Tests
     console.log('\n🔍 Testing Peak Filtering...');
     this.test('Peak filtering logs present', () => {
-      const matches = this.logContent.match(/LOG\s+\[HeartPyWrapper\]\s+Peak\s+(?:list\s+)?(?:filtering|normalization)/g);
+      const matches = this.logContent.match(/LOG\s+\[HeartPyWrapper\]\s+Peak\s+list\s+normalization/g);
       return matches && matches.length >= 2;
     }, 'Peak filtering logs present');
     

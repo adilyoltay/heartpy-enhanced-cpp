@@ -71,7 +71,7 @@ export class HeartPyWrapper {
       const expectedBeatsInWindow = (PPG_CONFIG.expectedBpm / 60) * windowSeconds;
 
       // FIXED: Use actual window duration (5 seconds) for segment rejection
-      const rejectionWindowSeconds = PPG_CONFIG.analysis.analysisWindow / 30; // Convert samples to seconds (150/30=5s)
+      const rejectionWindowSeconds = PPG_CONFIG.analysisWindow / 30; // Convert samples to seconds (150/30=5s)
       const segmentRejectWindowBeats = Math.max(4, Math.round(PPG_CONFIG.expectedBpm / 60 * rejectionWindowSeconds));
       const segmentRejectMaxRejects = Math.max(2, Math.floor(segmentRejectWindowBeats * 0.3)); // 30% rejection rate
 
@@ -239,7 +239,7 @@ export class HeartPyWrapper {
       };
 
       if (PPG_CONFIG.debug.enabled) {
-        console.log('[HeartPyWrapper] Derived metrics', {
+        console.log('[HeartPyWrapper] Native metrics', {
           bpm: metrics.bpm,
           confidence: metrics.confidence,
           snrDb: metrics.snrDb,
@@ -377,7 +377,7 @@ export class HeartPyWrapper {
     });
 
     if (PPG_CONFIG.debug.enabled) {
-      console.log('[HeartPyWrapper] Peak normalization result', {
+      console.log('[HeartPyWrapper] Peak list normalization', {
         bufferLength,
         windowSize,
         windowStart,
