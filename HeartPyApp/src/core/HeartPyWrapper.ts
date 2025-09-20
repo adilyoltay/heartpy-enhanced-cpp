@@ -68,8 +68,9 @@ export class HeartPyWrapper {
       console.log('[HeartPyWrapper] Creating RealtimeAnalyzer...');
       const windowSamples = PPG_CONFIG.analysisWindow;
       const windowSeconds = windowSamples / sampleRate;
-      const segmentRejectWindowBeats = Math.max(4, Math.round(windowSeconds));
-      const segmentRejectMaxRejects = Math.max(0, segmentRejectWindowBeats - 1);
+      const expectedBeatsInWindow = (PPG_CONFIG.expectedBpm / 60) * windowSeconds;
+      const segmentRejectWindowBeats = Math.max(4, Math.round(expectedBeatsInWindow));
+      const segmentRejectMaxRejects = Math.max(2, Math.floor(segmentRejectWindowBeats * 0.4));
       
       // CRITICAL: Configure Welch window to match our analysis window
       const welchConfig = {
@@ -160,110 +161,86 @@ export class HeartPyWrapper {
         return null;
       }
 
-      const bpm = typeof result.bpm === 'number' ? result.bpm : 0;
+      const native = result as Partial<HeartPyResult>;
+      const quality = native?.quality ?? {};
 
-    // HeartPy provides real confidence/snrDb in quality object
-    const quality = result.quality ?? {};
-    const goodQuality = quality.goodQuality === true;
-    const totalBeats =
-      typeof quality.totalBeats === 'number' ? quality.totalBeats : 0;
-    const rejectionRate =
-      typeof quality.rejectionRate === 'number' ? quality.rejectionRate : 0;
+      const goodQuality = quality.goodQuality === true;
+      const totalBeats =
+        typeof quality.totalBeats === 'number' ? quality.totalBeats : 0;
+      const rejectionRateRaw =
+        typeof quality.rejectionRate === 'number'
+          ? quality.rejectionRate
+          : undefined;
 
-    // PRIORITIZE native confidence/snrDb from HeartPy C++ core
-    const nativeConfidence = (quality as any).confidence;
-    const nativeSnrDb = (quality as any).snrDb;
+      let snrDb =
+        typeof quality.snrDb === 'number' && quality.snrDb !== 0
+          ? quality.snrDb
+          : undefined;
 
-    let snrDb = typeof nativeSnrDb === 'number' && nativeSnrDb > 0
-      ? nativeSnrDb
-      : null;
-
-    // DEBUG: Log native vs synthetic values
-    if (PPG_CONFIG.debug.enabled) {
-      console.log('[HeartPyWrapper] Native metrics:', {
-        nativeConfidence,
-        nativeSnrDb,
-        goodQuality,
-        rejectionRate,
-      });
-    }
-    
-    // CONFIDENCE FALLBACK: Preserve native warm-up confidence (0 = warm-up)
-    let confidence: number;
-    if (typeof nativeConfidence === 'number') {
-      // Native confidence is available (including 0 for warm-up)
-      confidence = nativeConfidence;
-      if (confidence <= 0.0 && this.lastCameraConfidence > 0.05) {
-        confidence = Math.max(confidence, this.lastCameraConfidence * 0.5);
+      if (snrDb == null) {
+        const tail = this.getAnalysisTail();
+        if (tail) {
+          snrDb = this.computeSnrFallbackDb(tail);
+        }
       }
-    } else if (this.lastCameraConfidence > 0.1) {
-      // Use camera confidence only when native confidence is undefined/NaN
-      confidence = this.lastCameraConfidence;
-    } else {
-      // Synthetic fallback
-      confidence = goodQuality ? Math.max(0.7, 1 - rejectionRate) : Math.min(0.3, 1 - rejectionRate);
-    }
-    
-    if (snrDb == null && goodQuality && typeof result.totalPower === 'number' && typeof result.hf === 'number' && typeof result.lf === 'number' && result.totalPower > 0) {
-      const calculatedSnr = Math.log10(Math.max(result.hf + result.lf, 0.01) / Math.max(result.totalPower - result.hf - result.lf, 0.01)) * 10;
-      if (Number.isFinite(calculatedSnr)) snrDb = calculatedSnr;
-    }
+      const normalizedSnrDb = snrDb ?? -10;
 
-    if (snrDb == null) {
-      const tail = this.getAnalysisTail();
-      if (tail) {
-        snrDb = this.computeSnrFallbackDb(tail);
+      const snrScore = Math.min(
+        1,
+        Math.max(0, (normalizedSnrDb - PPG_CONFIG.snrDbThresholdUI) / 12),
+      );
+      const rejectionRateClamped = Math.min(
+        1,
+        Math.max(0, rejectionRateRaw ?? 0),
+      );
+      const rejectionScore = 1 - rejectionRateClamped;
+      const qualityScore = goodQuality ? 1 : 0;
+
+      const confidence =
+        0.6 * qualityScore + 0.3 * snrScore + 0.1 * rejectionScore;
+
+      let signalQuality: 'good' | 'poor' | 'unknown' = 'unknown';
+      if (goodQuality && confidence >= PPG_CONFIG.reliabilityThreshold) {
+        signalQuality = 'good';
+      } else if (
+        confidence < 0.3 ||
+        normalizedSnrDb < PPG_CONFIG.snrDbThresholdUI
+      ) {
+        signalQuality = 'poor';
       }
-    }
-    if (snrDb == null) snrDb = -10;
 
-    const hasResult = result.hasResult === true;
+      const peakList = this.normalizePeaks(
+        Array.isArray(native?.peakList) ? native.peakList : [],
+      );
 
-    let signalQuality: 'good' | 'poor' | 'unknown' = 'unknown';
-    if (goodQuality && confidence >= 0.35) { // Require moderate confidence to mark as good
-      signalQuality = 'good';
-    } else if (confidence < 0.15 || snrDb < -8) { // Flag poor when confidence collapses or SNR very low
-      signalQuality = 'poor';
-    }
+      const metrics: PPGMetrics = {
+        bpm: typeof native?.bpm === 'number' ? native.bpm : 0,
+        confidence,
+        snrDb: normalizedSnrDb,
+        hasResult: goodQuality,
+        peakList,
+        quality: {
+          goodQuality,
+          signalQuality,
+          totalBeats,
+          rejectionRate: rejectionRateRaw,
+        },
+      };
 
-    // Normalize HeartPy peak indices from analyzer ring buffer into the UI waveform window
-    const rawPeakList: number[] = Array.isArray(result.peakList)
-      ? result.peakList.filter((peak): peak is number => typeof peak === 'number' && Number.isFinite(peak))
-      : [];
+      if (PPG_CONFIG.debug.enabled) {
+        console.log('[HeartPyWrapper] Derived metrics', {
+          bpm: metrics.bpm,
+          confidence: metrics.confidence,
+          snrDb: metrics.snrDb,
+          hasResult: metrics.hasResult,
+          totalBeats: metrics.quality.totalBeats,
+          rejectionRate: metrics.quality.rejectionRate,
+          signalQuality: metrics.quality.signalQuality,
+          peakCount: metrics.peakList.length,
+        });
+      }
 
-    const waveformSamples = PPG_CONFIG.waveformTailSamples;
-    const bufferLengthRaw = this.bufferRef?.getLength() ?? waveformSamples;
-    const waveformStart = Math.max(0, bufferLengthRaw - waveformSamples);
-
-    const filteredPeaks = rawPeakList
-      .map((peak) => Math.round(peak))
-      .filter((peak) => peak >= waveformStart && peak < bufferLengthRaw);
-
-    const peakList: number[] = filteredPeaks.map((peak) => peak - waveformStart);
-
-    if (rawPeakList.length > 0) {
-      console.log('[HeartPyWrapper] Peak list normalization (fixed)', {
-        bufferLength: bufferLengthRaw,
-        waveformStart,
-        originalPeaks: rawPeakList,
-        filteredPeaks,
-        normalizedPeaks: peakList,
-      });
-    }
-
-    return {
-      bpm,
-      confidence,
-      snrDb,
-      hasResult,
-      peakList,
-      quality: {
-        goodQuality,
-        signalQuality,
-        totalBeats,
-        rejectionRate,
-      },
-    };
+      return metrics;
     } catch (error) {
       console.error('[HeartPyWrapper] poll failed', error);
       // Re-throw with more context
@@ -308,6 +285,64 @@ export class HeartPyWrapper {
     const noiseRms = Math.max(1e-6, Math.min(rms, peakToPeak / 2));
     const snr = (peakToPeak / 2) / noiseRms;
     return 20 * Math.log10(Math.max(snr, 1e-6));
+  }
+
+  private normalizePeaks(rawPeaks: number[]): number[] {
+    if (!Array.isArray(rawPeaks) || rawPeaks.length === 0) {
+      return [];
+    }
+
+    const sanitizedPeaks = rawPeaks
+      .filter((peak): peak is number => typeof peak === 'number' && Number.isFinite(peak))
+      .map((peak) => Math.round(peak));
+
+    if (sanitizedPeaks.length === 0) {
+      return [];
+    }
+
+    const ringBuffer = this.bufferRef;
+    if (!ringBuffer) {
+      return sanitizedPeaks.filter((peak) => peak >= 0);
+    }
+
+    const bufferLength = ringBuffer.getLength();
+    if (bufferLength <= 0) {
+      return [];
+    }
+
+    const windowSize = PPG_CONFIG.waveformTailSamples;
+    const windowStart = Math.max(0, bufferLength - windowSize);
+    const windowEnd = bufferLength;
+
+    const filtered = sanitizedPeaks.filter(
+      (peak) => peak >= windowStart && peak < windowEnd,
+    );
+
+    if (filtered.length === 0) {
+      if (PPG_CONFIG.debug.enabled) {
+        console.log('[HeartPyWrapper] Peak normalization filtered all peaks', {
+          bufferLength,
+          windowSize,
+          windowStart,
+          sanitizedPeaks,
+        });
+      }
+      return [];
+    }
+
+    const normalized = filtered.map((peak) => peak - windowStart);
+
+    if (PPG_CONFIG.debug.enabled) {
+      console.log('[HeartPyWrapper] Peak normalization result', {
+        bufferLength,
+        windowStart,
+        rawPeaks,
+        filtered,
+        normalized,
+      });
+    }
+
+    return normalized;
   }
 
   async reset(): Promise<void> {

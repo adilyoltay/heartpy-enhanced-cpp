@@ -10,6 +10,7 @@ export const PPG_CONFIG = {
   analysisWindow: 150,          // samples (~5 s @ 30 Hz)
   ringBufferSize: 450,          // analyzer/history buffer length
   waveformTailSamples: 150,      // UI waveform tail displayed
+  expectedBpm: 75,              // average BPM used for segment rejection tuning
 
   // Reliability & gating
   reliabilityThreshold: 0.6,
