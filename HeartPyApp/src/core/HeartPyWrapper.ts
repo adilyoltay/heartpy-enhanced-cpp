@@ -403,7 +403,9 @@ export class HeartPyWrapper {
 
     const normalized = filtered.map((peak) => {
       if (bufferLength >= windowSize) {
-        return peak - windowStart; // Standard normalization
+        // P0 FIX: Use processingWindowStart for accurate peak positioning
+        const processingWindowStart = Math.max(0, bufferLength - PPG_CONFIG.analysisWindow);
+        return peak - processingWindowStart; // Accurate normalization using processing window
       } else {
         return peak; // Early detection - no offset needed
       }

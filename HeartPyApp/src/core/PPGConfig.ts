@@ -25,7 +25,7 @@ export const PPG_CONFIG = {
   agcGainMax: 20,
 
   // Analyzer warm-up / batching
-  minSamplesBeforePollSec: 1.5,
+  minSamplesBeforePollSec: 6.0, // P0 FIX: Increased from 1.5s to 6s for BPM stability
   microBatchSamples: 16,
   microBatchLatencyMs: 150,
 
