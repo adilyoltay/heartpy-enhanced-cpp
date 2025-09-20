@@ -70,14 +70,14 @@ export class HeartPyWrapper {
       const windowSeconds = windowSamples / sampleRate;
       const expectedBeatsInWindow = (PPG_CONFIG.expectedBpm / 60) * windowSeconds;
 
-      // FIXED: Segment rejection should be BPM-based, not time-based
-      // Use fixed beats instead of time-based calculation
-      const segmentRejectWindowBeats = Math.max(4, Math.round(PPG_CONFIG.expectedBpm / 60 * 3)); // 3 seconds worth of beats
+      // FIXED: Use actual window duration (5 seconds) for segment rejection
+      const rejectionWindowSeconds = PPG_CONFIG.analysis.analysisWindow / 30; // Convert samples to seconds (150/30=5s)
+      const segmentRejectWindowBeats = Math.max(4, Math.round(PPG_CONFIG.expectedBpm / 60 * rejectionWindowSeconds));
       const segmentRejectMaxRejects = Math.max(2, Math.floor(segmentRejectWindowBeats * 0.3)); // 30% rejection rate
-      
+
       // CRITICAL: Configure Welch window to match our analysis window
       const welchConfig = {
-        wsizeSec: windowSeconds, // Use actual window size (3s for 90 samples at 30fps)
+        wsizeSec: windowSeconds, // Use actual window size (5s for 150 samples at 30fps)
         nfft: Math.max(64, Math.pow(2, Math.ceil(Math.log2(windowSeconds * sampleRate)))), // Power of 2, minimum 64
         overlap: 0.5, // 50% overlap for smoother PSD
       };
