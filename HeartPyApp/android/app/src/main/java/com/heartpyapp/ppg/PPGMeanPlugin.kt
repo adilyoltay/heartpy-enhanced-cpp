@@ -1,10 +1,19 @@
 package com.heartpyapp.ppg
 
 import android.media.Image
+import android.util.Log
 import com.mrousavy.camera.frameprocessors.Frame
 import com.mrousavy.camera.frameprocessors.FrameProcessorPlugin
 import com.mrousavy.camera.frameprocessors.FrameProcessorPluginRegistry
 import java.nio.ByteBuffer
+import java.util.Locale
+
+private const val DEFAULT_TARGET_RMS = 0.02
+private const val DEFAULT_ALPHA_RMS = 0.05
+private const val DEFAULT_ALPHA_GAIN = 0.1
+private const val DEFAULT_GAIN_MIN = 0.5
+private const val DEFAULT_GAIN_MAX = 20.0
+private const val MIN_RMS_FRACTION = 0.1
 import com.heartpy.HeartPyModule
 
 /**
@@ -22,6 +31,9 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
   private val yHist = DoubleArray(HIST_N)
   private val vHist = DoubleArray(HIST_N)
   private var dcMean = Double.NaN
+  private var signalDc = Double.NaN
+  private var agcRms = 0.0
+  private var agcGain = 1.0
   private var histPos = 0
   private var histCount = 0
   override fun callback(frame: Frame, params: Map<String, Any?>?): Any? {
@@ -167,6 +179,7 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
         rHist[histPos] = Ragg; gHist[histPos] = Gagg; bHist[histPos] = Bagg; yHist[histPos] = Yagg; vHist[histPos] = resultMean
         histPos = (histPos + 1) % HIST_N
         if (histCount < HIST_N) histCount++
+        if (histCount < 8) signalDc = Double.NaN
       }
 
       // Compute out sample
@@ -246,6 +259,7 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
 
       var windowMean = resultMean
       var temporalScore = 0.2
+      var temporalStd = 0.0
       if (histCount >= 6) {
         val window = kotlin.math.min(histCount, 30)
         var meanHist = 0.0
@@ -261,8 +275,8 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
           val d = vHist[idx] - meanHist
           varHist += d * d
         }
-        val stdHist = kotlin.math.sqrt(varHist / kotlin.math.max(1, window - 1).toDouble())
-        temporalScore = (stdHist / 6.0).coerceIn(0.0, 1.0)
+        temporalStd = kotlin.math.sqrt(varHist / kotlin.math.max(1, window - 1).toDouble())
+        temporalScore = (temporalStd / 6.0).coerceIn(0.0, 1.0)
       }
       if (!temporalScore.isFinite()) temporalScore = 0.0
       val amplitudeScore = (chromAmp / 35.0).coerceIn(0.0, 1.0)
@@ -319,8 +333,16 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       val alphaDc = if (histCount >= 16) 0.03 else 0.06
       val nextDc = if (windowMean.isFinite()) prevDc + alphaDc * (windowMean - prevDc) else prevDc
       dcMean = nextDc
-      val meanComponent = if (resultMean.isFinite() && nextDc.isFinite()) ((resultMean - nextDc) / 120.0).coerceIn(-1.2, 1.2) else Double.NaN
-      val chromComponent = if (chromVal.isFinite()) ((chromVal - 128.0) / 160.0).coerceIn(-1.2, 1.2) else Double.NaN
+      val targetStdCounts = 12.0
+      val temporalBase = if (temporalStd.isFinite() && temporalStd > 0.0) temporalStd else 1.0
+      val gainMean = (targetStdCounts / temporalBase).coerceIn(1.0, 6.0)
+      val meanDenominator = kotlin.math.max(10.0, 60.0 / gainMean)
+      val meanComponent = if (resultMean.isFinite() && nextDc.isFinite()) ((resultMean - nextDc) / meanDenominator).coerceIn(-1.2, 1.2) else Double.NaN
+
+      val chromBase = if (chromAmp.isFinite() && chromAmp > 0.0) chromAmp else 1.0
+      val chromGain = (18.0 / chromBase).coerceIn(1.0, 6.0)
+      val chromDenominator = kotlin.math.max(15.0, 100.0 / chromGain)
+      val chromComponent = if (chromVal.isFinite()) ((chromVal - 128.0) / chromDenominator).coerceIn(-1.2, 1.2) else Double.NaN
       val pushRaw = when {
         blendUsed -> {
           val mc = if (meanComponent.isFinite()) meanComponent else 0.0
@@ -330,17 +352,53 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
         mode == "chrom" || mode == "pos" -> chromComponent
         else -> meanComponent
       }
+      val enableAgc = (params?.get("enableAgc") as? Boolean) ?: true
+      val targetRms = (params?.get("targetRms") as? Number)?.toDouble() ?: DEFAULT_TARGET_RMS
+      val alphaRms = (params?.get("alphaRms") as? Number)?.toDouble() ?: DEFAULT_ALPHA_RMS
+      val alphaGain = (params?.get("alphaGain") as? Number)?.toDouble() ?: DEFAULT_ALPHA_GAIN
+      val gainMin = (params?.get("gainMin") as? Number)?.toDouble() ?: DEFAULT_GAIN_MIN
+      val gainMax = (params?.get("gainMax") as? Number)?.toDouble() ?: DEFAULT_GAIN_MAX
+      val minRms = kotlin.math.max(targetRms * MIN_RMS_FRACTION, 0.001)
+
       var finalSample = pushRaw
       if (!finalSample.isFinite()) finalSample = Double.NaN
-      var confidenceOut = outConf.coerceIn(0.0, 1.0)
-      val amplitudeGate = (spatialGate * dynamicMix).coerceIn(0.0, 1.0)
-      if (amplitudeGate < 0.05) confidenceOut = kotlin.math.min(confidenceOut, amplitudeGate * 0.8)
-      val absSample = if (finalSample.isFinite()) kotlin.math.abs(finalSample) else 0.0
-      if (absSample < 0.01) confidenceOut *= absSample * 50.0
-      
-      // FIXED: Don't drop samples during warm-up, let HeartPy decide quality
-      // Only drop samples for truly invalid conditions (NaN, extremely low amplitude)
-      val pushSample = if (!finalSample.isFinite() || amplitudeGate < 0.01) Double.NaN else finalSample.coerceIn(-1.2, 1.2)
+
+      var processedSample = finalSample
+      var confidenceOut = 0.0
+      if (processedSample.isFinite()) {
+        signalDc = if (signalDc.isFinite()) signalDc + 0.02 * (processedSample - signalDc) else processedSample
+        val highPassed = processedSample - signalDc
+
+        var agcSample = highPassed
+        if (enableAgc) {
+          val prevRmsSq = if (agcRms.isFinite()) agcRms * agcRms else kotlin.math.abs(highPassed)
+          val newRmsSq = (1.0 - alphaRms) * prevRmsSq + alphaRms * highPassed * highPassed
+          agcRms = kotlin.math.sqrt(kotlin.math.max(newRmsSq, 0.0))
+          val desiredGain = targetRms / kotlin.math.max(agcRms, minRms)
+          val clampedGain = desiredGain.coerceIn(gainMin, gainMax)
+          agcGain = if (agcGain.isFinite()) (1.0 - alphaGain) * agcGain + alphaGain * clampedGain else clampedGain
+          agcSample = highPassed * agcGain
+        }
+
+        processedSample = agcSample.coerceIn(-0.6, 0.6)
+        confidenceOut = kotlin.math.min(1.0, kotlin.math.abs(processedSample) / targetRms)
+      }
+
+      val pushSample = if (processedSample.isFinite()) processedSample else Double.NaN
+      val finalConfidence = confidenceOut.coerceIn(0.0, 1.0)
+
+      if (histCount % 30 == 0) {
+        Log.d(
+          "PPGMeanPlugin",
+          String.format(
+            java.util.Locale.US,
+            "AGC rms=%.4f gain=%.2f sample=%.4f",
+            agcRms,
+            agcGain,
+            processedSample
+          )
+        )
+      }
 
       // Publish sample + ts (seconds) to native buffer
       if (pushSample.isFinite()) {
@@ -355,13 +413,13 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
           
           // Debug: Her 30 frame'de bir timestamp log'la
           if (histCount % 30 == 0) {
-            android.util.Log.d("PPGPlugin", "PPG value: $pushSample, ts: $tsSec, conf: $confidenceOut")
+            Log.d("PPGPlugin", "PPG value: $pushSample, ts: $tsSec, conf: $finalConfidence")
           }
           
           HeartPyModule.addPPGSampleWithTs(pushSample, tsSec)
         } catch (_: Throwable) {}
       }
-      try { HeartPyModule.addPPGSampleConfidence(confidenceOut) } catch (_: Throwable) {}
+      try { HeartPyModule.addPPGSampleConfidence(finalConfidence) } catch (_: Throwable) {}
       pushSample
     } catch (t: Throwable) {
       java.lang.Double.NaN

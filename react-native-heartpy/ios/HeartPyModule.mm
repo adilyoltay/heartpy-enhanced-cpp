@@ -734,6 +734,23 @@ RCT_EXPORT_METHOD(rtCreate:(double)fs
     }
 }
 
+RCT_EXPORT_METHOD(rtSetWindow:(nonnull NSNumber*)handle
+                  windowSeconds:(nonnull NSNumber*)windowSeconds
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    @try {
+        if (handle == nil || windowSeconds == nil) {
+            reject(@"rt_set_window_invalid_args", @"Invalid handle or windowSeconds", nil);
+            return;
+        }
+        hp_rt_set_window((void*)[handle longValue], [windowSeconds doubleValue]);
+        resolve(nil);
+    } @catch (NSException* e) {
+        reject(@"rt_set_window_exception", e.reason, nil);
+    }
+}
+
 // Push a chunk of samples (number[])
 RCT_EXPORT_METHOD(rtPush:(nonnull NSNumber*)handle
                   samples:(NSArray<NSNumber*>*)samples

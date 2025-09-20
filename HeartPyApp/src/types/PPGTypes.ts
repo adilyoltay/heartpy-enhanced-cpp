@@ -13,11 +13,13 @@ export interface PPGMetrics {
   readonly bpm: number;
   readonly confidence: number;
   readonly snrDb: number;
+  readonly hasResult: boolean;
   readonly peakList: readonly number[];
   readonly quality: {
     readonly goodQuality: boolean;
     readonly signalQuality: PPGQuality;
     readonly totalBeats: number;
+    readonly rejectionRate?: number;
   };
 }
 

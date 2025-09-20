@@ -66,8 +66,10 @@ export class HeartPyWrapper {
       RealtimeAnalyzer.setConfig({jsiEnabled: false, debug: true});
       
       console.log('[HeartPyWrapper] Creating RealtimeAnalyzer...');
-      const windowSeconds = PPG_CONFIG.analysis.analysisWindow / sampleRate;
-      const segmentWindowBeats = Math.max(4, Math.round((windowSeconds * 80) / 60));
+      const windowSamples = PPG_CONFIG.analysisWindow;
+      const windowSeconds = windowSamples / sampleRate;
+      const segmentRejectWindowBeats = Math.max(4, Math.round(windowSeconds));
+      const segmentRejectMaxRejects = Math.max(0, segmentRejectWindowBeats - 1);
       
       // CRITICAL: Configure Welch window to match our analysis window
       const welchConfig = {
@@ -77,12 +79,12 @@ export class HeartPyWrapper {
       };
       
       this.analyzer = await RealtimeAnalyzer.create(sampleRate, {
-        bandpass: {lowHz: 0.5, highHz: 3.5, order: 2},
-        peak: {refractoryMs: 280, bpmMin: 40, bpmMax: 180},
+        bandpass: {lowHz: 0.3, highHz: 4.5, order: 2}, // Even wider bandpass for better signal capture
+        peak: {refractoryMs: 150, bpmMin: 40, bpmMax: 180}, // Further reduced refractoryMs for maximum sensitivity
         quality: {
           rejectSegmentwise: true,
-          segmentRejectWindowBeats: segmentWindowBeats,
-          segmentRejectMaxRejects: 2,
+          segmentRejectWindowBeats,
+          segmentRejectMaxRejects,
         },
         windowSeconds,
         welch: welchConfig, // Add Welch configuration
@@ -166,12 +168,16 @@ export class HeartPyWrapper {
     const totalBeats =
       typeof quality.totalBeats === 'number' ? quality.totalBeats : 0;
     const rejectionRate =
-      typeof quality.rejectionRate === 'number' ? quality.rejectionRate : 1;
+      typeof quality.rejectionRate === 'number' ? quality.rejectionRate : 0;
 
     // PRIORITIZE native confidence/snrDb from HeartPy C++ core
     const nativeConfidence = (quality as any).confidence;
     const nativeSnrDb = (quality as any).snrDb;
-    
+
+    let snrDb = typeof nativeSnrDb === 'number' && nativeSnrDb > 0
+      ? nativeSnrDb
+      : null;
+
     // DEBUG: Log native vs synthetic values
     if (PPG_CONFIG.debug.enabled) {
       console.log('[HeartPyWrapper] Native metrics:', {
@@ -187,6 +193,9 @@ export class HeartPyWrapper {
     if (typeof nativeConfidence === 'number') {
       // Native confidence is available (including 0 for warm-up)
       confidence = nativeConfidence;
+      if (confidence <= 0.0 && this.lastCameraConfidence > 0.05) {
+        confidence = Math.max(confidence, this.lastCameraConfidence * 0.5);
+      }
     } else if (this.lastCameraConfidence > 0.1) {
       // Use camera confidence only when native confidence is undefined/NaN
       confidence = this.lastCameraConfidence;
@@ -195,40 +204,50 @@ export class HeartPyWrapper {
       confidence = goodQuality ? Math.max(0.7, 1 - rejectionRate) : Math.min(0.3, 1 - rejectionRate);
     }
     
-    const snrDb = typeof nativeSnrDb === 'number' && nativeSnrDb > 0 ? nativeSnrDb : 
-      (goodQuality && typeof result.totalPower === 'number' && typeof result.hf === 'number' && typeof result.lf === 'number' && 
-       result.totalPower > 0 && result.hf >= 0 && result.lf >= 0 ? 
-        (() => {
-          const calculatedSnr = Math.log10(Math.max(result.hf + result.lf, 0.01) / Math.max(result.totalPower - result.hf - result.lf, 0.01)) * 10;
-          return Number.isFinite(calculatedSnr) ? calculatedSnr : -10;
-        })() : -10);
+    if (snrDb == null && goodQuality && typeof result.totalPower === 'number' && typeof result.hf === 'number' && typeof result.lf === 'number' && result.totalPower > 0) {
+      const calculatedSnr = Math.log10(Math.max(result.hf + result.lf, 0.01) / Math.max(result.totalPower - result.hf - result.lf, 0.01)) * 10;
+      if (Number.isFinite(calculatedSnr)) snrDb = calculatedSnr;
+    }
+
+    if (snrDb == null) {
+      const tail = this.getAnalysisTail();
+      if (tail) {
+        snrDb = this.computeSnrFallbackDb(tail);
+      }
+    }
+    if (snrDb == null) snrDb = -10;
+
+    const hasResult = result.hasResult === true;
 
     let signalQuality: 'good' | 'poor' | 'unknown' = 'unknown';
-    if (goodQuality && confidence > 0.6) {
+    if (goodQuality && confidence >= 0.35) { // Require moderate confidence to mark as good
       signalQuality = 'good';
-    } else if (confidence < 0.3 || snrDb < -5) {
+    } else if (confidence < 0.15 || snrDb < -8) { // Flag poor when confidence collapses or SNR very low
       signalQuality = 'poor';
     }
 
-    // CRITICAL: Filter peak list based on actual ring buffer state
-    let filteredPeakList: number[] = [];
-    if (this.bufferRef && result.peakList && result.peakList.length > 0) {
-      const actualBufferLength = this.bufferRef.getLength();
-      const waveformLength = PPG_CONFIG.ui.waveformSamples; // 150 samples
-      const waveformStart = Math.max(0, actualBufferLength - waveformLength);
-      
-      // Filter peaks within the current waveform window and convert to relative indices
-      filteredPeakList = result.peakList
-        .filter(peakIndex => peakIndex >= waveformStart && peakIndex < actualBufferLength)
-        .map(peakIndex => peakIndex - waveformStart); // Convert to relative index (0-149)
-      
-      console.log('[HeartPyWrapper] Peak list filtering (real buffer)', {
-        originalPeaks: result.peakList.length,
-        filteredPeaks: filteredPeakList.length,
-        actualBufferLength,
+    // Normalize HeartPy peak indices from analyzer ring buffer into the UI waveform window
+    const rawPeakList: number[] = Array.isArray(result.peakList)
+      ? result.peakList.filter((peak): peak is number => typeof peak === 'number' && Number.isFinite(peak))
+      : [];
+
+    const waveformSamples = PPG_CONFIG.waveformTailSamples;
+    const bufferLengthRaw = this.bufferRef?.getLength() ?? waveformSamples;
+    const waveformStart = Math.max(0, bufferLengthRaw - waveformSamples);
+
+    const filteredPeaks = rawPeakList
+      .map((peak) => Math.round(peak))
+      .filter((peak) => peak >= waveformStart && peak < bufferLengthRaw);
+
+    const peakList: number[] = filteredPeaks.map((peak) => peak - waveformStart);
+
+    if (rawPeakList.length > 0) {
+      console.log('[HeartPyWrapper] Peak list normalization (fixed)', {
+        bufferLength: bufferLengthRaw,
         waveformStart,
-        waveformLength,
-        relativePeaks: filteredPeakList,
+        originalPeaks: rawPeakList,
+        filteredPeaks,
+        normalizedPeaks: peakList,
       });
     }
 
@@ -236,11 +255,13 @@ export class HeartPyWrapper {
       bpm,
       confidence,
       snrDb,
-      peakList: filteredPeakList,
+      hasResult,
+      peakList,
       quality: {
         goodQuality,
         signalQuality,
         totalBeats,
+        rejectionRate,
       },
     };
     } catch (error) {
@@ -261,6 +282,34 @@ export class HeartPyWrapper {
     this.analyzer = null;
   }
 
+  private getAnalysisTail(): Float32Array | null {
+    if (!this.bufferRef) return null;
+    const data = this.bufferRef.getAll();
+    if (data.length === 0) return null;
+    const window = PPG_CONFIG.analysisWindow;
+    const tail = data.slice(-window);
+    if (tail.length === 0) return null;
+    return Float32Array.from(tail);
+  }
+
+  private computeSnrFallbackDb(window: Float32Array): number {
+    if (window.length < 16) return -10;
+    let min = Infinity;
+    let max = -Infinity;
+    let sumSq = 0;
+    for (let i = 0; i < window.length; i += 1) {
+      const v = window[i];
+      if (v < min) min = v;
+      if (v > max) max = v;
+      sumSq += v * v;
+    }
+    const peakToPeak = max - min;
+    const rms = Math.sqrt(sumSq / window.length);
+    const noiseRms = Math.max(1e-6, Math.min(rms, peakToPeak / 2));
+    const snr = (peakToPeak / 2) / noiseRms;
+    return 20 * Math.log10(Math.max(snr, 1e-6));
+  }
+
   async reset(): Promise<void> {
     if (!this.analyzer) {
       console.warn('[HeartPyWrapper] Cannot reset - analyzer not initialized');
@@ -272,7 +321,7 @@ export class HeartPyWrapper {
       // Note: RealtimeAnalyzer doesn't have a direct reset method
       // We'll recreate it instead
       await this.destroy();
-      await this.create(PPG_CONFIG.analysis.sampleRate);
+      await this.create(PPG_CONFIG.sampleRate);
       console.log('[HeartPyWrapper] Analyzer session reset successfully');
     } catch (error) {
       console.error('[HeartPyWrapper] Reset failed:', error);

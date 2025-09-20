@@ -19,31 +19,53 @@ export function PPGDisplay({
   onStart,
   onStop,
 }: Props): JSX.Element {
-  // BPM Quality Gating: rely on HeartPy goodQuality + SNR, require moderate confidence (~0.5)
-  const isBpmReliable = metrics &&
-    metrics.quality.totalBeats >= 8 &&
-    metrics.quality.goodQuality === true &&
-    metrics.snrDb > 8 &&
-    metrics.confidence >= 0.5;
+  const totalBeats = metrics?.quality.totalBeats ?? 0;
+  const snrDb = metrics?.snrDb ?? -10;
+  const reliability = metrics?.confidence ?? 0;
+  const hasResult = metrics?.hasResult ?? false;
+  const isReliable = hasResult && reliability >= PPG_CONFIG.reliabilityThreshold;
+
+  const isWarmingUp = metrics && !isReliable && totalBeats < 4;
   
-  // Warm-up state: HeartPy is still calculating SNR/confidence
-  const isWarmingUp = metrics && 
-    metrics.quality.totalBeats < 8 && 
-    metrics.snrDb <= 0 && 
-    metrics.confidence <= 0.1;
-  
-  const bpm = isBpmReliable ? metrics.bpm.toFixed(1) : '--';
-  const confidence = metrics ? (metrics.confidence * 100).toFixed(0) : '--';
-  const snr = metrics ? metrics.snrDb.toFixed(1) : '--';
+  const bpmDisplay = isReliable && metrics ? metrics.bpm.toFixed(1) : '--';
+  const reliabilityPct = metrics ? (reliability * 100).toFixed(0) : '--';
+  const snr = metrics ? snrDb.toFixed(1) : '--';
   const quality = metrics ? metrics.quality.signalQuality : 'unknown';
+  
+  // Signal Quality Color Helpers
+  const getConfidenceColor = (confidence?: number | null): string => {
+    if (confidence == null || Number.isNaN(confidence)) return '#666';
+    if (confidence >= 0.7) return '#4CAF50'; // Green - Excellent
+    if (confidence >= 0.5) return '#FF9800'; // Orange - Good
+    if (confidence >= 0.3) return '#FF5722'; // Red-Orange - Fair
+    return '#F44336'; // Red - Poor
+  };
+  
+  const getSNRColor = (snrDb?: number | null): string => {
+    if (snrDb == null || !Number.isFinite(snrDb)) return '#666';
+    if (snrDb >= 15) return '#4CAF50'; // Green - Excellent
+    if (snrDb >= 10) return '#8BC34A'; // Light Green - Good
+    if (snrDb >= 5) return '#FF9800'; // Orange - Fair
+    return '#F44336'; // Red - Poor
+  };
+  
+  const getQualityColor = (quality: string): string => {
+    switch (quality.toLowerCase()) {
+      case 'excellent': return '#4CAF50';
+      case 'good': return '#8BC34A';
+      case 'fair': return '#FF9800';
+      case 'poor': return '#F44336';
+      default: return '#666';
+    }
+  };
   
   // Pick detection and haptic feedback
   const lastBpmRef = useRef<number | null>(null);
   const lastPickTimeRef = useRef<number>(0);
   
   useEffect(() => {
-    // CRITICAL: Only trigger haptic when BPM is reliable AND signal quality is excellent
-    if (metrics && isBpmReliable && state === 'running' && metrics.snrDb > 8) {
+    // CRITICAL: Only trigger haptic when BPM is reliable AND signal quality is acceptable
+    if (metrics && isReliable && state === 'running' && snrDb > PPG_CONFIG.snrDbThresholdUI) {
       const currentBpm = metrics.bpm;
       const currentTime = Date.now();
       
@@ -59,17 +81,17 @@ export function PPGDisplay({
             ignoreAndroidSystemSettings: false,
           });
           lastPickTimeRef.current = currentTime;
-          console.log('💓 Heart beat detected - BPM:', currentBpm, 'SNR:', metrics.snrDb.toFixed(1), 'Haptic triggered');
+          console.log('💓 Heart beat detected - BPM:', currentBpm, 'SNR:', snrDb.toFixed(1), 'Haptic triggered');
         }
       }
       
       lastBpmRef.current = currentBpm;
-    } else if (metrics && !isBpmReliable) {
+    } else if (metrics && !isReliable) {
       // Reset haptic tracking when BPM becomes unreliable
       lastBpmRef.current = null;
-      console.log('💓 Haptic disabled - BPM unreliable (confidence:', metrics.confidence.toFixed(2), 'SNR:', metrics.snrDb.toFixed(1), ')');
+      console.log('💓 Haptic disabled - BPM unreliable (reliability:', reliability.toFixed(2), 'SNR:', snrDb.toFixed(1), ')');
     }
-  }, [metrics, state, isBpmReliable]);
+  }, [metrics, state, isReliable, snrDb, reliability]);
   
   // Use HeartPy peakList directly (no duplication)
   const pickPoints = metrics?.peakList || [];
@@ -77,7 +99,7 @@ export function PPGDisplay({
   return (
     <View style={styles.container}>
       {/* Poor Signal Alert */}
-      {state === 'running' && metrics && !isBpmReliable && (
+      {state === 'running' && metrics && !isReliable && (
         <View style={styles.poorSignalAlert}>
           <Text style={styles.poorSignalText}>
             ⚠️ Sinyal kalitesi düşük! Parmak pozisyonunu kontrol edin.
@@ -86,19 +108,19 @@ export function PPGDisplay({
       )}
       
       {/* Status Message */}
-      {state === 'running' && !isBpmReliable && (
+      {state === 'running' && !isReliable && (
         <View style={styles.statusMessage}>
           <Text style={styles.statusText}>
             {isWarmingUp
-              ? `HeartPy hazırlanıyor... (${metrics?.quality.totalBeats || 0}/8 beat)`
-              : metrics && metrics.quality.totalBeats < 8 
-              ? `Ölçüm hazırlanıyor... (${metrics.quality.totalBeats}/8 kalp atışı)`
+              ? `HeartPy hazırlanıyor... (${metrics?.quality.totalBeats || 0}/4 beat)`
+              : metrics && metrics.quality.totalBeats < 4 
+              ? `Ölçüm hazırlanıyor... (${metrics.quality.totalBeats}/4 kalp atışı)`
               : metrics && !metrics.quality.goodQuality
               ? `Kalite kontrolü başarısız...`
-              : metrics && metrics.snrDb <= 8
-              ? `SNR çok düşük... (${metrics.snrDb.toFixed(1)} dB)`
-              : metrics && metrics.confidence < 0.5
-              ? `Sinyal kalitesi düşük... (${(metrics.confidence * 100).toFixed(0)}%)`
+              : metrics && snrDb <= PPG_CONFIG.snrDbThresholdUI
+              ? `SNR çok düşük... (${snrDb.toFixed(1)} dB)`
+              : reliability < PPG_CONFIG.reliabilityThreshold
+              ? `Güven skoru düşük... (${reliabilityPct}%)`
               : 'Ölçüm hazırlanıyor...'
             }
           </Text>
@@ -106,10 +128,10 @@ export function PPGDisplay({
       )}
       
       <View style={styles.metricsRow}>
-        <Metric label="BPM" value={bpm} suffix="" />
-        <Metric label="Güven" value={confidence} suffix="%" />
-        <Metric label="SNR" value={snr} suffix="dB" />
-        <Metric label="Kalite" value={quality.toUpperCase()} suffix="" />
+        <Metric label="BPM" value={bpmDisplay} suffix="" />
+        <Metric label="Güven" value={reliabilityPct} suffix="%" color={getConfidenceColor(reliability)} />
+        <Metric label="SNR" value={snr} suffix="dB" color={getSNRColor(snrDb)} />
+        <Metric label="Kalite" value={quality.toUpperCase()} suffix="" color={getQualityColor(quality)} />
       </View>
 
       <View style={styles.waveform}>
@@ -117,7 +139,7 @@ export function PPGDisplay({
           <Text style={styles.waveformEmpty}>Örnek bekleniyor…</Text>
         ) : (() => {
           // OPTIMIZATION: Precompute min/max to avoid O(n²) in map
-          const waveformSlice = waveform.slice(-PPG_CONFIG.ui.waveformSamples);
+          const waveformSlice = waveform.slice(-PPG_CONFIG.waveformTailSamples);
           const min = Math.min(...waveformSlice);
           const max = Math.max(...waveformSlice);
           const span = max - min || 1;
@@ -174,15 +196,17 @@ function Metric({
   label,
   value,
   suffix,
+  color,
 }: {
   label: string;
   value: string;
   suffix: string;
+  color?: string;
 }) {
   return (
     <View style={styles.metricBox}>
       <Text style={styles.metricLabel}>{label}</Text>
-      <Text style={styles.metricValue}>
+      <Text style={[styles.metricValue, color ? { color } : undefined]}>
         {value}
         {suffix ? <Text style={styles.metricSuffix}> {suffix}</Text> : null}
       </Text>

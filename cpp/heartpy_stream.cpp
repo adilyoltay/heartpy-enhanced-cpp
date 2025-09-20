@@ -187,6 +187,7 @@ RealtimeAnalyzer::RealtimeAnalyzer(double fs, const Options& opt)
     if (windowSec_ < 1.0) windowSec_ = 10.0;
     if (windowSec_ > MAX_WINDOW_SEC) windowSec_ = MAX_WINDOW_SEC;
     if (updateSec_ <= 0.0) updateSec_ = 1.0;
+    updateSec_ = std::clamp(windowSec_ * 0.08, 0.2, 0.5);
     // Reserve with safe size arithmetic
     size_t margin = 8 * static_cast<size_t>(std::ceil(fs_));
     size_t cap = safeSizeMul(windowSec_, fs_, SIZE_MAX / 4);
@@ -196,6 +197,7 @@ RealtimeAnalyzer::RealtimeAnalyzer(double fs, const Options& opt)
     effectiveFs_ = fs_;
     firstTsApprox_ = 0.0;
     lastTs_ = 0.0;
+    warmupStartTs_ = std::numeric_limits<double>::quiet_NaN();
     // Streaming filter design
     if (opt_.lowHz > 0.0 || opt_.highHz > 0.0) {
         bool useD = opt_.highPrecision || opt_.deterministic;
@@ -217,7 +219,18 @@ RealtimeAnalyzer::RealtimeAnalyzer(double fs, const Options& opt)
 void RealtimeAnalyzer::setWindowSeconds(double sec) {
     std::lock_guard<std::mutex> lock(dataMutex_);
     double clamped = std::max(1.0, std::min(MAX_WINDOW_SEC, sec));
-    windowSec_ = clamped;
+    if (clamped != windowSec_) {
+        windowSec_ = clamped;
+        // Restart warm-up timing so confidence re-gates after substantive window changes
+        if ((useRing_ && ringSignal_.size() > 0) || (!useRing_ && !signal_.empty())) {
+            warmupStartTs_ = lastTs_;
+        } else {
+            warmupStartTs_ = std::numeric_limits<double>::quiet_NaN();
+        }
+    } else {
+        windowSec_ = clamped;
+    }
+    updateSec_ = std::clamp(windowSec_ * 0.08, 0.2, 0.5);
     trimToWindow();
 }
 
@@ -236,8 +249,13 @@ void RealtimeAnalyzer::append(const float* x, size_t n) {
     if (filt_.size() < prevLen) filt_.resize(prevLen);
     if (signal_.size() > filt_.size()) filt_.resize(signal_.size());
     // timebase (nominal fs)
-    if (prevLen == 0) { firstTsApprox_ = 0.0; lastTs_ = static_cast<double>(n) / fs_; }
-    else lastTs_ += static_cast<double>(n) / fs_;
+    if (prevLen == 0) {
+        firstTsApprox_ = 0.0;
+        lastTs_ = static_cast<double>(n) / fs_;
+        if (!std::isfinite(warmupStartTs_)) warmupStartTs_ = 0.0;
+    } else {
+        lastTs_ += static_cast<double>(n) / fs_;
+    }
     // Process new portion
     for (size_t i = prevLen; i < newLen; ++i) {
         float s = signal_[i];
@@ -525,7 +543,10 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
         }
     }
     if (useRing_) {
-        if (ringFilt_.size() == 0) firstTsApprox_ = t0;
+        if (ringFilt_.size() == 0) {
+            firstTsApprox_ = t0;
+            if (!std::isfinite(warmupStartTs_)) warmupStartTs_ = t0;
+        }
         double lastSeenTs = lastTs_;
         for (size_t i = 0; i < n; ++i) {
             double ts = timestamps[i];
@@ -552,7 +573,10 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
         firstAbs_ = (totalAbs_ > ringFilt_.size()) ? (totalAbs_ - ringFilt_.size()) : 0;
         return;
     }
-    if (signal_.empty()) firstTsApprox_ = t0;
+    if (signal_.empty()) {
+        firstTsApprox_ = t0;
+        if (!std::isfinite(warmupStartTs_)) warmupStartTs_ = t0;
+    }
     lastTs_ = t1;
     // Process each incoming sample through the same path as append()
     const size_t prevLen = signal_.size();
@@ -1304,8 +1328,20 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
             if (doublingHintActive_ && hintStartTs_ > 0.0) activeSecs = std::max(activeSecs, lastTs_ - hintStartTs_);
             if (out.quality.rejectionRate < 0.03 && cv < 0.12 && activeSecs >= 8.0) conf = std::min(1.0, conf * 1.1);
         }
-        bool warmed2 = ((lastTs_ - firstTsApprox_) >= 15.0) || (out.rrList.size() >= 15);
-        if (!warmed2) conf = 0.0;
+        // Warm-up: scale confidence over shorter window aligned with analyzer size
+        double warmupSecTarget = std::clamp(windowSec_ * 2.0, 4.0, 10.0);
+        size_t warmupBeatsTarget = std::max<size_t>(4, static_cast<size_t>(std::ceil(windowSec_ * 1.5)));
+        double elapsed = std::isfinite(warmupStartTs_) ? std::max(0.0, lastTs_ - warmupStartTs_) : std::max(0.0, lastTs_ - firstTsApprox_);
+        double timeProgress = warmupSecTarget > 0.0 ? elapsed / warmupSecTarget : 1.0;
+        size_t beatsInWindow = 0;
+        if (!out.peakList.empty()) beatsInWindow = out.peakList.size();
+        else if (!lastPeaks_.empty()) beatsInWindow = lastPeaks_.size();
+        else if (!out.rrList.empty()) beatsInWindow = out.rrList.size() + 1;
+        double beatProgress = (warmupBeatsTarget > 0)
+            ? static_cast<double>(beatsInWindow) / static_cast<double>(warmupBeatsTarget)
+            : 1.0;
+        double warmProgress = std::clamp(std::max(timeProgress, beatProgress), 0.0, 1.0);
+        conf *= warmProgress;
         out.quality.confidence = std::max(0.0, std::min(1.0, conf));
     }
     out.quality.refractoryMsActive = lastRefMsActive_;
@@ -1675,8 +1711,19 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
         if (out.quality.rejectionRate < 0.03 && cv < 0.12 && activeSecs >= 8.0) conf = std::min(1.0, conf * 1.1);
     }
     // Warm-up gate: require >=15s or >=15 beats before trusting confidence
-    bool warmed = ((lastTs_ - firstTsApprox_) >= 15.0) || (out.rrList.size() >= 15);
-    if (!warmed) conf = 0.0;
+    double warmupSecTarget = std::clamp(windowSec_ * 2.0, 4.0, 10.0);
+    size_t warmupBeatsTarget = std::max<size_t>(4, static_cast<size_t>(std::ceil(windowSec_ * 1.5)));
+    double elapsed = std::isfinite(warmupStartTs_) ? std::max(0.0, lastTs_ - warmupStartTs_) : std::max(0.0, lastTs_ - firstTsApprox_);
+    double timeProgress = warmupSecTarget > 0.0 ? elapsed / warmupSecTarget : 1.0;
+    size_t beatsInWindow = 0;
+    if (!out.peakList.empty()) beatsInWindow = out.peakList.size();
+    else if (!lastPeaks_.empty()) beatsInWindow = lastPeaks_.size();
+    else if (!out.rrList.empty()) beatsInWindow = out.rrList.size() + 1;
+    double beatProgress = (warmupBeatsTarget > 0)
+        ? static_cast<double>(beatsInWindow) / static_cast<double>(warmupBeatsTarget)
+        : 1.0;
+    double warmProgress = std::clamp(std::max(timeProgress, beatProgress), 0.0, 1.0);
+    conf *= warmProgress;
     if (!std::isfinite(conf)) conf = 0.0;
     out.quality.confidence = std::max(0.0, std::min(1.0, conf));
 }

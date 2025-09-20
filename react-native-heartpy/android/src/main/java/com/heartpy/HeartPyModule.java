@@ -90,6 +90,7 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             int poincareMode,
             boolean pnnAsPercent
     );
+    private static native void rtSetWindowNative(long handle, double windowSeconds);
     private static native void rtPushNative(long handle, double[] samples, double t0);
     private static native void rtPushTsNative(long handle, double[] samples, double[] timestamps);
     private static native String rtPollNative(long handle);
@@ -670,6 +671,19 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             promise.resolve(h);
         } catch (Exception e) {
             promise.reject("HEARTPY_E900", e);
+        }
+    }
+
+    @ReactMethod
+    public void rtSetWindow(double handle, double windowSeconds, Promise promise) {
+        try {
+            final long h = (long) handle;
+            if (h == 0L) { promise.reject("rt_set_window_invalid_args", "Invalid or destroyed handle"); return; }
+            if (windowSeconds <= 0.0) { promise.reject("rt_set_window_invalid_args", "windowSeconds must be > 0"); return; }
+            rtSetWindowNative(h, windowSeconds);
+            promise.resolve(null);
+        } catch (Exception e) {
+            promise.reject("rt_set_window_error", e);
         }
     }
 

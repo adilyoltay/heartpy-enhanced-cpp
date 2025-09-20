@@ -62,6 +62,9 @@ export type HeartPyOptions = {
 
 	// Output controls
 	breathingAsBpm?: boolean;
+
+	// Realtime streaming controls
+	windowSeconds?: number;
 };
 
 export type QualityInfo = {
@@ -332,6 +335,23 @@ export async function rtDestroy(handle: number): Promise<void> {
     return Native.rtDestroy(handle);
 }
 
+export async function rtSetWindow(handle: number, windowSeconds: number): Promise<void> {
+    const { NativeModules } = require('react-native');
+    const Native: any = NativeModules?.HeartPyModule;
+    if (!Native?.rtSetWindow) throw new Error('HeartPyModule.rtSetWindow not available');
+    if (!handle) {
+        const e: any = new Error('Invalid or destroyed handle');
+        e.code = 'HEARTPY_E101';
+        throw e;
+    }
+    if (!(windowSeconds > 0)) {
+        const e: any = new Error('Invalid windowSeconds: must be > 0');
+        e.code = 'HEARTPY_E201';
+        throw e;
+    }
+    return Native.rtSetWindow(handle, windowSeconds);
+}
+
 // Timestamped push (NativeModules path)
 export async function rtPushTs(handle: number, samples: number[] | Float32Array, timestamps: number[] | Float64Array): Promise<void> {
     const { NativeModules } = require('react-native');
@@ -381,6 +401,13 @@ export class RealtimeAnalyzer {
                 const inst = new RealtimeAnalyzer(0);
                 inst.mode = 'jsi';
                 inst.jsiId = id | 0;
+                if (options?.windowSeconds != null) {
+                    try {
+                        await inst.setWindow(options.windowSeconds);
+                    } catch (e) {
+                        if (cfg.debug) console.warn('HeartPy: __hpRtSetWindow failed', e);
+                    }
+                }
                 if (cfg.debug) console.log('HeartPy: using JSI path');
                 return inst;
             } catch (e) {
@@ -391,8 +418,35 @@ export class RealtimeAnalyzer {
         }
 
         const h = await rtCreate(fs, options);
+        const inst = new RealtimeAnalyzer(h);
+        if (options?.windowSeconds != null) {
+            try {
+                await inst.setWindow(options.windowSeconds);
+            } catch (e) {
+                if (cfg.debug) console.warn('HeartPy: rtSetWindow failed', e);
+            }
+        }
         if (cfg.debug) console.log('HeartPy: using NativeModules path');
-        return new RealtimeAnalyzer(h);
+        return inst;
+    }
+
+    async setWindow(windowSeconds: number): Promise<void> {
+        if (!(windowSeconds > 0)) {
+            const e: any = new Error('Invalid windowSeconds: must be > 0');
+            e.code = 'HEARTPY_E201';
+            throw e;
+        }
+        if (this.mode === 'jsi') {
+            if (!this.jsiId) throw new Error('RealtimeAnalyzer destroyed');
+            const g: any = global as any;
+            if (typeof g.__hpRtSetWindow !== 'function') {
+                throw new Error('HeartPy JSI setWindow not available');
+            }
+            g.__hpRtSetWindow(this.jsiId, windowSeconds);
+            return;
+        }
+        if (!this.handle) throw new Error('RealtimeAnalyzer destroyed');
+        return rtSetWindow(this.handle, windowSeconds);
     }
 
     async push(samples: Float32Array | number[], t0?: number): Promise<void> {

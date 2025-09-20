@@ -289,6 +289,7 @@ static double dcMean = NAN;
 
   double windowMean = isfinite(Yagg) ? Yagg : mean;
   double temporalScore = 0.2;
+  double temporalStd = 0.0;
   if (histCount >= 6) {
     int window = MIN(histCount, 30);
     double meanHist = 0.0;
@@ -304,8 +305,8 @@ static double dcMean = NAN;
       double d = vHist[idx] - meanHist;
       varHist += d * d;
     }
-    double stdHist = sqrt(varHist / fmax(1, window - 1));
-    temporalScore = fmin(1.0, fmax(0.0, stdHist / 6.0));
+    temporalStd = sqrt(varHist / fmax(1, window - 1));
+    temporalScore = fmin(1.0, fmax(0.0, temporalStd / 6.0));
   }
   if (!isfinite(temporalScore) || temporalScore < 0.0) temporalScore = 0.0;
   double amplitudeScore = fmin(1.0, fmax(0.0, chromAmp / 35.0));
@@ -372,8 +373,27 @@ static double dcMean = NAN;
   
   double nextDc = isfinite(windowMean) ? prevDc + alphaDc * (windowMean - prevDc) : prevDc;
   dcMean = nextDc;
-  double meanComponent = (isfinite(mean) && isfinite(nextDc)) ? fmax(-1.2, fmin(1.2, (mean - nextDc) / 120.0)) : NAN;
-  double chromComponent = isfinite(chromVal) ? fmax(-1.2, fmin(1.2, (chromVal - 128.0) / 160.0)) : NAN;
+  const double targetStdCounts = 12.0;
+  double meanDenominator = 60.0;
+  if (isfinite(temporalStd) && temporalStd >= 0.0) {
+    double gain = targetStdCounts / fmax(temporalStd, 1.0);
+    gain = fmin(6.0, fmax(1.0, gain));
+    meanDenominator = fmax(10.0, 60.0 / gain);
+  } else {
+    meanDenominator = 10.0;
+  }
+
+  double chromDenominator = 100.0;
+  if (isfinite(chromAmp) && chromAmp > 0.0) {
+    double chromGain = 18.0 / fmax(chromAmp, 1.0);
+    chromGain = fmin(6.0, fmax(1.0, chromGain));
+    chromDenominator = fmax(15.0, 100.0 / chromGain);
+  } else {
+    chromDenominator = 15.0;
+  }
+
+  double meanComponent = (isfinite(mean) && isfinite(nextDc)) ? fmax(-1.2, fmin(1.2, (mean - nextDc) / meanDenominator)) : NAN;
+  double chromComponent = isfinite(chromVal) ? fmax(-1.2, fmin(1.2, (chromVal - 128.0) / chromDenominator)) : NAN;
   double finalSample = NAN;
   if (blendUsed) {
     double mc = isfinite(meanComponent) ? meanComponent : 0.0;
@@ -384,26 +404,43 @@ static double dcMean = NAN;
   } else {
     finalSample = meanComponent;
   }
-  double confidenceOut = fmin(1.0, fmax(0.0, outConfidence));
-  double amplitudeGate = fmin(1.0, fmax(0.0, spatialGate * dynamicMix));
-  
-  // IMPROVED SATURATION HANDLING: Reject samples during poor signal conditions
-  if (amplitudeGate < 0.05) {
-    confidenceOut = fmin(confidenceOut, amplitudeGate * 0.8);
+
+  BOOL enableAgc = arguments[@"enableAgc"] ? [arguments[@"enableAgc"] boolValue] : YES;
+  double targetRms = arguments[@"targetRms"] ? [arguments[@"targetRms"] doubleValue] : 0.02;
+  double alphaRms = arguments[@"alphaRms"] ? [arguments[@"alphaRms"] doubleValue] : 0.05;
+  double alphaGain = arguments[@"alphaGain"] ? [arguments[@"alphaGain"] doubleValue] : 0.1;
+  double gainMin = arguments[@"gainMin"] ? [arguments[@"gainMin"] doubleValue] : 0.5;
+  double gainMax = arguments[@"gainMax"] ? [arguments[@"gainMax"] doubleValue] : 20.0;
+  double minRms = fmax(targetRms * 0.1, 0.001);
+
+  static double agcRms = 0.0;
+  static double agcGain = 1.0;
+  static double signalDc = NAN;
+
+  double processedSample = finalSample;
+  double finalConfidence = 0.0;
+  if (isfinite(processedSample)) {
+    if (!isfinite(signalDc)) {
+      signalDc = processedSample;
+    } else {
+      signalDc = signalDc + 0.02 * (processedSample - signalDc);
+    }
+    double highPassed = processedSample - signalDc;
+    double agcSample = highPassed;
+    if (enableAgc) {
+      double prevRmsSq = isfinite(agcRms) ? agcRms * agcRms : fabs(highPassed);
+      double newRmsSq = (1.0 - alphaRms) * prevRmsSq + alphaRms * highPassed * highPassed;
+      agcRms = sqrt(fmax(newRmsSq, 0.0));
+      double desiredGain = targetRms / fmax(agcRms, minRms);
+      double clampedGain = fmin(gainMax, fmax(gainMin, desiredGain));
+      agcGain = isfinite(agcGain) ? (1.0 - alphaGain) * agcGain + alphaGain * clampedGain : clampedGain;
+      agcSample = highPassed * agcGain;
+    }
+    processedSample = fmax(-0.6, fmin(0.6, agcSample));
+    finalConfidence = fmin(1.0, fabs(processedSample) / targetRms);
   }
-  
-  // Additional check for very low contrast (finger removed)
-  if (spatialStd < 2.0 || contrastScore < 0.1) {
-    confidenceOut = fmin(confidenceOut, 0.1); // Force low confidence
-  }
-  
-  double absSample = (isfinite(finalSample) ? fabs(finalSample) : 0.0);
-  if (absSample < 0.01) confidenceOut *= absSample * 50.0;
-  
-  // FIXED: Don't drop samples during warm-up, let HeartPy decide quality
-  // Only drop samples for truly invalid conditions (NaN, extremely low amplitude)
-  double pushSample = (!isfinite(finalSample) || amplitudeGate < 0.01) ? 
-    NAN : fmax(-1.2, fmin(1.2, finalSample));
+
+  double pushSample = isfinite(processedSample) ? processedSample : NAN;
 
   CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 
@@ -414,14 +451,20 @@ static double dcMean = NAN;
     if (isfinite(pushSample)) {
       NSDictionary* userInfo = @{ @"value": @(pushSample),
                                   @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                  @"confidence": @(confidenceOut) };
+                                  @"confidence": @(finalConfidence) };
       [[NSNotificationCenter defaultCenter] postNotificationName:@"HeartPyPPGSample"
                                                           object:nil
                                                         userInfo:userInfo];
 
       if (notificationCount % 30 == 0) {
         NSLog(@"📸 PPGMeanPlugin posted notification #%d value: %.3f confidence: %.2f",
-              notificationCount, pushSample, confidenceOut);
+              notificationCount, pushSample, finalConfidence);
+      }
+      if (notificationCount % 30 == 0) {
+        NSLog(@"📸 PPGMeanPlugin gain=%.2f rms=%.4f sample=%.4f",
+              agcGain,
+              agcRms,
+              pushSample);
       }
     }
   } @catch (__unused id e) {}

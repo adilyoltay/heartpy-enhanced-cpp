@@ -381,6 +381,12 @@ Java_com_heartpy_HeartPyModule_rtPushTsNative(JNIEnv* env, jclass, jlong h, jdou
     hp_rt_push_ts((void*)h, x.data(), tsv.data(), (size_t)n);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_heartpy_HeartPyModule_rtSetWindowNative(JNIEnv*, jclass, jlong h, jdouble windowSec) {
+    if (!h) return;
+    hp_rt_set_window((void*)h, windowSec);
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_heartpy_HeartPyModule_rtPollNative(JNIEnv* env, jclass, jlong h) {
     if (!h) return nullptr;
@@ -513,6 +519,30 @@ static void installBinding(facebook::jsi::Runtime& rt) {
         }
     );
     rt.global().setProperty(rt, "__hpRtCreate", fnCreate);
+
+    // __hpRtSetWindow(handle:number, windowSeconds:number) -> void
+    auto fnSetWindow = Function::createFromHostFunction(
+        rt,
+        PropNameID::forAscii(rt, "__hpRtSetWindow"),
+        2,
+        [](Runtime& rt, const Value&, const Value* args, size_t count) -> Value {
+            if (count < 2 || !args[0].isNumber() || !args[1].isNumber()) {
+                throw JSError(rt, "HEARTPY_E201: invalid arguments for setWindow");
+            }
+            double h = args[0].asNumber();
+            double windowSec = args[1].asNumber();
+            if (!(windowSec > 0.0)) {
+                throw JSError(rt, "HEARTPY_E201: windowSeconds must be > 0");
+            }
+            void* ptr = hp_handle_get((uint32_t)h);
+            if (!ptr) {
+                throw JSError(rt, "HEARTPY_E101: invalid or destroyed handle");
+            }
+            hp_rt_set_window(ptr, windowSec);
+            return Value::undefined();
+        }
+    );
+    rt.global().setProperty(rt, "__hpRtSetWindow", fnSetWindow);
 
     // __hpRtPush(handle:number, data:Float32Array, t0?:number) -> void
     auto fnPush = Function::createFromHostFunction(

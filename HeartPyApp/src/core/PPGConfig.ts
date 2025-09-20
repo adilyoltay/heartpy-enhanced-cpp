@@ -5,22 +5,39 @@
 const isDebugMode = __DEV__ || process.env.NODE_ENV === 'development';
 
 export const PPG_CONFIG = {
-  camera: {
-    fps: 30,
-    torchLevel: 0.3,
-    roi: 0.5,
-  },
-  analysis: {
-    sampleRate: 30,
-    bufferSize: 450,
-    analysisWindow: 90, // Reduced from 150 to 90 samples (3s instead of 5s) for faster response
-  },
-  ui: {
-    updateInterval: 50, // Reduced from 100ms to 50ms for faster UI updates
-    waveformSamples: 150,
-  },
+  // Sampling & buffering
+  sampleRate: 30,
+  analysisWindow: 150,          // samples (~5 s @ 30 Hz)
+  ringBufferSize: 450,          // analyzer/history buffer length
+  waveformTailSamples: 150,      // UI waveform tail displayed
+
+  // Reliability & gating
+  reliabilityThreshold: 0.6,
+  snrDbThresholdUI: -3,
+
+  // Adaptive gain control (AGC)
+  enableAGC: true,
+  amplitudeTargetRMS: 0.02,
+  agcAlphaRms: 0.05,
+  agcAlphaGain: 0.1,
+  agcGainMin: 0.5,
+  agcGainMax: 20,
+
+  // Analyzer warm-up / batching
+  minSamplesBeforePollSec: 1.5,
+  microBatchSamples: 16,
+  microBatchLatencyMs: 150,
+
+  // Camera preferences
+  ppgChannel: 'red',            // 'red' (torch) | 'green'
+  roiBoxPct: 0.5,               // central box (fraction of width/height)
+  cameraTorchLevel: 1.0,
+
+  // UI refresh cadence
+  uiUpdateIntervalMs: 50,
+
   debug: {
-    enabled: isDebugMode, // Auto-enable in development, disable in production
-    sampleLogThrottle: 30, // Log every Nth sample
+    enabled: isDebugMode,
+    sampleLogThrottle: 30,
   },
 } as const;

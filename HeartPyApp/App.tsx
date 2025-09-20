@@ -59,7 +59,7 @@ function useAnalyzer() {
   }, [state]);
 
   const sampleCountRef = useRef(0);
-  const addSample = useCallback((sample: PPGSample) => {
+  const addSample = useCallback(async (sample: PPGSample) => {
     sampleCountRef.current += 1;
     
     // THROTTLED LOG: Only log every Nth sample when debug enabled
@@ -72,7 +72,11 @@ function useAnalyzer() {
       });
     }
     
-    analyzerRef.current?.addSample(sample);
+    try {
+      await analyzerRef.current?.addSample(sample);
+    } catch (error) {
+      console.warn('[App] Sample processing failed:', error);
+    }
   }, [state]);
 
   const updateSampleRate = useCallback((fps: number) => {

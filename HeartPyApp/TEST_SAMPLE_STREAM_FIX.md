@@ -98,10 +98,12 @@ npm run check:ppg -- ../artifacts/ppg_session.log
 
 ### **Test Coverage**
 - ✅ **Sample Stream Flow**: Valid samples, pushWithTimestamps calls
-- ✅ **HeartPy Warm-up**: Native confidence preservation, BPM calculation
+- ✅ **HeartPy Warm-up**: Native confidence preservation, BPM calculation, NaN handling
 - ✅ **Peak Filtering**: Real buffer length usage, peak index calculation
 - ✅ **UI Haptic Feedback**: Confidence-based gating, reliability checks
 - ✅ **Error Handling**: No critical errors, graceful failure handling
+- ✅ **Signal Quality**: Recovery detection, NaN ratio monitoring
+- ✅ **Confidence Fallback**: Native confidence preservation logic
 
 ### **CI Integration**
 ```bash

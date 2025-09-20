@@ -16,7 +16,7 @@ import type {PPGSample} from '../types/PPGTypes';
 const {PPGCameraManager} = NativeModules;
 
 type Props = {
-  onSample: (sample: PPGSample) => void;
+  onSample: (sample: PPGSample) => Promise<void>;
   isActive: boolean;
   onFpsUpdate?: (fps: number) => void; // FPS callback for dynamic sampleRate
 };
@@ -26,6 +26,9 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
   const {hasPermission, requestPermission} = useCameraPermission();
   const enableProcessorTimerRef = useRef<NodeJS.Timeout | null>(null);
   const torchTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const cameraRef = useRef<Camera | null>(null);
+  const [androidTorchMode, setAndroidTorchMode] = useState<'off' | 'on'>('off');
+  const requireTorch = PPG_CONFIG.ppgChannel === 'red';
   
   // FPS Monitoring
   const frameTimestamps = useRef<number[]>([]);
@@ -108,7 +111,10 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
                timestamp: event.timestamp,
                confidence: event.confidence,
              };
-             onSample(sample);
+             // CRITICAL: Handle async addSample to prevent race conditions
+             onSample(sample).catch(error => {
+               console.warn('[PPGCamera] Sample processing failed:', error);
+             });
            });
 
     return () => {
@@ -153,6 +159,21 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
     [onSample],
   );
 
+  const pluginParams = useMemo(
+    () => ({
+      enableAgc: PPG_CONFIG.enableAGC,
+      targetRms: PPG_CONFIG.amplitudeTargetRMS,
+      alphaRms: PPG_CONFIG.agcAlphaRms,
+      alphaGain: PPG_CONFIG.agcAlphaGain,
+      gainMin: PPG_CONFIG.agcGainMin,
+      gainMax: PPG_CONFIG.agcGainMax,
+      roi: PPG_CONFIG.roiBoxPct,
+      channel: PPG_CONFIG.ppgChannel,
+      torch: requireTorch,
+    }),
+    [requireTorch],
+  );
+
   const frameProcessor = useFrameProcessor(
     (frame: Frame) => {
       'worklet';
@@ -160,8 +181,7 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
         console.log('[PPGCamera] Frame processor: plugin not ready');
         return;
       }
-       // TORCH CRASH FIX: Remove torch parameter to prevent conflicts
-       const value = plugin.call(frame, {}) as unknown;
+      const value = plugin.call(frame, pluginParams) as unknown;
       if (typeof value !== 'number' || Number.isNaN(value)) {
         console.log('[PPGCamera] Frame processor: invalid value', {value, type: typeof value});
         return;
@@ -176,7 +196,7 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
       // No worklet callback needed - samples come via NativeModules event
       console.log('[PPGCamera] Frame processor: sample processed by PPGMeanPlugin');
     },
-     [onSample, plugin],
+    [onSample, plugin, pluginParams],
   );
 
   useEffect(() => {
@@ -206,45 +226,63 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
   }, [isActive, plugin]);
 
    // FLASH FIX: Use native torch control safely
-   useEffect(() => {
-     if (Platform.OS !== 'ios' || !hasTorch) {
-       return undefined;
-     }
-     
-     const setTorch = async (level: number) => {
-       try {
-         if (typeof PPGCameraManager?.setTorchLevel === 'function') {
-           console.log('[PPGCamera] Native torch request', {level});
-           await PPGCameraManager.setTorchLevel(level);
-           console.log('[PPGCamera] Native torch applied', {level});
-         }
-       } catch (error) {
-         console.warn('[PPGCamera] Native torch failed', error);
-       }
-     };
+  const setTorchProp = useCallback((mode: 'on' | 'off') => {
+    if (Platform.OS !== 'android') return;
+    if (!cameraRef.current) return;
+    try {
+      setAndroidTorchMode(mode);
+      cameraRef.current.setTorch(mode);
+      if (PPG_CONFIG.debug.enabled) {
+        console.log('[PPGCamera] Android torch set', {mode});
+      }
+    } catch (error) {
+      console.warn('[PPGCamera] Android torch fallback failed', error);
+    }
+  }, []);
 
-     if (torchTimerRef.current) {
-       clearTimeout(torchTimerRef.current);
-       torchTimerRef.current = null;
-     }
+  useEffect(() => {
+    if (!hasTorch) {
+      return undefined;
+    }
 
-     if (isActive) {
-       // FLASH FIX: Delay torch activation to prevent crash
-       torchTimerRef.current = setTimeout(() => {
-         void setTorch(PPG_CONFIG.camera.torchLevel);
-       }, 1000); // Increased delay for safety
-     } else {
-       void setTorch(0);
-     }
+    const setTorch = async (level: number) => {
+      if (Platform.OS === 'android') {
+        setTorchProp(level > 0 ? 'on' : 'off');
+        return;
+      }
 
-     return () => {
-       if (torchTimerRef.current) {
-         clearTimeout(torchTimerRef.current);
-         torchTimerRef.current = null;
-       }
-       void setTorch(0);
-     };
-   }, [hasTorch, isActive]);
+      try {
+        if (typeof PPGCameraManager?.setTorchLevel === 'function') {
+          console.log('[PPGCamera] Native torch request', {level});
+          await PPGCameraManager.setTorchLevel(level);
+          console.log('[PPGCamera] Native torch applied', {level});
+        }
+      } catch (error) {
+        console.warn('[PPGCamera] Native torch failed', error);
+      }
+    };
+
+    if (torchTimerRef.current) {
+      clearTimeout(torchTimerRef.current);
+      torchTimerRef.current = null;
+    }
+
+    if (isActive && requireTorch) {
+      torchTimerRef.current = setTimeout(() => {
+        void setTorch(PPG_CONFIG.cameraTorchLevel);
+      }, 1000);
+    } else {
+      void setTorch(0);
+    }
+
+    return () => {
+      if (torchTimerRef.current) {
+        clearTimeout(torchTimerRef.current);
+        torchTimerRef.current = null;
+      }
+      void setTorch(0);
+    };
+  }, [hasTorch, isActive, requireTorch, setTorchProp]);
 
   useEffect(() => {
     console.log('[PPGCamera] Device/permission check', {
@@ -256,25 +294,77 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
   }, [device, hasPermission, isActive, hasTorch]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const lock = async () => {
+      if (Platform.OS === 'android') {
+        if (PPG_CONFIG.debug.enabled) {
+          console.log('[PPGCamera] Android fallback: camera lock not available; relying on auto settings');
+        }
+        return;
+      }
+
+      if (typeof PPGCameraManager?.lockCameraSettings !== 'function') return;
+      try {
+        const result = await PPGCameraManager.lockCameraSettings({
+          whiteBalance: 'locked',
+          focus: 'locked',
+          torchLevel: requireTorch ? PPG_CONFIG.cameraTorchLevel : 0,
+        });
+        if (!cancelled && PPG_CONFIG.debug.enabled) {
+          console.log('[PPGCamera] Camera settings locked', result);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('[PPGCamera] lockCameraSettings failed', error);
+        }
+      }
+    };
+
+    const unlock = async () => {
+      if (Platform.OS === 'android') {
+        return;
+      }
+      if (typeof PPGCameraManager?.unlockCameraSettings !== 'function') return;
+      try {
+        await PPGCameraManager.unlockCameraSettings();
+        if (PPG_CONFIG.debug.enabled) {
+          console.log('[PPGCamera] Camera settings unlocked');
+        }
+      } catch (error) {
+        console.warn('[PPGCamera] unlockCameraSettings failed', error);
+      }
+    };
+
+    if (isActive) {
+      void lock();
+    } else {
+      void unlock();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isActive, requireTorch]);
+
+  useEffect(() => {
     console.log('[PPGCamera] Frame processor status', {
       hasPlugin: !!plugin,
       isActive,
     });
   }, [plugin, isActive]);
 
-   // TORCH CRASH FIX: Disable VisionCamera torch to prevent conflicts
-   // FLASH FIX: Use native torch control instead
-   const cameraProps: Partial<React.ComponentProps<typeof Camera>> = {
-     fps: PPG_CONFIG.camera.fps,
-     torch: 'off', // Disable VisionCamera torch
-   };
+  const cameraProps: Partial<React.ComponentProps<typeof Camera>> = {
+    fps: PPG_CONFIG.sampleRate,
+    torch: Platform.OS === 'ios' ? 'off' : androidTorchMode,
+  };
 
   useEffect(() => {
     console.log('[PPGCamera] Torch mode update', {
       platform: Platform.OS,
       hasTorch,
       isActive,
-      torchDelay: isActive ? '1000ms' : 'immediate',
+      torchStrategy: Platform.OS === 'ios' ? 'PPGCameraManager' : 'Camera.setTorch',
     });
   }, [hasTorch, isActive]);
 
@@ -292,6 +382,7 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
       device={device}
       isActive={isActive}
       frameProcessor={plugin && frameProcessorEnabled ? frameProcessor : undefined}
+      ref={cameraRef}
       {...cameraProps}
     />
   );

@@ -124,6 +124,9 @@ heartpy::Options hp_build_options_from_jsi(Runtime& rt, const Object& opts, cons
             auto q = opts.getProperty(rt, "quality").asObject(rt);
             o.rejectSegmentwise = getBool(rt, q, "rejectSegmentwise", o.rejectSegmentwise);
             o.segmentRejectThreshold = getNum(rt, q, "segmentRejectThreshold", o.segmentRejectThreshold);
+            if (hasProp(rt, q, "segmentRejectMaxRejects")) o.segmentRejectMaxRejects = (int)getNum(rt, q, "segmentRejectMaxRejects", o.segmentRejectMaxRejects);
+            if (hasProp(rt, q, "segmentRejectWindowBeats")) o.segmentRejectWindowBeats = (int)getNum(rt, q, "segmentRejectWindowBeats", o.segmentRejectWindowBeats);
+            o.segmentRejectOverlap = getNum(rt, q, "segmentRejectOverlap", o.segmentRejectOverlap);
         }
         // High precision
         if (hasProp(rt, opts, "highPrecision")) {

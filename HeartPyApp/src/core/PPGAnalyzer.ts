@@ -13,16 +13,19 @@ export class PPGAnalyzer {
   private state: PPGState = 'idle';
   private readonly wrapper = new HeartPyWrapper();
   private readonly buffer = new RingBuffer<number>(
-    PPG_CONFIG.analysis.bufferSize,
+    PPG_CONFIG.ringBufferSize,
   );
   private timer: NodeJS.Timeout | null = null;
   private readonly pending: number[] = [];
   private readonly pendingTimestamps: number[] = [];
   private sampleCount = 0; // Sample counter for accurate throttling
+  private totalPushed = 0;
+  private lastFlushTimestampMs = 0;
   private readonly onMetrics: (metrics: PPGMetrics, waveform: number[]) => void;
   private readonly onStateChange?: (state: PPGState) => void;
   private readonly onFpsUpdate?: (fps: number) => void;
-  private currentSampleRate: number = PPG_CONFIG.analysis.sampleRate; // Track current sampleRate
+  private currentSampleRate: number = PPG_CONFIG.sampleRate; // Track current sampleRate
+  private isResetting: boolean = false; // Flag to prevent race conditions during reset
 
   constructor(options: AnalyzerOptions) {
     this.onMetrics = options.onMetrics;
@@ -68,21 +71,23 @@ export class PPGAnalyzer {
     try {
       this.setState('starting');
       console.log('[PPGAnalyzer] Creating HeartPy wrapper...');
-      await this.wrapper.create(PPG_CONFIG.analysis.sampleRate);
+      await this.wrapper.create(PPG_CONFIG.sampleRate);
       this.wrapper.setBufferRef(this.buffer); // Set buffer reference for peak filtering
       console.log('[PPGAnalyzer] HeartPy wrapper created successfully');
 
       this.setState('running');
-      console.log('[PPGAnalyzer] Starting timer with interval:', PPG_CONFIG.ui.updateInterval);
+      console.log('[PPGAnalyzer] Starting timer with interval:', PPG_CONFIG.uiUpdateIntervalMs);
       
       // Reset sample counter on start
       this.sampleCount = 0;
+      this.totalPushed = 0;
+      this.lastFlushTimestampMs = 0;
       
       this.timer = setInterval(() => {
         this.tick().catch((error) => {
           console.error('[PPGAnalyzer] Tick error:', error);
         });
-      }, PPG_CONFIG.ui.updateInterval);
+      }, PPG_CONFIG.uiUpdateIntervalMs);
       console.log('[PPGAnalyzer] Started successfully');
     } catch (error) {
       console.error('[PPGAnalyzer] Start failed:', error);
@@ -104,10 +109,12 @@ export class PPGAnalyzer {
     this.pending.length = 0;
     this.pendingTimestamps.length = 0; // CRITICAL: Clear timestamps to prevent sync issues
     this.buffer.clear();
+    this.totalPushed = 0;
+    this.lastFlushTimestampMs = 0;
     this.setState('idle');
   }
 
-  addSample(sample: PPGSample): void {
+  async addSample(sample: PPGSample): Promise<void> {
     // CRITICAL: Only accept samples when running to prevent race condition during stop
     if (this.state !== 'running') {
       console.warn('[PPGAnalyzer] Sample received while not running, dropping', {
@@ -118,8 +125,17 @@ export class PPGAnalyzer {
       return;
     }
     
+    // CRITICAL: Check if reset is in progress
+    if (this.isResetting) {
+      console.warn('[PPGAnalyzer] Sample received during reset, dropping', {
+        sampleValue: sample.value,
+        sampleTimestamp: sample.timestamp,
+      });
+      return;
+    }
+    
     // CRITICAL: Check poor signal conditions BEFORE pushing to prevent self-comparison
-    const resetTriggered = this.checkPoorSignalConditions(sample);
+    const resetTriggered = await this.checkPoorSignalConditions(sample);
     if (resetTriggered) {
       return;
     }
@@ -132,14 +148,14 @@ export class PPGAnalyzer {
     this.buffer.push(sample.value);
     this.pending.push(sample.value);
     this.pendingTimestamps.push(sample.timestamp);
-    if (this.pending.length > PPG_CONFIG.analysis.bufferSize) {
+    if (this.pending.length > PPG_CONFIG.ringBufferSize) {
       this.pending.splice(
         0,
-        this.pending.length - PPG_CONFIG.analysis.bufferSize,
+        this.pending.length - PPG_CONFIG.ringBufferSize,
       );
       this.pendingTimestamps.splice(
         0,
-        this.pendingTimestamps.length - PPG_CONFIG.analysis.bufferSize,
+        this.pendingTimestamps.length - PPG_CONFIG.ringBufferSize,
       );
     }
     
@@ -159,7 +175,7 @@ export class PPGAnalyzer {
     }
   }
 
-  private checkPoorSignalConditions(sample: PPGSample): boolean {
+  private async checkPoorSignalConditions(sample: PPGSample): Promise<boolean> {
     // Check for poor signal conditions that require reset
     // Note: Camera confidence is always ~0.85, so we'll rely on metrics-based detection instead
     const shouldReset = 
@@ -172,18 +188,36 @@ export class PPGAnalyzer {
           sample.timestamp - this.pendingTimestamps[this.pendingTimestamps.length - 1] : 'N/A',
       });
       
-      // Reset all buffers and HeartPy session
-      this.buffer.clear();
-      this.pending.length = 0;
-      this.pendingTimestamps.length = 0;
-      this.sampleCount = 0;
-      
-      // Reset HeartPy wrapper if available
-      if (this.wrapper) {
-        this.wrapper.reset().catch(error => {
-          console.warn('[PPGAnalyzer] Failed to reset HeartPy wrapper:', error);
-        });
+      // ATOMIC RESET: Set flag to prevent race conditions
+      if (this.isResetting) {
+        console.log('[PPGAnalyzer] Reset already in progress, skipping');
+        return true;
       }
+      
+      this.isResetting = true;
+      
+      try {
+        // Reset all buffers first
+        this.buffer.clear();
+        this.pending.length = 0;
+        this.pendingTimestamps.length = 0;
+        this.sampleCount = 0;
+        this.totalPushed = 0;
+        this.lastFlushTimestampMs = 0;
+        
+        // Reset HeartPy wrapper atomically
+        if (this.wrapper) {
+          await this.wrapper.reset();
+        }
+        
+        console.log('[PPGAnalyzer] Atomic reset completed successfully');
+      } catch (error) {
+        console.error('[PPGAnalyzer] Atomic reset failed:', error);
+        // Reset failed, but we still cleared buffers to prevent corruption
+      } finally {
+        this.isResetting = false;
+      }
+      
       return true;
     }
     return false;
@@ -203,44 +237,60 @@ export class PPGAnalyzer {
       return;
     }
 
+    // CRITICAL: Skip tick if reset is in progress
+    if (this.isResetting) {
+      console.log('[PPGAnalyzer] Tick called during reset, skipping');
+      return;
+    }
+
     try {
-      if (this.pending.length > 0) {
-        console.log('[PPGAnalyzer] Flushing pending samples', {
-          pending: this.pending.length,
-        });
-        // Use REAL timestamps from PPGMeanPlugin (already in seconds)
-        const samples = this.pending.splice(0);
-        const timestamps = this.pendingTimestamps.splice(0);
-        
-        // CRITICAL: Validate array lengths to prevent HeartPyModule.rtPushTs rejection
-        if (samples.length !== timestamps.length) {
-          console.error('[PPGAnalyzer] Length mismatch detected', {
-            samplesLength: samples.length,
-            timestampsLength: timestamps.length,
-          });
-          // Clear both arrays to resync
-          this.pending.length = 0;
-          this.pendingTimestamps.length = 0;
-          return;
-        }
-        
-        console.log('[PPGAnalyzer] Using real timestamps', {
-          sampleCount: samples.length,
-          timestampCount: timestamps.length,
-          firstTimestamp: timestamps[0],
-          lastTimestamp: timestamps[timestamps.length - 1],
-        });
-        
-        await this.wrapper.pushWithTimestamps(samples, timestamps);
+      const nowMs = Date.now();
+      const shouldFlush = this.pending.length >= PPG_CONFIG.microBatchSamples ||
+        (this.pending.length > 0 && (nowMs - this.lastFlushTimestampMs) >= PPG_CONFIG.microBatchLatencyMs);
+
+      if (shouldFlush) {
+        await this.flushPending(nowMs);
       }
+
+      const minSamplesBeforePoll = Math.floor(PPG_CONFIG.minSamplesBeforePollSec * this.currentSampleRate);
+      if (this.totalPushed < minSamplesBeforePoll) {
+        if (PPG_CONFIG.debug.enabled) {
+          console.log('[PPGAnalyzer] Warm-up gate', {
+            totalPushed: this.totalPushed,
+            required: minSamplesBeforePoll,
+          });
+        }
+        return;
+      }
+
       const metrics = await this.wrapper.poll();
       if (metrics) {
+        const hasResult = metrics.hasResult === true;
+        const snrDb = metrics.snrDb ?? -10;
+        const goodQuality = metrics.quality?.goodQuality ?? false;
+        const rejectionRate = metrics.quality?.rejectionRate ?? 0;
+        const q = goodQuality ? 1 : 0;
+        const snrScore = Math.min(1, Math.max(0, (snrDb - PPG_CONFIG.snrDbThresholdUI) / 12));
+        const rejectionScore = Math.min(1, Math.max(0, 1 - rejectionRate));
+        const reliability = Math.min(1, Math.max(0, 0.6 * q + 0.3 * snrScore + 0.1 * rejectionScore));
+
+        const enrichedMetrics = {
+          ...metrics,
+          hasResult,
+          confidence: reliability,
+          quality: {
+            ...metrics.quality,
+            rejectionRate,
+          },
+        };
+
         console.log('[PPGAnalyzer] Metrics polled', {
-          bpm: metrics.bpm,
-          confidence: metrics.confidence,
-          snrDb: metrics.snrDb,
+          bpm: enrichedMetrics.bpm,
+          reliability: reliability,
+          snrDb,
+          hasResult,
         });
-        this.onMetrics(metrics, this.buffer.getAll());
+        this.onMetrics(enrichedMetrics, this.buffer.getAll());
       }
     } catch (error) {
       console.warn('[PPGAnalyzer] tick error', error);
@@ -252,6 +302,36 @@ export class PPGAnalyzer {
         this.setState('idle');
       }
     }
+  }
+
+  private async flushPending(nowMs: number): Promise<void> {
+    if (this.pending.length === 0) return;
+    console.log('[PPGAnalyzer] Flushing pending samples', {
+      pending: this.pending.length,
+    });
+    const samples = this.pending.splice(0);
+    const timestamps = this.pendingTimestamps.splice(0);
+
+    if (samples.length !== timestamps.length) {
+      console.error('[PPGAnalyzer] Length mismatch detected', {
+        samplesLength: samples.length,
+        timestampsLength: timestamps.length,
+      });
+      this.pending.length = 0;
+      this.pendingTimestamps.length = 0;
+      return;
+    }
+
+    console.log('[PPGAnalyzer] Using real timestamps', {
+      sampleCount: samples.length,
+      timestampCount: timestamps.length,
+      firstTimestamp: timestamps[0],
+      lastTimestamp: timestamps[timestamps.length - 1],
+    });
+
+    await this.wrapper.pushWithTimestamps(samples, timestamps);
+    this.totalPushed += samples.length;
+    this.lastFlushTimestampMs = nowMs;
   }
 
   private setState(next: PPGState): void {

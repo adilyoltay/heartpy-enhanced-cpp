@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <mutex>
 #include <algorithm>
+#include <limits>
 #include "heartpy_core.h"
 
 namespace heartpy {
@@ -143,6 +144,7 @@ private:
     double lastEmitTime_ {0.0};              // last poll emit time in seconds
     double lastTs_ {0.0};                    // last appended sample timestamp (sec)
     double firstTsApprox_ {0.0};             // approx timestamp of first sample in window (sec)
+    double warmupStartTs_ {std::numeric_limits<double>::quiet_NaN()}; // true stream start timestamp
     double effectiveFs_ {0.0};               // EMA-smoothed fs if timestamps are provided
     double emaAlpha_ {0.1};                  // smoothing for effective Fs
     double lastPsdTime_ {0.0};               // last PSD update time (sec)
