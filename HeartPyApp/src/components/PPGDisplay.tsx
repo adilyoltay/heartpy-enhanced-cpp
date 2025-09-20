@@ -169,8 +169,10 @@ export function PPGDisplay({
                  return waveformSlice.map((value, index) => {
                    const height = ((value - min) / span) * 80 + 4;
                    
-                   // Check if this index corresponds to a HeartPy peak (now in relative coordinates)
-                   const isPickPoint = absolutePickPoints.includes(index);
+                   // P0 CRITICAL FIX: Calculate slice start offset for accurate peak matching
+                   const sliceStart = waveform.length - waveformSlice.length;
+                   const absoluteIndex = sliceStart + index;
+                   const isPickPoint = absolutePickPoints.includes(absoluteIndex);
                    
                    return (
                      <View 

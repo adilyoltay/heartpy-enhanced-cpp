@@ -215,11 +215,14 @@ export class HeartPyWrapper {
       const rawPeakList = Array.isArray(native?.peakList) ? native.peakList : [];
       const peakList = this.normalizePeaks(rawPeakList, result);
 
+      // P0 FIX: Define bufferLength before use to fix TypeScript compilation error
+      const bufferLength = this.bufferRef?.getLength() ?? 0;
+
       if (PPG_CONFIG.debug.enabled) {
         console.log('[HeartPyWrapper] Native peak data', {
           rawPeakList,
           normalizedPeaks: peakList,
-          bufferLength: this.bufferRef?.getLength() ?? 0,
+          bufferLength,
           windowSize: PPG_CONFIG.waveformTailSamples,
         });
       }
