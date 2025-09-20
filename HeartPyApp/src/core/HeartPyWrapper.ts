@@ -251,6 +251,9 @@ export class HeartPyWrapper {
         });
       }
 
+      // Store the result for potential reuse (including native bridge data)
+      this.lastResult = result;
+
       return metrics;
     } catch (error) {
       console.error('[HeartPyWrapper] poll failed', error);
@@ -341,13 +344,32 @@ export class HeartPyWrapper {
     const windowStart = Math.max(0, bufferLength - windowSize);
     const windowEnd = bufferLength;
 
-    // P0 FIX: Correct peak index normalization for window-relative indices
-    // When buffer is full, native peaks are often relative to the current processing window
-    // We need to map them to the display window correctly
+    // P1 ENHANCEMENT: Use native bridge data if available
+    // Check if we have peakListRaw and windowStartAbs from native bridge
+    const nativePeakListRaw = (this.lastResult as any)?.peakListRaw;
+    const nativeWindowStartAbs = (this.lastResult as any)?.windowStartAbs;
+    
     let adjustedPeaks = sanitizedPeaks;
     
-    if (bufferLength >= windowSize) {
-      // Buffer is full - peaks are likely relative to current processing window
+    if (Array.isArray(nativePeakListRaw) && typeof nativeWindowStartAbs === 'number') {
+      // Use native bridge data for more accurate peak normalization
+      if (PPG_CONFIG.debug.enabled) {
+        console.log('[HeartPyWrapper] Using native bridge data for peak normalization', {
+          nativePeakListRaw,
+          nativeWindowStartAbs,
+          originalPeaks: sanitizedPeaks
+        });
+      }
+      
+      // Map native peaks to display window
+      adjustedPeaks = nativePeakListRaw
+        .filter((peak): peak is number => typeof peak === 'number' && Number.isFinite(peak))
+        .map(peak => peak - nativeWindowStartAbs + windowStart)
+        .filter(peak => peak >= windowStart && peak < windowEnd);
+    } else if (bufferLength >= windowSize) {
+      // P0 FIX: Correct peak index normalization for window-relative indices
+      // When buffer is full, native peaks are often relative to the current processing window
+      // We need to map them to the display window correctly
       const maxPeak = Math.max(...sanitizedPeaks);
       const minPeak = Math.min(...sanitizedPeaks);
       

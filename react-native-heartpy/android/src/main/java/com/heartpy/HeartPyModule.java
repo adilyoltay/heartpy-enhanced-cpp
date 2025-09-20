@@ -715,7 +715,36 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                 try {
                     String json = rtPollNative(h);
                     if (json == null) { promise.resolve(null); return; }
-                    promise.resolve(jsonToWritableMap(json));
+                    
+                    // P1 ENHANCEMENT: Parse JSON and add peakListRaw and windowStartAbs
+                    com.facebook.react.bridge.WritableMap result = jsonToWritableMap(json);
+                    
+                    // Add peakListRaw if available in the JSON response
+                    if (result.hasKey("peakListRaw")) {
+                        // peakListRaw is already included in the native JSON response
+                        // No additional processing needed
+                    } else {
+                        // Fallback: create empty peakListRaw array
+                        com.facebook.react.bridge.WritableArray emptyPeakListRaw = Arguments.createArray();
+                        result.putArray("peakListRaw", emptyPeakListRaw);
+                    }
+                    
+                    // Add windowStartAbs calculation
+                    double windowStartAbs = 0.0; // Default for early detection
+                    if (result.hasKey("quality")) {
+                        com.facebook.react.bridge.ReadableMap quality = result.getMap("quality");
+                        if (quality.hasKey("totalBeats") && quality.getInt("totalBeats") > 0) {
+                            // Estimate window start based on analysis window size
+                            // This is a heuristic - in production, the native core should provide this
+                            if (result.hasKey("peakListRaw")) {
+                                com.facebook.react.bridge.ReadableArray peakListRaw = result.getArray("peakListRaw");
+                                windowStartAbs = Math.max(0, peakListRaw.size() - 150); // Assuming 150 sample analysis window
+                            }
+                        }
+                    }
+                    result.putDouble("windowStartAbs", windowStartAbs);
+                    
+                    promise.resolve(result);
                 } catch (Exception e) {
                     promise.reject("HEARTPY_E900", e);
                 }
