@@ -878,20 +878,17 @@ RCT_EXPORT_METHOD(rtPoll:(nonnull NSNumber*)handle
             }
             out[@"quality"] = q;
         }
-        // P1 ENHANCEMENT: Add peakListRaw and windowStartAbs for better peak normalization
+        // P1 FIX: Add peakListRaw and remove faulty windowStartAbs calculation
         {
             NSMutableArray* peakListRaw = [NSMutableArray arrayWithCapacity:res.peakListRaw.size()];
             for (int idx : res.peakListRaw) [peakListRaw addObject:@(idx)];
             out[@"peakListRaw"] = peakListRaw;
             
-            // Calculate windowStartAbs based on current buffer state
-            // This represents the absolute start index of the current processing window
+            // P1 FIX: Remove faulty windowStartAbs calculation
+            // The previous heuristic (peakListRaw.size() - 150) was incorrect and caused overflow
+            // For now, set to 0 to indicate early detection phase
+            // In production, the native core should provide the actual window start
             double windowStartAbs = 0.0; // Default for early detection
-            if (res.quality.totalBeats > 0) {
-                // Estimate window start based on analysis window size
-                // This is a heuristic - in production, the native core should provide this
-                windowStartAbs = MAX(0, res.peakListRaw.size() - 150); // Assuming 150 sample analysis window
-            }
             out[@"windowStartAbs"] = @(windowStartAbs);
         }
         // Binary segments (if any)

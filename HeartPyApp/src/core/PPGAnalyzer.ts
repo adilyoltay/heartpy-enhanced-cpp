@@ -71,9 +71,11 @@ export class PPGAnalyzer {
     try {
       this.setState('starting');
       console.log('[PPGAnalyzer] Creating HeartPy wrapper...');
-      await this.wrapper.create(PPG_CONFIG.sampleRate);
+      // P1 FIX: Use dynamic sample rate based on measured FPS instead of fixed config
+      const sampleRate = this.currentSampleRate > 0 ? this.currentSampleRate : PPG_CONFIG.sampleRate;
+      await this.wrapper.create(sampleRate);
       this.wrapper.setBufferRef(this.buffer); // Set buffer reference for peak filtering
-      console.log('[PPGAnalyzer] HeartPy wrapper created successfully');
+      console.log('[PPGAnalyzer] HeartPy wrapper created successfully with sampleRate:', sampleRate.toFixed(1));
 
       this.setState('running');
       console.log('[PPGAnalyzer] Starting timer with interval:', PPG_CONFIG.uiUpdateIntervalMs);

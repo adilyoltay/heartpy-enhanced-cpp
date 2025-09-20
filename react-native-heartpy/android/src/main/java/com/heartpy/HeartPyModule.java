@@ -729,19 +729,11 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                         result.putArray("peakListRaw", emptyPeakListRaw);
                     }
                     
-                    // Add windowStartAbs calculation
+                    // P1 FIX: Remove faulty windowStartAbs calculation
+                    // The previous heuristic (peakListRaw.size() - 150) was incorrect
+                    // For now, set to 0 to indicate early detection phase
+                    // In production, the native core should provide the actual window start
                     double windowStartAbs = 0.0; // Default for early detection
-                    if (result.hasKey("quality")) {
-                        com.facebook.react.bridge.ReadableMap quality = result.getMap("quality");
-                        if (quality.hasKey("totalBeats") && quality.getInt("totalBeats") > 0) {
-                            // Estimate window start based on analysis window size
-                            // This is a heuristic - in production, the native core should provide this
-                            if (result.hasKey("peakListRaw")) {
-                                com.facebook.react.bridge.ReadableArray peakListRaw = result.getArray("peakListRaw");
-                                windowStartAbs = Math.max(0, peakListRaw.size() - 150); // Assuming 150 sample analysis window
-                            }
-                        }
-                    }
                     result.putDouble("windowStartAbs", windowStartAbs);
                     
                     promise.resolve(result);
