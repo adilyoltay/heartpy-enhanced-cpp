@@ -909,7 +909,12 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     if (f0 <= 0.0 && out.bpm > 0.0) f0 = out.bpm / 60.0;
     if (f0 <= 0.0 && lastF0Hz_ > 0.0) f0 = lastF0Hz_;
     // If no HR estimate, skip SNR update
-    if (f0 <= 0.0) return;
+    if (f0 <= 0.0) {
+        // Set a fallback SNR value instead of returning
+        out.quality.snrDb = -5.0; // Conservative fallback
+        out.quality.f0Hz = 0.0;
+        return;
+    }
     lastF0Hz_ = f0;
 
     // Build analysis vector (copy of filt_) — reuse buffer to reduce reallocations
@@ -984,8 +989,17 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
             noiseBaseline = std::max(noiseBaseline, 1e-8);
         }
     }
-    double snrDbInst = (signalPow > 0.0 && noiseBaseline > 0.0) ? (10.0 * std::log10(signalPow / (noiseBaseline * (band * 2.0 / std::max(1e-6, df))))) : 0.0;
-    if (!std::isfinite(snrDbInst)) snrDbInst = 0.0;
+    double snrDbInst = 0.0;
+    if (signalPow > 1e-10 && noiseBaseline > 1e-10) { // More robust thresholds
+        double noiseBandwidth = band * 2.0 / std::max(1e-6, df);
+        if (noiseBandwidth > 1e-6) { // Ensure valid bandwidth
+            double snrRatio = signalPow / (noiseBaseline * noiseBandwidth);
+            if (snrRatio > 1e-10) { // Prevent log of very small numbers
+                snrDbInst = 10.0 * std::log10(snrRatio);
+                if (!std::isfinite(snrDbInst)) snrDbInst = 0.0;
+            }
+        }
+    }
     // EMA smoothing over time (tau = 8s when active)
     double now = lastTs_;
     double dt = (lastSnrUpdateTime_ > 0.0) ? (now - lastSnrUpdateTime_) : psdUpdateSec_;
@@ -1007,6 +1021,14 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     if (!std::isfinite(snrEmaDb_)) snrEmaDb_ = 0.0;
     out.quality.snrDb = snrEmaDb_;
     out.quality.f0Hz = lastF0Hz_;
+
+    // Debug: Log SNR calculation details (only when SNR changes significantly)
+    static double lastLoggedSnr = 999.0;
+    if (std::abs(snrEmaDb_ - lastLoggedSnr) > 1.0 || snrEmaDb_ > 5.0) {
+        // Note: In production, this could be replaced with proper logging
+        // For now, we rely on JS-side logging
+        lastLoggedSnr = snrEmaDb_;
+    }
 
     // Harmonic suppression heuristic (conservative)
     // Compute power near fundamental and half-fundamental
