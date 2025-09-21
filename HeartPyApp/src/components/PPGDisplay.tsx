@@ -44,11 +44,13 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
     }
 
     const isReliableForHaptic =
-      (metrics.confidence ?? 0) >= 0.5 && (metrics.snrDb ?? -10) > PPG_CONFIG.snrDbThresholdHaptic;
+      (metrics.confidence ?? 0) >= PPG_CONFIG.hapticMinConfidence &&
+      (metrics.snrDb ?? -10) > PPG_CONFIG.snrDbThresholdHaptic &&
+      metrics.signalQuality === 'good';
     if (!isReliableForHaptic) return;
 
     const now = Date.now();
-    const MIN_INTERVAL_MS = 300; // Debounce
+    const MIN_INTERVAL_MS = PPG_CONFIG.hapticDebounceMs; // Config'den al
 
     const latestPeakTs = Math.max(...metrics.peakTimestamps);
 
@@ -56,7 +58,17 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
       latestPeakTs > lastHapticPeakTsRef.current &&
       now - lastHapticTimeRef.current > MIN_INTERVAL_MS
     ) {
-      ReactNativeHapticFeedback.trigger('impactLight');
+      console.log('[PPGDisplay] HAPTIC TRIGGERED for peak timestamp:', latestPeakTs, {
+        confidence: metrics.confidence,
+        snrDb: metrics.snrDb,
+        signalQuality: metrics.signalQuality,
+        timeSinceLast: now - lastHapticTimeRef.current,
+        debounceMs: MIN_INTERVAL_MS
+      });
+      ReactNativeHapticFeedback.trigger(PPG_CONFIG.hapticIntensity, {
+        enableVibrateFallback: true,
+        ignoreAndroidSystemSettings: true,
+      });
       lastHapticPeakTsRef.current = latestPeakTs;
       lastHapticTimeRef.current = now;
     }

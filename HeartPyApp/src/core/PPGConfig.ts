@@ -15,9 +15,14 @@ export const PPG_CONFIG = {
   // Reliability & gating (OPTIMIZED SNR thresholds)
   reliabilityThreshold: 0.6,
   snrDbThresholdUI: -2,              // UI display threshold (-3'ten +33% iyileştirme)
-  snrDbThresholdHaptic: -6,          // Haptic feedback threshold (yeni eklendi)
+  snrDbThresholdHaptic: -4,          // Haptic feedback threshold (-6'dan +33% iyileştirme)
   snrDbThresholdReliable: -1,        // High confidence threshold (yeni eklendi)
   snrDbThresholdPoor: -8,            // Poor signal threshold (-8'den +25% iyileştirme)
+
+  // Haptic feedback settings
+  hapticDebounceMs: 600,             // Minimum interval between haptic triggers (300ms'den 600ms'ye)
+  hapticMinConfidence: 0.7,          // Minimum confidence for haptic (0.5'ten 0.7'ye)
+  hapticIntensity: 'impactHeavy',     // Haptic intensity type
 
   // Adaptive SNR parameters (dinamik SNR ayarlaması)
   adaptiveSnrEnabled: true,          // Enable adaptive SNR adjustments

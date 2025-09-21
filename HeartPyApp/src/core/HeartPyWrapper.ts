@@ -67,8 +67,7 @@ export class HeartPyWrapper {
   private isValidSnrDb(value: number): boolean {
     return typeof value === 'number' &&
            isFinite(value) &&
-           value >= -50 &&  // Minimum makul SNR değeri
-           value <= 50;     // Maximum makul SNR değeri
+           value > 0; // DEĞİŞİKLİK: value >= -50 yerine value > 0
   }
 
   private sanitizeSnrDb(value: number): number {
