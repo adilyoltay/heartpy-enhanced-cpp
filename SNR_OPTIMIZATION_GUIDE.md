@@ -40,6 +40,9 @@ private sanitizeSnrDb(value: number): number {
 private extractSignalNoiseComponents(window: Float32Array): {
   signalRms: number; noiseRms: number
 } {
+  // Convert Float32Array to regular array for easier manipulation
+  const values = Array.from(window);
+
   // DC component kaldırma
   const mean = values.reduce((sum, val) => sum + val, 0) / values.length;
   const centeredValues = values.map(val => val - mean);
