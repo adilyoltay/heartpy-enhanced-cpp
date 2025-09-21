@@ -284,4 +284,8 @@ export class PPGAnalyzer {
     }
     this.sampleRate = clamped;
   }
+
+  public getSnrMetrics() {
+    return this.wrapper?.getSnrMetrics() ?? null;
+  }
 }

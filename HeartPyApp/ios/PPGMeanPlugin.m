@@ -448,6 +448,10 @@ static double dcMean = NAN;
   @try {
     static int notificationCount = 0;
     notificationCount++;
+    NSLog(@"📸 PPGMeanPlugin: Processing frame #%d", notificationCount);
+    NSLog(@"📸 PPGMeanPlugin: pushSample=%.4f, isfinite=%d, finalConfidence=%.2f",
+          pushSample, isfinite(pushSample), finalConfidence);
+
     if (isfinite(pushSample)) {
       NSDictionary* userInfo = @{ @"value": @(pushSample),
                                   @"timestamp": @([[NSDate date] timeIntervalSince1970]),
@@ -459,11 +463,11 @@ static double dcMean = NAN;
                                                         userInfo:userInfo];
       NSLog(@"📸 PPGMeanPlugin: Successfully posted notification #%d", notificationCount);
 
-      if (notificationCount % 30 == 0) {
+      if (notificationCount % 10 == 0) {  // More frequent logging
         NSLog(@"📸 PPGMeanPlugin posted notification #%d value: %.3f confidence: %.2f",
               notificationCount, pushSample, finalConfidence);
       }
-      if (notificationCount % 30 == 0) {
+      if (notificationCount % 10 == 0) {
         NSLog(@"📸 PPGMeanPlugin gain=%.2f rms=%.4f sample=%.4f",
               agcGain,
               agcRms,

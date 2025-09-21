@@ -190,21 +190,39 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
   const frameProcessor = useFrameProcessor(
     (frame: Frame) => {
       'worklet';
+      console.log('[PPGCamera] Frame processor called with frame:', {
+        timestamp: frame.timestamp,
+        width: frame.width,
+        height: frame.height
+      });
+
       if (!plugin || typeof plugin.call !== 'function') {
         console.log('[PPGCamera] Frame processor: plugin not ready');
         return;
       }
+
+      console.log('[PPGCamera] Frame processor: calling plugin with params:', pluginParams);
       const value = plugin.call(frame, pluginParams) as unknown;
+
+      console.log('[PPGCamera] Frame processor: plugin returned value:', {
+        value,
+        type: typeof value,
+        isNumber: typeof value === 'number',
+        isNaN: Number.isNaN(value),
+        isFinite: Number.isFinite(value)
+      });
+
       if (typeof value !== 'number' || Number.isNaN(value)) {
         console.log('[PPGCamera] Frame processor: invalid value', {value, type: typeof value});
         return;
       }
+
       const timestamp = frame.timestamp ?? Date.now();
       console.log('[PPGCamera] Frame processor: emitting sample', {value, timestamp});
-      
+
       // WORKLET CRASH FIX: FPS monitoring moved to JS event listener
       // No runOnJS calls from frame processor to prevent iOS crashes
-      
+
       // NATIVE NOTIFICATION: PPGMeanPlugin sends NSNotification, PPGCameraManager forwards to JS
       // No worklet callback needed - samples come via NativeModules event
       console.log('[PPGCamera] Frame processor: sample processed by PPGMeanPlugin');
