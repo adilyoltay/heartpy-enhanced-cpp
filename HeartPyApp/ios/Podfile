@@ -1,4 +1,6 @@
 # Resolve react_native_pods.rb with node to allow for hoisting
+require 'fileutils'
+require 'xcodeproj'
 require Pod::Executable.execute_command('node', ['-p',
   'require.resolve(
     "react-native/scripts/react_native_pods.rb",
@@ -46,5 +48,67 @@ target 'HeartPyApp' do
       :mac_catalyst_enabled => false,
       # :ccache_enabled => true
     )
+
+    # react-native-sound codegen requires C++17; bump the language level for generated targets
+    installer.pods_project.targets.each do |target|
+      next unless ['React-Codegen', 'RNSound'].include?(target.name)
+      target.build_configurations.each do |build_configuration|
+        build_configuration.build_settings['CLANG_CXX_LANGUAGE_STANDARD'] = 'gnu++20'
+      end
+    end
+
+    folly_dir = installer.sandbox.pod_dir('RCT-Folly')
+    if folly_dir
+      folly_config = File.join(folly_dir, 'folly', 'folly-config.h')
+      unless File.exist?(folly_config)
+        FileUtils.mkdir_p(File.dirname(folly_config))
+        File.write(folly_config, <<~FOLLYCFG)
+          #pragma once
+
+          #define FOLLY_MOBILE 1
+          #define FOLLY_USE_LIBCPP 1
+          #define FOLLY_HAVE_PTHREAD 1
+          #define FOLLY_CFG_NO_COROUTINES 1
+          #define FOLLY_HAVE_CLOCK_GETTIME 1
+
+          #pragma clang diagnostic ignored "-Wcomma"
+        FOLLYCFG
+      end
+    end
+
+    generated_dir = File.join(Pod::Config.instance.installation_root, 'build', 'generated', 'ios')
+    header_path = File.join(generated_dir, 'RNSoundSpecJSI.h')
+    if File.exist?(header_path)
+      content = File.read(header_path)
+      marker = "#pragma mark - RNSoundBaseSoundOptionTypes"
+      first = content.index(marker)
+      second = first ? content.index(marker, first + marker.length) : nil
+      if second
+        cutoff = content.index("class JSI_EXPORT NativeSoundIOSCxxSpecJSI", second) || content.length
+        filtered = content.dup
+        filtered.slice!(second...cutoff)
+        File.write(header_path, filtered)
+      end
+    end
+
+    react_codegen_target = installer.pods_project.targets.find { |t| t.name == 'React-Codegen' }
+    if react_codegen_target
+      existing = react_codegen_target.shell_script_build_phases.find { |phase| phase.name == 'Fix RNSoundSpec header' }
+      unless existing
+        phase = react_codegen_target.new_shell_script_build_phase('Fix RNSoundSpec header')
+        phase.shell_script = <<-'SCRIPT'
+HEADER_PATH="${PODS_ROOT}/../build/generated/ios/RNSoundSpecJSI.h"
+if [ -f "$HEADER_PATH" ]; then
+  HEADER="$HEADER_PATH" ruby -e "path = ENV['HEADER']; marker = '#pragma mark - RNSoundBaseSoundOptionTypes'; text = File.read(path); first = text.index(marker); if first; second = text.index(marker, first + marker.length); if second; cutoff = text.index('class JSI_EXPORT NativeSoundIOSCxxSpecJSI', second) || text.length; text.slice!(second...cutoff); File.write(path, text); end; end;"
+fi
+SCRIPT
+        sources_phase = react_codegen_target.build_phases.find { |p| p.is_a?(Xcodeproj::Project::Object::PBXSourcesBuildPhase) }
+        if sources_phase
+          react_codegen_target.build_phases.delete(phase)
+          index = react_codegen_target.build_phases.index(sources_phase) || 0
+          react_codegen_target.build_phases.insert(index, phase)
+        end
+      end
+    end
   end
 end

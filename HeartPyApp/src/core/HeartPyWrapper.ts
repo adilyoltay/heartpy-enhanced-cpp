@@ -1,7 +1,6 @@
 import {RealtimeAnalyzer} from 'react-native-heartpy';
 import {PPG_CONFIG} from './PPGConfig';
 import {RingBuffer} from './RingBuffer';
-import type {PPGMetrics} from '../types/PPGTypes';
 
 // Override QualityInfo to include streaming metrics
 type QualityInfo = {
@@ -37,12 +36,19 @@ type HeartPyResult = {
   peakList: number[];
 };
 
+type AnalyzerPollResult = {
+  metrics: Record<string, any>;
+  waveform_values: number[];
+  waveform_timestamps: number[];
+};
+
 export class HeartPyWrapper {
   private analyzer: RealtimeAnalyzer | null = null;
-  private bufferRef: RingBuffer<number> | null = null; // Reference to analyzer's buffer
+  private bufferRef: RingBuffer<any> | null = null; // Reference to analyzer's buffer (values or {value,timestamp})
   private lastCameraConfidence: number = 0.85; // Track camera confidence for fallback
+  private lastResult: HeartPyResult | null = null;
 
-  setBufferRef(buffer: RingBuffer<number>): void {
+  setBufferRef(buffer: RingBuffer<any>): void {
     this.bufferRef = buffer;
   }
 
@@ -50,14 +56,30 @@ export class HeartPyWrapper {
     this.lastCameraConfidence = confidence;
   }
 
-  async create(sampleRate: number): Promise<void> {
+  async create(
+    sampleRate: number,
+    options?: {
+      refractoryMs?: number;
+      thresholdScale?: number;
+      pHalfOverFundThresholdSoft?: number;
+      welchWsizeSec?: number;
+      nfft?: number;
+      lowCutoffHz?: number;
+      highCutoffHz?: number;
+      bandpassOrder?: number;
+      removeBaselineWander?: boolean;
+      snrTauSec?: number;
+      snrActiveTauSec?: number;
+    },
+  ): Promise<void> {
     console.log('[HeartPyWrapper] Create called with sampleRate:', sampleRate);
     if (this.analyzer) {
       console.log('[HeartPyWrapper] Analyzer already exists');
       return;
     }
-    
+
     try {
+      this.lastResult = null;
       // HOTFIX: Disable JSI to prevent EXC_BAD_ACCESS crash
       console.log('[HeartPyWrapper] Loading react-native-heartpy...');
       const {RealtimeAnalyzer} = require('react-native-heartpy');
@@ -76,23 +98,96 @@ export class HeartPyWrapper {
       const segmentRejectMaxRejects = Math.max(2, Math.floor(segmentRejectWindowBeats * 0.3)); // 30% rejection rate
 
       // CRITICAL: Configure Welch window to match our analysis window
+      const welchWindowSec = options?.welchWsizeSec && options.welchWsizeSec > 0
+        ? options.welchWsizeSec
+        : windowSeconds;
+      const welchNfft = options?.nfft && options.nfft > 0
+        ? Math.floor(options.nfft)
+        : Math.max(
+            64,
+            Math.pow(2, Math.ceil(Math.log2(windowSeconds * sampleRate))),
+          );
+
       const welchConfig = {
-        wsizeSec: windowSeconds, // Use actual window size (5s for 150 samples at 30fps)
-        nfft: Math.max(64, Math.pow(2, Math.ceil(Math.log2(windowSeconds * sampleRate)))), // Power of 2, minimum 64
-        overlap: 0.5, // 50% overlap for smoother PSD
+        wsizeSec: welchWindowSec,
+        nfft: welchNfft,
+        overlap: 0.5,
       };
-      
-      this.analyzer = await RealtimeAnalyzer.create(sampleRate, {
-        bandpass: {lowHz: 0.3, highHz: 4.5, order: 2}, // Even wider bandpass for better signal capture
-        peak: {refractoryMs: 150, bpmMin: 40, bpmMax: 180}, // FIXED: Removed unsupported parameters
+
+      const defaultBandpassLowHz = 0.3;
+      const defaultBandpassHighHz = 4.5;
+      const defaultBandpassOrder = 2;
+
+      const nyquistHz = Math.max(sampleRate / 2, 1);
+      const requestedLowHz = options?.lowCutoffHz ?? defaultBandpassLowHz;
+      const requestedHighHz = options?.highCutoffHz ?? defaultBandpassHighHz;
+      const requestedOrder = options?.bandpassOrder ?? defaultBandpassOrder;
+
+      // Ensure filter bounds stay within a stable and physically meaningful range
+      const effectiveLowHz = Math.max(0.05, Math.min(requestedLowHz, nyquistHz - 0.2));
+      const minSeparationHz = 0.1;
+      const highFloor = effectiveLowHz + minSeparationHz;
+      const effectiveHighHz = Math.max(
+        highFloor,
+        Math.min(requestedHighHz, nyquistHz - 0.05),
+      );
+
+      const bandpassConfig = {
+        lowHz: effectiveLowHz,
+        highHz: effectiveHighHz,
+        order: Math.max(1, requestedOrder),
+      } as const;
+
+      if (PPG_CONFIG.debug.enabled) {
+        console.log('[HeartPyWrapper] Bandpass configuration', bandpassConfig);
+      }
+
+      const refractoryMs = options?.refractoryMs ?? 150;
+      const thresholdScale = options?.thresholdScale;
+      const pHalfOverFundThresholdSoft = options?.pHalfOverFundThresholdSoft;
+
+      const peakConfig: Record<string, number> = {
+        refractoryMs,
+        bpmMin: 40,
+        bpmMax: 180,
+      };
+      if (thresholdScale !== undefined) {
+        peakConfig.thresholdScale = thresholdScale;
+      }
+      if (pHalfOverFundThresholdSoft !== undefined) {
+        peakConfig.pHalfOverFundThresholdSoft = pHalfOverFundThresholdSoft;
+      }
+
+      const preprocessingConfig: Record<string, boolean> = {};
+      if (options?.removeBaselineWander !== undefined) {
+        preprocessingConfig.removeBaselineWander = options.removeBaselineWander;
+      }
+
+      const realtimeOptions: Record<string, any> = {
+        bandpass: bandpassConfig,
+        peak: peakConfig,
         quality: {
           rejectSegmentwise: true,
           segmentRejectWindowBeats,
           segmentRejectMaxRejects,
         },
         windowSeconds,
-        welch: welchConfig, // Add Welch configuration
-      });
+        welch: welchConfig,
+      };
+
+      if (Object.keys(preprocessingConfig).length > 0) {
+        realtimeOptions.preprocessing = preprocessingConfig;
+      }
+
+      if (options?.snrTauSec !== undefined) {
+        realtimeOptions.snrTauSec = options.snrTauSec;
+      }
+
+      if (options?.snrActiveTauSec !== undefined) {
+        realtimeOptions.snrActiveTauSec = options.snrActiveTauSec;
+      }
+
+      this.analyzer = await RealtimeAnalyzer.create(sampleRate, realtimeOptions);
       console.log('[HeartPyWrapper] RealtimeAnalyzer created successfully');
     } catch (error) {
       console.error('[HeartPyWrapper] Create failed:', error);
@@ -144,7 +239,7 @@ export class HeartPyWrapper {
     }
   }
 
-  async poll(): Promise<PPGMetrics | null> {
+  async poll(): Promise<AnalyzerPollResult | null> {
     if (!this.analyzer) {
       throw new Error('HeartPy analyzer not initialized');
     }
@@ -152,6 +247,15 @@ export class HeartPyWrapper {
     try {
       console.log('[HeartPyWrapper] poll request');
       const result = await this.analyzer.poll();
+      // Raw native result for diagnostics (ensure bridge passes peakTimestamps)
+      try {
+        console.log(
+          '[HeartPyWrapper] Raw Native Poll Result:',
+          JSON.stringify(result),
+        );
+      } catch (e) {
+        console.log('[HeartPyWrapper] Raw Native Poll Result: <unserializable>');
+      }
       console.log('[HeartPyWrapper] poll response', {
         hasResult: !!result,
         bpm: result?.bpm,
@@ -164,7 +268,7 @@ export class HeartPyWrapper {
         return null;
       }
 
-      const native = result as Partial<HeartPyResult>;
+      const native = result as Partial<HeartPyResult> & { peakTimestamps?: number[] };
       const quality = native?.quality ?? {};
 
       const goodQuality = (quality as any).goodQuality === true;
@@ -213,6 +317,10 @@ export class HeartPyWrapper {
       }
 
       const rawPeakList = Array.isArray(native?.peakList) ? native.peakList : [];
+      // Convert peak timestamps (sec -> integer ms) for stable equality in UI layer
+      const peakTimestampsMs = Array.isArray(native?.peakTimestamps)
+        ? (native!.peakTimestamps as number[]).map((ts: number) => Math.round(ts * 1000))
+        : [];
       const peakList = this.normalizePeaks(rawPeakList, result);
 
       // P0 FIX: Define bufferLength before use to fix TypeScript compilation error
@@ -227,12 +335,13 @@ export class HeartPyWrapper {
         });
       }
 
-      const metrics: PPGMetrics = {
+      const metrics = {
         bpm: typeof native?.bpm === 'number' ? native.bpm : 0,
         confidence,
         snrDb: normalizedSnrDb,
         hasResult: goodQuality,
         peakList,
+        peakTimestamps: peakTimestampsMs,
         processingWindowStart: bufferLength >= PPG_CONFIG.analysisWindow ? 
           Math.max(0, bufferLength - PPG_CONFIG.analysisWindow) : 0, // P0 FIX: Add processingWindowStart for UI
         quality: {
@@ -259,7 +368,28 @@ export class HeartPyWrapper {
       // Store the result for potential reuse (including native bridge data)
       this.lastResult = result;
 
-      return metrics;
+      const waveformValuesRaw = Array.isArray((result as any)?.waveform_values)
+        ? (result as any).waveform_values
+        : [];
+      const waveformTimestampsRaw = Array.isArray(
+        (result as any)?.waveform_timestamps,
+      )
+        ? (result as any).waveform_timestamps
+        : [];
+
+      const waveform_values = waveformValuesRaw
+        .map((value: unknown) => Number(value))
+        .filter((value: number) => Number.isFinite(value));
+
+      const waveform_timestamps = waveformTimestampsRaw
+        .map((ts: unknown) => Number(ts))
+        .filter((ts: number) => Number.isFinite(ts));
+
+      return {
+        metrics,
+        waveform_values,
+        waveform_timestamps,
+      };
     } catch (error) {
       console.error('[HeartPyWrapper] poll failed', error);
       // Re-throw with more context
@@ -276,16 +406,21 @@ export class HeartPyWrapper {
     }
     await this.analyzer.destroy();
     this.analyzer = null;
+    this.lastResult = null;
   }
 
   private getAnalysisTail(): Float32Array | null {
     if (!this.bufferRef) return null;
-    const data = this.bufferRef.getAll();
+    const data: any[] = this.bufferRef.getAll();
     if (data.length === 0) return null;
     const window = PPG_CONFIG.analysisWindow;
     const tail = data.slice(-window);
     if (tail.length === 0) return null;
-    return Float32Array.from(tail);
+    // Map to numeric values if objects are stored
+    const values: number[] = typeof tail[0] === 'number'
+      ? (tail as number[])
+      : (tail as Array<{ value: number }>).map((it) => it?.value ?? 0);
+    return Float32Array.from(values);
   }
 
   private computeSnrFallbackDb(window: Float32Array): number {

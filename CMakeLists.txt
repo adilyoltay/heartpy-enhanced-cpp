@@ -12,6 +12,7 @@ add_library(heartpy_core STATIC
 
 target_include_directories(heartpy_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/kissfft
 )
 
 if(APPLE)
@@ -34,7 +35,6 @@ if(USE_KISSFFT)
         target_sources(heartpy_core PRIVATE
             third_party/kissfft/kiss_fft.c
             third_party/kissfft/kiss_fftr.c)
-        target_include_directories(heartpy_core PRIVATE third_party/kissfft)
         target_compile_definitions(heartpy_core PRIVATE USE_KISSFFT=1)
     else()
         find_path(KISSFFT_INCLUDE_DIR kiss_fftr.h)

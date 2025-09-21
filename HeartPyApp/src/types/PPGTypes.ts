@@ -7,23 +7,16 @@ export interface PPGSample {
   readonly confidence?: number; // Optional confidence from PPGMeanPlugin
 }
 
-export type PPGQuality = 'good' | 'poor' | 'unknown';
-
-export interface PPGMetrics {
-  readonly bpm: number;
-  readonly confidence: number;
-  readonly snrDb: number;
-  readonly hasResult: boolean;
-  readonly peakList: readonly number[];
-  readonly processingWindowStart: number; // P0 FIX: Add processingWindowStart for accurate peak positioning
-  readonly quality: {
-    readonly goodQuality: boolean;
-    readonly signalQuality: PPGQuality;
-    readonly totalBeats: number;
-    readonly rejectionRate?: number;
-  };
-}
-
 export type PPGState = 'idle' | 'starting' | 'running' | 'stopping';
 
 export type PPGError = 'camera' | 'native' | 'buffer' | 'config';
+
+export type PPGHeartRateUpdate = {
+  readonly bpm: number;
+  readonly confidence: number;
+};
+
+export type PPGAnalysisFrame = {
+  readonly metrics: Record<string, any> | null;
+  readonly waveform: ReadonlyArray<{value: number; timestamp: number}>;
+};

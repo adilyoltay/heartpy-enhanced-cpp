@@ -192,7 +192,7 @@ RealtimeAnalyzer::RealtimeAnalyzer(double fs, const Options& opt)
     size_t margin = 8 * static_cast<size_t>(std::ceil(fs_));
     size_t cap = safeSizeMul(windowSec_, fs_, SIZE_MAX / 4);
     cap = (cap > SIZE_MAX - margin) ? (SIZE_MAX - margin) : (cap + margin);
-    signal_.reserve(cap);
+    m_signal_buffer.reserve(cap);
     filt_.reserve(cap);
     effectiveFs_ = fs_;
     firstTsApprox_ = 0.0;
@@ -214,6 +214,12 @@ RealtimeAnalyzer::RealtimeAnalyzer(double fs, const Options& opt)
     // HP thresholding state
     maPerc_ = std::max(10.0, std::min(60.0, opt_.maPerc));
     hpThreshold_ = opt_.useHPThreshold;
+    if (opt_.snrTauSec > 0.0) {
+        snrTauSec_ = std::max(0.1, opt_.snrTauSec);
+    }
+    if (opt_.snrActiveTauSec <= 0.0) {
+        opt_.snrActiveTauSec = std::max(snrTauSec_, 0.1);
+    }
 }
 
 void RealtimeAnalyzer::setWindowSeconds(double sec) {
@@ -222,7 +228,7 @@ void RealtimeAnalyzer::setWindowSeconds(double sec) {
     if (clamped != windowSec_) {
         windowSec_ = clamped;
         // Restart warm-up timing so confidence re-gates after substantive window changes
-        if ((useRing_ && ringSignal_.size() > 0) || (!useRing_ && !signal_.empty())) {
+        if ((useRing_ && ringSignal_.size() > 0) || (!useRing_ && !m_signal_buffer.empty())) {
             warmupStartTs_ = lastTs_;
         } else {
             warmupStartTs_ = std::numeric_limits<double>::quiet_NaN();
@@ -243,11 +249,11 @@ void RealtimeAnalyzer::setUpdateIntervalSeconds(double sec) {
 void RealtimeAnalyzer::append(const float* x, size_t n) {
     if (!x || n == 0) return;
     // Append and process new samples incrementally
-    const size_t prevLen = signal_.size();
-    signal_.insert(signal_.end(), x, x + n);
-    const size_t newLen = signal_.size();
+    const size_t prevLen = m_signal_buffer.size();
+    m_signal_buffer.insert(m_signal_buffer.end(), x, x + n);
+    const size_t newLen = m_signal_buffer.size();
     if (filt_.size() < prevLen) filt_.resize(prevLen);
-    if (signal_.size() > filt_.size()) filt_.resize(signal_.size());
+    if (m_signal_buffer.size() > filt_.size()) filt_.resize(m_signal_buffer.size());
     // timebase (nominal fs)
     if (prevLen == 0) {
         firstTsApprox_ = 0.0;
@@ -258,7 +264,7 @@ void RealtimeAnalyzer::append(const float* x, size_t n) {
     }
     // Process new portion
     for (size_t i = prevLen; i < newLen; ++i) {
-        float s = signal_[i];
+        float s = m_signal_buffer[i];
         bool useD = opt_.highPrecision || opt_.deterministic;
         float yout;
         if (useD && !bqD_.empty()) {
@@ -474,13 +480,20 @@ void RealtimeAnalyzer::trimToWindow() {
                 lastRR_.push_back(dt * 1000.0);
             }
         }
-    } else if (signal_.size() > maxSamples) {
-        const size_t drop = signal_.size() - maxSamples;
-        signal_.erase(signal_.begin(), signal_.begin() + drop);
+    } else if (m_signal_buffer.size() > maxSamples) {
+        const size_t drop = m_signal_buffer.size() - maxSamples;
+        m_signal_buffer.erase(m_signal_buffer.begin(), m_signal_buffer.begin() + drop);
+        if (!m_timestamps.empty()) {
+            if (m_timestamps.size() >= drop) {
+                m_timestamps.erase(m_timestamps.begin(), m_timestamps.begin() + drop);
+            } else {
+                m_timestamps.clear();
+            }
+        }
         if (filt_.size() >= drop) filt_.erase(filt_.begin(), filt_.begin() + drop);
         droppedSamplesLast_ += drop; droppedSamplesTotal_ += drop; ++dropConsecPolls_;
         // Approximate firstTs by backing off from lastTs
-        firstTsApprox_ = lastTs_ - static_cast<double>(signal_.size()) / effFs;
+        firstTsApprox_ = lastTs_ - static_cast<double>(m_signal_buffer.size()) / effFs;
         firstAbs_ += drop;
         // prune peaks outside window; rebuild RR/peaks relative indices
         while (!peaksAbs_.empty() && peaksAbs_.front() < firstAbs_) peaksAbs_.erase(peaksAbs_.begin());
@@ -566,23 +579,33 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
                 ringSignal_.push_back(s);
                 ringFilt_.push_back(y);
             }
+            // track timestamp alongside ring contents (trimmed below)
+            m_timestamps.push_back(ts);
             ++totalAbs_;
             lastSeenTs = ts;
         }
         lastTs_ = lastSeenTs;
         firstAbs_ = (totalAbs_ > ringFilt_.size()) ? (totalAbs_ - ringFilt_.size()) : 0;
+        // Ensure timestamps mirror the current ring window length
+        size_t curWin = ringFilt_.size();
+        if (m_timestamps.size() > curWin) {
+            size_t dropTs = m_timestamps.size() - curWin;
+            m_timestamps.erase(m_timestamps.begin(), m_timestamps.begin() + dropTs);
+        }
         return;
     }
-    if (signal_.empty()) {
+    if (m_signal_buffer.empty()) {
         firstTsApprox_ = t0;
         if (!std::isfinite(warmupStartTs_)) warmupStartTs_ = t0;
     }
     lastTs_ = t1;
     // Process each incoming sample through the same path as append()
-    const size_t prevLen = signal_.size();
-    signal_.insert(signal_.end(), samples, samples + n);
+    const size_t prevLen = m_signal_buffer.size();
+    m_signal_buffer.insert(m_signal_buffer.end(), samples, samples + n);
+    // mirror timestamps for non-ring window
+    m_timestamps.insert(m_timestamps.end(), timestamps, timestamps + n);
     if (filt_.size() < prevLen) filt_.resize(prevLen);
-    if (signal_.size() > filt_.size()) filt_.resize(signal_.size());
+    if (m_signal_buffer.size() > filt_.size()) filt_.resize(m_signal_buffer.size());
     for (size_t i = 0; i < n; ++i) {
         size_t dst = prevLen + i;
         float s = samples[i];
@@ -773,583 +796,51 @@ void RealtimeAnalyzer::push(const float* samples, const double* timestamps, size
 
 bool RealtimeAnalyzer::poll(HeartMetrics& out) {
     std::unique_lock<std::mutex> lock(dataMutex_);
-#if defined(HEARTPY_LOCK_TIMING) && defined(HEARTPY_LOCK_TIMING_ENABLE)
-    auto l1_start = std::chrono::steady_clock::now();
-#endif
-    // Only emit once per updateSec_ of newly received samples
-    if ((lastTs_ - lastEmitTime_) < updateSec_) return false;
+
+    if ((lastTs_ - lastEmitTime_) < updateSec_) {
+        return false;
+    }
     lastEmitTime_ = lastTs_;
 
-    // Snapshot minimal state + window
-    std::vector<double> win;
+    // Step 1: copy the signal and timestamp windows in sync
+    std::vector<double> win(filt_.begin(), filt_.end());
+    std::vector<double> ts_win(m_timestamps.begin(), m_timestamps.end());
+
+    assert(win.size() == ts_win.size() && "Signal and timestamp buffers must be in sync");
+
     double fsEff = (effectiveFs_ > 1e-6 ? effectiveFs_ : fs_);
-    size_t firstAbsSnap = firstAbs_;
-    double firstTsSnap = firstTsApprox_;
-    if ((!useRing_ && signal_.empty()) || (useRing_ && ringFilt_.empty())) return false;
-    if (useRing_) {
-        std::vector<float> tmp; ringFilt_.snapshot(tmp);
-        win.reserve(tmp.size());
-        for (float v : tmp) win.push_back(static_cast<double>(v));
-        firstAbsSnap = (totalAbs_ > ringFilt_.size()) ? (totalAbs_ - ringFilt_.size()) : 0;
-        firstTsSnap = lastTs_ - static_cast<double>(ringFilt_.size()) / fsEff;
-    } else {
-        win.reserve(signal_.size());
-        for (float v : filt_) win.push_back(static_cast<double>(v));
-    }
+
     lock.unlock();
-#if defined(HEARTPY_LOCK_TIMING) && defined(HEARTPY_LOCK_TIMING_ENABLE)
-    auto l1_end = std::chrono::steady_clock::now();
-    heartpy::RealtimeAnalyzer::recordLockHold(1, std::chrono::duration_cast<std::chrono::microseconds>(l1_end - l1_start).count());
-#endif
+
+    // Step 2: analyze the signal window
     Options o = opt_;
-    // Keep user-configured bandpass; callers may set lowHz=highHz=0 to skip
     out = analyzeSignal(win, fsEff, o);
 
-    // If HP-style thresholding requested, calibrate ma_perc on the current window
-    if (opt_.useHPThreshold) {
-        // Rolling mean over ~0.75s as in HeartPy
-        // Positive-baseline scale window to [0..1024] for HP-style threshold
-        double wmin = *std::min_element(win.begin(), win.end());
-        double wmax = *std::max_element(win.begin(), win.end());
-        double wden = std::max(1e-6, wmax - wmin);
-        std::vector<double> swin; swin.reserve(win.size());
-        for (double v : win) swin.push_back((v - wmin) / wden * 1024.0);
-        auto rmean = rollingMeanHP_local(swin, fsEff, 0.75);
-        double rmean_avg = meanVec(rmean);
-        // Retune only every maUpdateSec_ seconds (hysteresis)
-        if ((lastTs_ - lastMaUpdateTime_) >= maUpdateSec_) {
-            // candidate ma_perc grid (expanded)
-            std::vector<double> grid = {10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 50.0, 60.0};
-            double best_ma = maPerc_;
-            double best_score = 1e300; // lower is better
-            std::vector<int> best_peaks_rel;
-            for (double ma : grid) {
-                auto cand = detectPeaksHP_local(swin, rmean, ma, fsEff);
-                cand = consolidateByRefractory(cand, win, refractorySamples_);
-                if (cand.size() < 2) continue;
-                std::vector<double> rr_ms; rr_ms.reserve(cand.size() - 1);
-                for (size_t i = 1; i < cand.size(); ++i) rr_ms.push_back((cand[i] - cand[i - 1]) * 1000.0 / fsEff);
-                double mean_rr = meanVec(rr_ms);
-                if (mean_rr <= 1e-6) continue;
-                double bpm = 60000.0 / mean_rr;
-                // score: RR std, penalize if outside BPM limits
-                double var = 0.0; for (double r : rr_ms) { double d = r - mean_rr; var += d * d; } var /= rr_ms.size();
-                double sd = std::sqrt(std::max(0.0, var));
-                double penalty = 0.0;
-                if (bpm < opt_.bpmMin || bpm > opt_.bpmMax) penalty = 1e3; // heavy penalty
-                // Bias against implausibly high BPM relative to prior
-                double bpm_prior = bpmEmaValid_ ? bpmEma_ : (0.5 * (opt_.bpmMin + opt_.bpmMax));
-                bpm_prior = std::max(opt_.bpmMin, std::min(opt_.bpmMax, bpm_prior));
-                double highThresh = std::max(110.0, bpm_prior + 15.0);
-                double excess = std::max(0.0, (bpm - highThresh)) / 40.0;
-                double k = 0.4;
-                double score = sd * (1.0 + k * excess) + penalty;
-                // Optional guard: if bpm is high and lift is very low, penalize low ma
-                if ((bpm > highThresh) && (ma < 25.0)) {
-                    score += sd; // add one SD as penalty
-                }
-                if (score < best_score) { best_score = score; best_ma = ma; best_peaks_rel = std::move(cand); }
-            }
-            if (!best_peaks_rel.empty()) {
-                // Hysteresis: switch only if improvement >=10%
-                double old = maPercScore_;
-                if (old <= 0.0) old = 1e300;
-                double rel_impr = (old > 0.0 && old < 1e299) ? ((old - best_score) / old) : 1.0;
-                bool dwell_ok = (lastTs_ - lastMaChangeTime_) >= 6.0;
-                if ((rel_impr >= 0.15 || maPercScore_ >= 1e299) && dwell_ok) {
-                    // Upward bias: if persistent high BPM and chosen ma < 25, nudge +10
-                    bool bpmHighPersist = (bpmEmaValid_ && bpmEma_ > 120.0 && (lastTs_ - firstTsApprox_) >= 10.0);
-                    maPerc_ = best_ma;
-                    if (bpmHighPersist && maPerc_ < 25.0) maPerc_ = std::min(60.0, maPerc_ + 10.0);
-                    maPercScore_ = best_score;
-                    // Replace window peaks with calibrated HP result
-                    peaksAbs_.clear(); peaksAbs_.reserve(best_peaks_rel.size());
-                    // Stage peaks into local vectors using snapshot bases; commit later
-                    std::vector<int> candPeaksAbs; candPeaksAbs.reserve(best_peaks_rel.size());
-                    for (int rel : best_peaks_rel) candPeaksAbs.push_back((int)(firstAbsSnap + (size_t)rel));
-                    std::vector<int> candPeaksRel; std::vector<double> candRR;
-                    for (size_t j = 0; j < candPeaksAbs.size(); ++j) {
-                        size_t rel = candPeaksAbs[j] - firstAbsSnap;
-                        candPeaksRel.push_back((int)rel);
-                        if (j > 0) {
-                            double dts = (double)(candPeaksAbs[j] - candPeaksAbs[j - 1]) / fsEff;
-                            candRR.push_back(dts * 1000.0);
-                        }
-                    }
-                    // Commit minimal state under short lock
-                    lock.lock();
-                    peaksAbs_.assign(candPeaksAbs.begin(), candPeaksAbs.end());
-                    lastPeaks_.assign(candPeaksRel.begin(), candPeaksRel.end());
-                    lastRR_.assign(candRR.begin(), candRR.end());
-                    lastMaChangeTime_ = lastTs_;
-                    lock.unlock();
-                }
-            }
-            lastMaUpdateTime_ = lastTs_;
-        }
-        // Update base lift for current maPerc_
-        baseLift_ = (rmean_avg / 100.0) * maPerc_;
-        hpThreshold_ = true;
-        // Apply ma_perc floors if persistent high-HR & high-CV (checked in S4; may be last known state)
-        if (cvHighActive_ && (lastTs_ - cvHighStartTs_) >= 6.0 && bpmEma_ > 120.0) {
-            maPerc_ = std::max(maPerc_, 15.0);
-        }
-        if (cvHighActive_ && (lastTs_ - cvHighStartTs_) >= 10.0 && bpmEma_ > 130.0) {
-            maPerc_ = std::max(maPerc_, 20.0);
-        }
-        // Export active ma_perc for diagnostics
-        out.quality.maPercActive = maPerc_;
-    }
+    // Capture the analyzed waveform snapshot for downstream consumers
+    out.waveform_values = win;
+    out.waveform_timestamps = ts_win;
 
-    // Cache a few items for convenience (updated again after SNR)
-    // Commit cached quality and audit counters under short lock
-    lock.lock();
-    out.quality.droppedSamplesTotal = droppedSamplesTotal_;
-    out.quality.clampedBatchesTotal = clampedBatchesTotal_;
-    out.quality.oomPreventedTotal = oomPreventedTotal_;
-    out.quality.paramChangeEventsTotal = paramChangeEventsTotal_;
-    out.quality.mergeBudgetExhausted = lastMergeBudgetExhausted_ ? 1 : 0;
-    out.quality.mergeBudgetExhaustedTotal = mergeBudgetExhaustedTotal_;
-    out.quality.droppedSamplesLast = droppedSamplesLast_;
-    out.quality.clampedBatchesLast = clampedBatchesLast_;
-    out.quality.timestampBacktrackEventsTotal = timestampBacktrackEventsTotal_;
-    out.quality.timestampsSkippedTotal = timestampsSkippedTotal_;
-    out.quality.timeJumpEventsTotal = timeJumpEventsTotal_;
-    out.quality.droppingActive = (dropConsecPolls_ >= 2) ? 1 : 0;
-    lastQuality_ = out.quality;
-    lastMergeBudgetExhausted_ = 0; // reset per-poll flag
-    droppedSamplesLast_ = 0; clampedBatchesLast_ = 0; // reset per-poll last counters
-    lock.unlock();
-#if defined(HEARTPY_LOCK_TIMING) && defined(HEARTPY_LOCK_TIMING_ENABLE)
-    // This scope is small; measure approximately around the lock/unlock block
-    // For precision, we could wrap individual lock sections separately.
-    heartpy::RealtimeAnalyzer::recordLockHold(2, 0.0);
-#endif
-    // Prefer streaming peaks/RR; if empty, fall back to batch results
-    if (lastPeaks_.empty()) { lock.lock(); lastPeaks_ = out.peakList; lock.unlock(); }
-    if (lastRR_.empty())    { lock.lock(); lastRR_   = out.rrList;  lock.unlock(); }
-
-    // Phase S4: compute masked metrics incrementally from streaming RR list
-    if (!lastRR_.empty()) {
-        const std::vector<double>& rr_ms = lastRR_;
-        std::vector<int> rr_mask(rr_ms.size(), 0);
-        if (opt_.thresholdRR && rr_ms.size() >= 1) {
-            double mean_rr = meanVec(rr_ms);
-            double margin = std::max(0.3 * mean_rr, 300.0);
-            double lower = mean_rr - margin;
-            double upper = mean_rr + margin;
-            for (size_t i = 0; i < rr_ms.size(); ++i) {
-                if (rr_ms[i] <= lower || rr_ms[i] >= upper) rr_mask[i] = 1; // reject
-            }
-        }
-        // successive diffs only where both ends are accepted
-        std::vector<double> pair_diffs; pair_diffs.reserve(rr_ms.size());
-        std::vector<double> pair_abs; pair_abs.reserve(rr_ms.size());
-        for (size_t i = 1; i < rr_ms.size(); ++i) {
-            if (rr_mask[i] == 0 && rr_mask[i - 1] == 0) {
-                double d = rr_ms[i] - rr_ms[i - 1];
-                pair_diffs.push_back(d);
-                pair_abs.push_back(std::fabs(d));
-            }
-        }
-        if (!pair_abs.empty()) {
-            // SDSD & RMSSD
-            if (opt_.sdsdMode == Options::SdsdMode::ABS) out.sdsd = std::sqrt(std_pop_vec(pair_abs));
-            else out.sdsd = std::sqrt(std_pop_vec(pair_diffs));
-            double sumsq = 0.0; for (double d : pair_diffs) sumsq += d * d; out.rmssd = std::sqrt(sumsq / static_cast<double>(pair_diffs.size()));
-            // pNN
-            int over20 = 0, over50 = 0;
-            for (double a : pair_abs) {
-                double v = round6_local(a);
-                if (v > 20.0) ++over20;
-                if (v > 50.0) ++over50;
-            }
-            out.nn20 = over20; out.nn50 = over50;
-            double r20 = over20 / static_cast<double>(pair_abs.size());
-            double r50 = over50 / static_cast<double>(pair_abs.size());
-            out.pnn20 = opt_.pnnAsPercent ? (100.0 * r20) : r20;
-            out.pnn50 = opt_.pnnAsPercent ? (100.0 * r50) : r50;
-        }
-        // update simple quality counters using mask
-        out.quality.totalBeats = static_cast<int>(rr_ms.size() + 1);
-        int rej = 0; for (int m : rr_mask) if (m) ++rej;
-        out.quality.rejectedBeats = rej;
-        out.quality.rejectionRate = (rr_ms.size() > 0 ? (rej / static_cast<double>(rr_ms.size())) : 0.0);
-
-        // Update BPM from streaming RR (accepted intervals only)
-        double rr_sum = 0.0; int rr_cnt = 0;
-        for (size_t i = 0; i < rr_ms.size(); ++i) if (rr_mask[i] == 0) { rr_sum += rr_ms[i]; ++rr_cnt; }
-        if (rr_cnt > 0) {
-            double mean_rr = rr_sum / rr_cnt;
-            if (mean_rr > 1e-6) out.bpm = 60000.0 / mean_rr;
-        }
-        // Update BPM EMA prior for ma_perc bias
-        double now_b = lastTs_;
-        if (out.bpm > 0.0) {
-            double dtb = (lastBpmUpdateTime_ > 0.0) ? (now_b - lastBpmUpdateTime_) : updateSec_;
-            double alphab = 1.0 - std::exp(-dtb / std::max(1e-3, bpmTauSec_));
-            if (!bpmEmaValid_) { bpmEma_ = out.bpm; bpmEmaValid_ = true; }
-            else bpmEma_ = (1.0 - alphab) * bpmEma_ + alphab * out.bpm;
-            lastBpmUpdateTime_ = now_b;
-            // Track persistent high BPM epoch (for RR-based doubling hint)
-            if (bpmEmaValid_ && bpmEma_ > 120.0) {
-                if (!bpmHighActive_) { bpmHighActive_ = true; bpmHighStartTs_ = now_b; }
-            } else {
-                bpmHighActive_ = false; bpmHighStartTs_ = 0.0;
-            }
-        }
-
-        // Phase S5: build 10-beat sliding binary windows (BinarySegments)
-        out.binarySegments.clear();
-        int windowBeats = 10; // default
-        if (opt_.segmentRejectWindowBeats > 0) windowBeats = opt_.segmentRejectWindowBeats;
-        int maxRejects = std::max(0, opt_.segmentRejectMaxRejects);
-        const int beats = static_cast<int>(rr_ms.size() + 1);
-        // rr_mask is per interval; window intervals = windowBeats - 1
-        const int winIntervals = std::max(0, windowBeats - 1);
-        if (beats >= windowBeats && winIntervals > 0) {
-            // step beats computed from overlap ratio
-            double ov = std::min(1.0, std::max(0.0, opt_.segmentRejectOverlap));
-            int stepBeats = std::max(1, (int)std::lround(windowBeats * (1.0 - ov)));
-            int idx = 0;
-            for (int b0 = 0; b0 + windowBeats <= beats; b0 += stepBeats) {
-                int b1 = b0 + windowBeats; // exclusive beat end
-                int i0 = b0;               // interval start index
-                int i1 = b1 - 1;           // interval end (exclusive)
-                int rcount = 0;
-                for (int i = i0; i < i1 && i < (int)rr_mask.size(); ++i) if (rr_mask[i]) ++rcount;
-                HeartMetrics::BinarySegment seg;
-                seg.index = idx++;
-                seg.startBeat = b0;
-                seg.endBeat = b1;
-                seg.totalBeats = windowBeats;
-                seg.rejectedBeats = rcount;
-                seg.accepted = (rcount <= maxRejects);
-                out.binarySegments.push_back(seg);
-            }
-        }
-
-        // Final consolidation: keep strongest within refractory across window
-        if (!lastPeaks_.empty()) {
-            auto consolidated = consolidateByRefractory(lastPeaks_, win, refractorySamples_);
-            if (consolidated.size() != lastPeaks_.size()) {
-                lastPeaks_ = std::move(consolidated);
-                // rebuild RR from consolidated peaks
-                lastRR_.clear();
-                for (size_t j = 1; j < lastPeaks_.size(); ++j) {
-                    double dts = (lastPeaks_[j] - lastPeaks_[j - 1]) / fsEff;
-                    lastRR_.push_back(dts * 1000.0);
-                }
-            }
-        }
-
-        // Periodic suppression: keep only one peak per expected period window anchored to last kept peak
-        if ((softDoublingActive_ || doublingActive_ || doublingHintActive_) && lastPeaks_.size() >= 2 && (lastTs_ > chokeRelaxUntil_)) {
-            const double fsEffLoc = fsEff;
-            // Prefer RR-derived long period; fallback to f0
-            double longMs = 0.0;
-            if (out.quality.rrLongMs > 0.0) longMs = out.quality.rrLongMs;
-            if (longMs <= 0.0 && !lastRR_.empty()) {
-                double med = medianOfRR(lastRR_);
-                longMs = 2.0 * med;
-            }
-            if (longMs <= 0.0 && lastF0Hz_ > 1e-9) longMs = 1000.0 / lastF0Hz_;
-            double T = (longMs > 0.0 ? (longMs / 1000.0) : 0.0);
-            if (T > 0.0) {
-                // If RR-fallback mode is active, skip periodic suppression for this poll
-                if (rrFallbackModeActive_) {
-                    // no suppression; rely on min-RR gate + refractory
-                } else {
-                double tol = opt_.periodicSuppressionTol * T; // conservative (active only)
-                const size_t n0 = lastPeaks_.size();
-                size_t removed = 0, merges = 0;
-                std::vector<char> keepP(lastPeaks_.size(), 1);
-                // Start from the first peak as last kept
-                size_t kidx = 0;
-                double tlast = firstTsApprox_ + (lastPeaks_[kidx] / fsEffLoc);
-                size_t j = kidx + 1;
-                while (j < lastPeaks_.size()) {
-                    double t = firstTsApprox_ + (lastPeaks_[j] / fsEffLoc);
-                    if (t < (tlast + 0.5 * T)) { ++j; continue; }
-                    if (t > (tlast + 1.5 * T)) { tlast = t; kidx = j; ++j; continue; }
-                    // Collect all peaks within [tlast+0.5T, tlast+1.5T]
-                    size_t wstart = j;
-                    while (j < lastPeaks_.size()) {
-                        double tt = firstTsApprox_ + (lastPeaks_[j] / fsEffLoc);
-                        if (tt <= (tlast + 1.5 * T)) ++j; else break;
-                    }
-                    // Window indices [wstart, j)
-                    if (j > wstart) {
-                        size_t best = wstart;
-                        int relBest = clampIndexInt(lastPeaks_[best], (int)win.size());
-                        double bestA = (inRangeIdx(lastPeaks_[best], (int)win.size()) ? win[relBest] : 0.0);
-                        for (size_t s = wstart + 1; s < j; ++s) {
-                            int relS = clampIndexInt(lastPeaks_[s], (int)win.size());
-                            double a = (inRangeIdx(lastPeaks_[s], (int)win.size()) ? win[relS] : 0.0);
-                            if (a > bestA) { best = s; bestA = a; }
-                        }
-                        // Mark all others in window for removal
-                        for (size_t s = wstart; s < j; ++s) {
-                            if (s != best && keepP[s]) { keepP[s] = 0; ++removed; ++merges; if (merges >= 10) break; }
-                        }
-                        kidx = best; tlast = firstTsApprox_ + (lastPeaks_[kidx] / fsEffLoc);
-                        // Early stop for safety
-                        if (merges >= 10 || removed > (size_t)(0.4 * n0)) break;
-                    }
-                }
-                // RR-fallback-only cap: do not remove more than 25% in a single poll
-                size_t maxRm = rrFallbackActive_ ? (size_t)std::floor(0.25 * n0) : (size_t)(-1);
-                if (rrFallbackActive_ && removed > maxRm) {
-                    // revert suppression for this poll
-                } else if (removed > 0) {
-                    std::vector<int> newPeaks;
-                    for (size_t q = 0; q < lastPeaks_.size(); ++q) if (keepP[q]) newPeaks.push_back(lastPeaks_[q]);
-                    lastPeaks_.swap(newPeaks);
-                    lastRR_.clear();
-                    for (size_t u = 1; u < lastPeaks_.size(); ++u) {
-                        double dts = (lastPeaks_[u] - lastPeaks_[u - 1]) / fsEff;
-                        lastRR_.push_back(dts * 1000.0);
-                    }
-                }
-                }
-            }
-        }
-
-        // Doubling repair on RR sequence: coalesce pairs of short intervals
-        // Snapshot for safety brake
-        std::vector<int> peaks_before = lastPeaks_;
-        std::vector<double> rr_before = lastRR_;
-        if (lastRR_.size() >= 3 && lastPeaks_.size() == lastRR_.size() + 1) {
-            double m = medianOfRR(lastRR_);
-            keepScratch_.assign(lastPeaks_.size(), 1);
-            for (size_t i = 0; i + 1 < lastRR_.size(); ++i) {
-                double r1 = lastRR_[i];
-                double r2 = lastRR_[i + 1];
-                double sum = r1 + r2;
-                bool merge = false;
-                // Default heuristic (no harmonic context): detect very short followed by near-median pair
-                if (r1 < 0.65 * m && sum >= 0.8 * m && sum <= 1.2 * m) merge = true;
-                // Harmonic-context heuristic: when soft/hard doubling active, target ~2x median pair sums
-                if (!merge && (softDoublingActive_ || doublingActive_)) {
-                    double m_long = 2.0 * m;
-                    if ((std::min(r1, r2) < 0.9 * m) && (sum >= 0.8 * m_long && sum <= 1.2 * m_long)) merge = true;
-                }
-                // Generic doubling pattern: two short intervals whose sum ~ 2x median
-                if (!merge) {
-                    double m_long = 2.0 * m;
-                    if ((std::min(r1, r2) < 0.85 * m) && (sum >= opt_.rrMergeBandLow * m_long && sum <= opt_.rrMergeBandHigh * m_long)) merge = true;
-                }
-                // Equal short pair merge when soft/hard active: both ~median and sum ~2×median
-                if (!merge && (softDoublingActive_ || doublingActive_)) {
-                    double m_long = 2.0 * m;
-                    bool bothShortish = (r1 >= opt_.rrMergeEqualBandLow * m && r1 <= opt_.rrMergeEqualBandHigh * m && r2 >= opt_.rrMergeEqualBandLow * m && r2 <= opt_.rrMergeEqualBandHigh * m);
-                    bool sumLongish = (sum >= opt_.rrMergeEqualBandLow * m_long && sum <= opt_.rrMergeEqualBandHigh * m_long);
-                    if (bothShortish && sumLongish) merge = true;
-                }
-                if (merge) {
-                        // remove inner peak at index i+1 (compare amplitudes around peaks i+1 vs neighbors)
-                        int pL = lastPeaks_[i];
-                        int pM = lastPeaks_[i + 1];
-                        int pR = lastPeaks_[i + 2];
-                        int rL = clampIndexInt(pL, (int)win.size());
-                        int rM = clampIndexInt(pM, (int)win.size());
-                        int rR = clampIndexInt(pR, (int)win.size());
-                        double aL = (inRangeIdx(pL, (int)win.size()) ? win[rL] : 0.0);
-                        double aM = (inRangeIdx(pM, (int)win.size()) ? win[rM] : 0.0);
-                        double aR = (inRangeIdx(pR, (int)win.size()) ? win[rR] : 0.0);
-                        // remove middle if it is not stronger than both neighbors
-                        if (aM <= std::max(aL, aR)) {
-                            keepScratch_[i + 1] = 0;
-                            ++i; // skip next as it merges with this short
-                        }
-                }
-            }
-            // rebuild peaks if any removal
-            bool any = false; for (char c : keepScratch_) if (!c) { any = true; break; }
-            if (any) {
-                std::vector<int> newPeaks;
-                for (size_t k = 0; k < keepScratch_.size(); ++k) if (keepScratch_[k]) newPeaks.push_back(lastPeaks_[k]);
-                lastPeaks_.swap(newPeaks);
-                lastRR_.clear();
-                for (size_t j = 1; j < lastPeaks_.size(); ++j) {
-                    double dts = (lastPeaks_[j] - lastPeaks_[j - 1]) / fsEff;
-                    lastRR_.push_back(dts * 1000.0);
-                }
-            }
-            // Aggressive pass when soft/hard/hint doubling is active; iterate until no changes
-            if ((softDoublingActive_ || doublingActive_ || doublingHintActive_) && !rrFallbackDrivingHint_) {
-                bool changed = true; size_t removedTotal = 0; const size_t nInit = lastPeaks_.size();
-                int iteration = 0; const int maxIterations = 8; // tighter deterministic cap
-                size_t removeBudget = std::min<size_t>(12, (size_t)std::floor(0.10 * nInit));
-                bool budgetExhausted = false;
-                while (changed && iteration < maxIterations && removedTotal < removeBudget) {
-                    changed = false;
-                    ++iteration;
-                    if (lastRR_.size() >= 3) {
-                        const std::vector<double>& rrs = lastRR_;
-                        double m2 = medianOfRR(rrs);
-                        double two = 2.0 * m2;
-                        keepScratch_.assign(lastPeaks_.size(), 1);
-                        for (size_t i = 0; i + 1 < rrs.size(); ++i) {
-                            double r1 = rrs[i];
-                            double r2 = rrs[i + 1];
-                            double sum = r1 + r2;
-                            bool condShortPairA = (r1 < 0.85 * m2) && (sum >= opt_.rrMergeBandLow * two && sum <= opt_.rrMergeBandHigh * two);
-                            bool condShortPairB = (r1 < 0.75 * m2) && (sum >= 0.8 * two && sum <= 1.2 * two);
-                            bool bothNearMed = (r1 >= opt_.rrMergeBandLow * m2 && r1 <= opt_.rrMergeBandHigh * m2 && r2 >= opt_.rrMergeBandLow * m2 && r2 <= opt_.rrMergeBandHigh * m2);
-                            bool sumNearTwo = (sum >= 0.80 * two && sum <= 1.20 * two);
-                            bool mergeEq = bothNearMed && sumNearTwo;
-                            if (condShortPairA || condShortPairB || mergeEq) {
-                                // remove inner peak at index i+1 (compare amplitudes)
-                                int pL = lastPeaks_[i];
-                                int pM = lastPeaks_[i + 1];
-                                int pR = lastPeaks_[i + 2];
-                                int rL = clampIndexInt(pL, (int)win.size());
-                                int rM = clampIndexInt(pM, (int)win.size());
-                                int rR = clampIndexInt(pR, (int)win.size());
-                                double aL = (inRangeIdx(pL, (int)win.size()) ? win[rL] : 0.0);
-                                double aM = (inRangeIdx(pM, (int)win.size()) ? win[rM] : 0.0);
-                                double aR = (inRangeIdx(pR, (int)win.size()) ? win[rR] : 0.0);
-                                if (aM <= std::max(aL, aR) && removedTotal < removeBudget) { keepScratch_[i + 1] = 0; changed = true; ++i; ++removedTotal; }
-                            }
-                        }
-                        if (changed) {
-                            std::vector<int> newPeaks2;
-                            for (size_t k = 0; k < keepScratch_.size(); ++k) if (keepScratch_[k]) newPeaks2.push_back(lastPeaks_[k]);
-                            lastPeaks_.swap(newPeaks2);
-                            lastRR_.clear();
-                            for (size_t j = 1; j < lastPeaks_.size(); ++j) {
-                                double dts = (lastPeaks_[j] - lastPeaks_[j - 1]) / fsEff;
-                                lastRR_.push_back(dts * 1000.0);
-                            }
-                            if (removedTotal > (size_t)(0.4 * nInit)) break;
-                            if (removedTotal >= removeBudget) break;
-                        }
-                    }
-                }
-                budgetExhausted = (removedTotal >= removeBudget) || (iteration >= maxIterations);
-                if (budgetExhausted) { lastMergeBudgetExhausted_ = 1; ++mergeBudgetExhaustedTotal_; }
-            } else if (rrFallbackModeActive_) {
-                // RR-fallback path: enable a very-limited merge with tight bands and hard caps; suppression stays OFF
-                if (lastRR_.size() >= 3) {
-                    double m2 = medianOfRR(lastRR_);
-                    double two = 2.0 * m2;
-                    const size_t nInit = lastPeaks_.size();
-                    size_t cap = std::min<size_t>(12, (size_t)std::floor(0.10 * nInit)); // align budgets
-                    size_t removed = 0;
-                    keepScratch_.assign(lastPeaks_.size(), 1);
-                    for (size_t i = 0; i + 1 < lastRR_.size(); ++i) {
-                        if (removed >= cap) break;
-                        double r1 = lastRR_[i];
-                        double r2 = lastRR_[i + 1];
-                        double sum = r1 + r2;
-                        bool nearMedBoth = (r1 >= opt_.rrMergeBandLow * m2 && r1 <= opt_.rrMergeBandHigh * m2 && r2 >= opt_.rrMergeBandLow * m2 && r2 <= opt_.rrMergeBandHigh * m2);
-                        bool sumNearLong = (sum >= 0.93 * two && sum <= 1.07 * two);
-                        if (nearMedBoth && sumNearLong) {
-                            int pL = lastPeaks_[i];
-                            int pM = lastPeaks_[i + 1];
-                            int pR = lastPeaks_[i + 2];
-                            int rL2 = clampIndexInt(pL, (int)win.size());
-                            int rM2 = clampIndexInt(pM, (int)win.size());
-                            int rR2 = clampIndexInt(pR, (int)win.size());
-                            double aL = (inRangeIdx(pL, (int)win.size()) ? win[rL2] : 0.0);
-                            double aM = (inRangeIdx(pM, (int)win.size()) ? win[rM2] : 0.0);
-                            double aR = (inRangeIdx(pR, (int)win.size()) ? win[rR2] : 0.0);
-                            if (aM <= std::max(aL, aR)) { keepScratch_[i + 1] = 0; ++removed; ++i; }
-                        }
-                    }
-                    if (removed > 0) {
-                        std::vector<int> newPeaksF;
-                        for (size_t k = 0; k < keepScratch_.size(); ++k) if (keepScratch_[k]) newPeaksF.push_back(lastPeaks_[k]);
-                        lastPeaks_.swap(newPeaksF);
-                        lastRR_.clear();
-                        for (size_t j = 1; j < lastPeaks_.size(); ++j) {
-                            double dts = (lastPeaks_[j] - lastPeaks_[j - 1]) / fsEff;
-                            lastRR_.push_back(dts * 1000.0);
-                        }
-                    }
-                    if (removed >= cap) { lastMergeBudgetExhausted_ = 1; ++mergeBudgetExhaustedTotal_; }
-                }
-            }
-        }
-        // Safety brake: prevent excessive downshift
-        double bpmEstNow = 0.0;
-        if (!lastRR_.empty()) { double med = medianOfRR(lastRR_); if (med>1e-6) bpmEstNow = 60000.0/med; }
-        if (rrFallbackModeActive_ && lastPollBpmEst_ > 100.0 && bpmEstNow > 0.0 && bpmEstNow < 50.0) {
-            // revert this poll's changes
-            lastPeaks_ = peaks_before;
-            lastRR_ = rr_before;
-        }
-        // update last poll bpm estimate
-        if (!lastRR_.empty()) { double med2 = medianOfRR(lastRR_); if (med2>1e-6) lastPollBpmEst_ = 60000.0/med2; }
-
-        // Produce a coarse binaryPeakMask aligned to current peakList (streaming)
-        out.binaryPeakMask.clear();
-        if (!lastPeaks_.empty()) {
-            out.peakList = lastPeaks_;
-            out.rrList = lastRR_;
-            out.binaryPeakMask.assign(lastPeaks_.size(), 1);
-            // Mark beats involved in rejected intervals as 0
-            for (size_t k = 0; k + 1 < lastPeaks_.size() && k < rr_mask.size(); ++k) {
-                if (rr_mask[k]) { out.binaryPeakMask[k] = 0; out.binaryPeakMask[k + 1] = 0; }
+    // Step 3: map peak indices directly to timestamps from the synchronized window
+    out.peakTimestamps.clear();
+    if (!out.peakList.empty()) {
+        out.peakTimestamps.reserve(out.peakList.size());
+        for (int peak_index : out.peakList) {
+            if (peak_index >= 0 && static_cast<size_t>(peak_index) < ts_win.size()) {
+                out.peakTimestamps.push_back(ts_win[static_cast<size_t>(peak_index)]);
             }
         }
     }
-    // Phase S6: compute SNR/Confidence periodically (HR-based); do not override breathing here
+
+    // Step 4: update SNR and quality
     updateSNR(out);
-    // Persist smoothed SNR/conf across polls (avoid zeroing between PSD updates)
-    if (snrEmaValid_) {
-        out.quality.snrDb = snrEmaDb_;
-        // Active window for slightly more responsive confidence mapping
-        double lastActiveTs2 = 0.0;
-        if (softLastTrueTs_ > 0.0) lastActiveTs2 = std::max(lastActiveTs2, softLastTrueTs_);
-        if (doublingLastTrueTs_ > 0.0) lastActiveTs2 = std::max(lastActiveTs2, doublingLastTrueTs_);
-        if (hintLastTrueTs_ > 0.0) lastActiveTs2 = std::max(lastActiveTs2, hintLastTrueTs_);
-        bool persistMap2 = (lastActiveTs2 > 0.0) && ((lastTs_ - lastActiveTs2) <= 5.0);
-        bool activeConf = doublingHintActive_ || softDoublingActive_ || doublingActive_ || persistMap2;
-        // Recompute confidence from smoothed SNR
-        // Slightly friendlier center when active to reflect harmonic-context SNR mapping
-        double x0 = activeConf ? 5.2 : 6.0;
-        double ksig = activeConf ? (1.0 / 1.2) : 0.8; // ~0.833 when active
-        double conf_snr = 1.0 / (1.0 + std::exp(-ksig * (snrEmaDb_ - x0)));
-        double conf = conf_snr * (1.0 - out.quality.rejectionRate);
-        double cv = 0.0;
-        if (!out.rrList.empty()) {
-            double mean_rr = 0.0; for (double r : out.rrList) mean_rr += r; mean_rr /= (double)out.rrList.size();
-            double var_rr = 0.0; for (double r : out.rrList) { double d = r - mean_rr; var_rr += d * d; }
-            var_rr /= (double)out.rrList.size(); double sd_rr = std::sqrt(std::max(0.0, var_rr));
-            cv = (mean_rr > 1e-9) ? (sd_rr / mean_rr) : 0.0;
-            conf *= std::max(0.0, 1.0 - (activeConf ? 0.5 : 1.0) * cv);
-        }
-        // Optional conservative boost when very clean and stable under active window
-        if (activeConf) {
-            double activeSecs = 0.0;
-            if (softDoublingActive_) activeSecs = std::max(activeSecs, lastTs_ - softStartTs_);
-            if (doublingHintActive_ && hintStartTs_ > 0.0) activeSecs = std::max(activeSecs, lastTs_ - hintStartTs_);
-            if (out.quality.rejectionRate < 0.03 && cv < 0.12 && activeSecs >= 8.0) conf = std::min(1.0, conf * 1.1);
-        }
-        // Warm-up: scale confidence over shorter window aligned with analyzer size
-        double warmupSecTarget = std::clamp(windowSec_ * 2.0, 4.0, 10.0);
-        size_t warmupBeatsTarget = std::max<size_t>(4, static_cast<size_t>(std::ceil(windowSec_ * 1.5)));
-        double elapsed = std::isfinite(warmupStartTs_) ? std::max(0.0, lastTs_ - warmupStartTs_) : std::max(0.0, lastTs_ - firstTsApprox_);
-        double timeProgress = warmupSecTarget > 0.0 ? elapsed / warmupSecTarget : 1.0;
-        size_t beatsInWindow = 0;
-        if (!out.peakList.empty()) beatsInWindow = out.peakList.size();
-        else if (!lastPeaks_.empty()) beatsInWindow = lastPeaks_.size();
-        else if (!out.rrList.empty()) beatsInWindow = out.rrList.size() + 1;
-        double beatProgress = (warmupBeatsTarget > 0)
-            ? static_cast<double>(beatsInWindow) / static_cast<double>(warmupBeatsTarget)
-            : 1.0;
-        double warmProgress = std::clamp(std::max(timeProgress, beatProgress), 0.0, 1.0);
-        conf *= warmProgress;
-        out.quality.confidence = std::max(0.0, std::min(1.0, conf));
-    }
-    out.quality.refractoryMsActive = lastRefMsActive_;
-    out.quality.minRRBoundMs = lastMinRRBoundMs_;
-    // refresh cached quality
+
+    lock.lock();
     lastQuality_ = out.quality;
+    lock.unlock();
+
     return true;
 }
+
 
 } // namespace heartpy
 

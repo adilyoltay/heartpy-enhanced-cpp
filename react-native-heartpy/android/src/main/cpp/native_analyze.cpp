@@ -38,6 +38,10 @@ static std::string to_json(const heartpy::HeartMetrics& r, bool includeSegments=
     kv("breathingRate", r.breathingRate); os << ",";
     // arrays
     arr("ibiMs", r.ibiMs); os << ","; arr("rrList", r.rrList); os << ","; arr_i("peakList", r.peakList); os << ",";
+    // timestamps of detected peaks (if available)
+    arr("peakTimestamps", r.peakTimestamps); os << ",";
+    arr("waveform_values", r.waveform_values); os << ",";
+    arr("waveform_timestamps", r.waveform_timestamps); os << ",";
     arr_i("peakListRaw", r.peakListRaw); os << ",";
     arr_i("binaryPeakMask", r.binaryPeakMask); os << ",";
     // quality
@@ -133,7 +137,9 @@ Java_com_heartpy_HeartPyModule_analyzeNativeJson(
         jboolean breathingAsBpm,
         jint sdsdMode,
         jint poincareMode,
-        jboolean pnnAsPercent) {
+        jboolean pnnAsPercent,
+        jdouble snrTauSec,
+        jdouble snrActiveTauSec) {
     jsize len = env->GetArrayLength(jSignal);
     std::vector<double> signal(len);
     env->GetDoubleArrayRegion(jSignal, 0, len, signal.data());
@@ -155,6 +161,8 @@ Java_com_heartpy_HeartPyModule_analyzeNativeJson(
     opt.sdsdMode = (sdsdMode==0 ? heartpy::Options::SdsdMode::SIGNED : heartpy::Options::SdsdMode::ABS);
     opt.poincareMode = (poincareMode==1 ? heartpy::Options::PoincareMode::MASKED : heartpy::Options::PoincareMode::FORMULA);
     opt.pnnAsPercent = (pnnAsPercent==JNI_TRUE);
+    opt.snrTauSec = snrTauSec;
+    opt.snrActiveTauSec = snrActiveTauSec;
 
     auto res = heartpy::analyzeSignal(signal, fs, opt);
     std::string json = to_json(res, false);
@@ -230,7 +238,9 @@ Java_com_heartpy_HeartPyModule_analyzeSegmentwiseNativeJson(
         jboolean breathingAsBpm,
         jint sdsdMode,
         jint poincareMode,
-        jboolean pnnAsPercent) {
+        jboolean pnnAsPercent,
+        jdouble snrTauSec,
+        jdouble snrActiveTauSec) {
     jsize len = env->GetArrayLength(jSignal);
     std::vector<double> signal(len);
     env->GetDoubleArrayRegion(jSignal, 0, len, signal.data());
@@ -250,6 +260,8 @@ Java_com_heartpy_HeartPyModule_analyzeSegmentwiseNativeJson(
     opt.sdsdMode = (sdsdMode==0 ? heartpy::Options::SdsdMode::SIGNED : heartpy::Options::SdsdMode::ABS);
     opt.poincareMode = (poincareMode==1 ? heartpy::Options::PoincareMode::MASKED : heartpy::Options::PoincareMode::FORMULA);
     opt.pnnAsPercent = (pnnAsPercent==JNI_TRUE);
+    opt.snrTauSec = snrTauSec;
+    opt.snrActiveTauSec = snrActiveTauSec;
     auto res = heartpy::analyzeSignalSegmentwise(signal, fs, opt);
     std::string json = to_json(res, true);
     return env->NewStringUTF(json.c_str());
@@ -333,7 +345,9 @@ Java_com_heartpy_HeartPyModule_rtCreateNative(
         jboolean breathingAsBpm,
         jint sdsdMode,
         jint poincareMode,
-        jboolean pnnAsPercent) {
+        jboolean pnnAsPercent,
+        jdouble snrTauSec,
+        jdouble snrActiveTauSec) {
     heartpy::Options opt;
     opt.lowHz = lowHz; opt.highHz = highHz; opt.iirOrder = order;
     opt.nfft = nfft; opt.overlap = overlap; opt.welchWsizeSec = welchWsizeSec;
@@ -350,6 +364,8 @@ Java_com_heartpy_HeartPyModule_rtCreateNative(
     opt.sdsdMode = (sdsdMode==0 ? heartpy::Options::SdsdMode::SIGNED : heartpy::Options::SdsdMode::ABS);
     opt.poincareMode = (poincareMode==1 ? heartpy::Options::PoincareMode::MASKED : heartpy::Options::PoincareMode::FORMULA);
     opt.pnnAsPercent = (pnnAsPercent==JNI_TRUE);
+    opt.snrTauSec = snrTauSec;
+    opt.snrActiveTauSec = snrActiveTauSec;
     void* h = hp_rt_create(fs, &opt);
     return (jlong)h;
 }

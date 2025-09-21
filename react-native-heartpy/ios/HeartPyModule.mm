@@ -370,6 +370,24 @@ static void installBinding(jsi::Runtime &rt) {
 					out.setProperty(rt, "hasUpdate", hasUpdate);
 					if (hasUpdate) {
 						out.setProperty(rt, "bpm", result.bpm);
+
+						auto makeArray = [&rt](const std::vector<double>& vec) {
+							jsi::Array arr(rt, vec.size());
+							for (size_t i = 0; i < vec.size(); ++i) arr.setValueAtIndex(rt, i, vec[i]);
+							return arr;
+						};
+						auto makeArrayInt = [&rt](const std::vector<int>& vec) {
+							jsi::Array arr(rt, vec.size());
+							for (size_t i = 0; i < vec.size(); ++i) arr.setValueAtIndex(rt, i, vec[i]);
+							return arr;
+						};
+						out.setProperty(rt, "ibiMs", makeArray(result.ibiMs));
+						out.setProperty(rt, "rrList", makeArray(result.rrList));
+						out.setProperty(rt, "peakList", makeArrayInt(result.peakList));
+						out.setProperty(rt, "peakListRaw", makeArrayInt(result.peakListRaw));
+						out.setProperty(rt, "peakTimestamps", makeArray(result.peakTimestamps));
+						out.setProperty(rt, "waveform_values", makeArray(result.waveform_values));
+						out.setProperty(rt, "waveform_timestamps", makeArray(result.waveform_timestamps));
 						
 						// Quality info as object
 						jsi::Object quality(rt);
@@ -477,6 +495,8 @@ static heartpy::Options optionsFromNSDictionary(NSDictionary* optDict) {
         if (seg[@"replaceOutliers"]) opt.replaceOutliers = [seg[@"replaceOutliers"] boolValue];
     }
     if (optDict[@"breathingAsBpm"]) opt.breathingAsBpm = [optDict[@"breathingAsBpm"] boolValue];
+    if (optDict[@"snrTauSec"]) opt.snrTauSec = [optDict[@"snrTauSec"] doubleValue];
+    if (optDict[@"snrActiveTauSec"]) opt.snrActiveTauSec = [optDict[@"snrActiveTauSec"] doubleValue];
     return opt;
 }
 
@@ -502,6 +522,21 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(analyze:(NSArray<NSNumber*>*)signal
     NSMutableArray* peaks = [NSMutableArray arrayWithCapacity:res.peakList.size()];
     for (int idx : res.peakList) [peaks addObject:@(idx)];
     out[@"peakList"] = peaks;
+    NSMutableArray* peakListRaw = [NSMutableArray arrayWithCapacity:res.peakListRaw.size()];
+    for (int idx : res.peakListRaw) [peakListRaw addObject:@(idx)];
+    out[@"peakListRaw"] = peakListRaw;
+    NSMutableArray* binaryMask = [NSMutableArray arrayWithCapacity:res.binaryPeakMask.size()];
+    for (int idx : res.binaryPeakMask) [binaryMask addObject:@(idx)];
+    out[@"binaryPeakMask"] = binaryMask;
+    NSMutableArray* peakTs = [NSMutableArray arrayWithCapacity:res.peakTimestamps.size()];
+    for (double t : res.peakTimestamps) [peakTs addObject:@(t)];
+    out[@"peakTimestamps"] = peakTs;
+    NSMutableArray* waveVals = [NSMutableArray arrayWithCapacity:res.waveform_values.size()];
+    for (double v : res.waveform_values) [waveVals addObject:@(v)];
+    out[@"waveform_values"] = waveVals;
+    NSMutableArray* waveTs = [NSMutableArray arrayWithCapacity:res.waveform_timestamps.size()];
+    for (double t : res.waveform_timestamps) [waveTs addObject:@(t)];
+    out[@"waveform_timestamps"] = waveTs;
     // Time domain
     out[@"sdnn"] = @(res.sdnn);
     out[@"rmssd"] = @(res.rmssd);
@@ -825,6 +860,16 @@ RCT_EXPORT_METHOD(rtPoll:(nonnull NSNumber*)handle
             NSMutableArray* peaks = [NSMutableArray arrayWithCapacity:res.peakList.size()];
             for (int idx : res.peakList) [peaks addObject:@(idx)];
             out[@"peakList"] = peaks;
+            // Peak timestamps (if native provided)
+            NSMutableArray* peakTs = [NSMutableArray arrayWithCapacity:res.peakTimestamps.size()];
+            for (double t : res.peakTimestamps) [peakTs addObject:@(t)];
+            out[@"peakTimestamps"] = peakTs;
+            NSMutableArray* waveVals = [NSMutableArray arrayWithCapacity:res.waveform_values.size()];
+            for (double v : res.waveform_values) [waveVals addObject:@(v)];
+            out[@"waveform_values"] = waveVals;
+            NSMutableArray* waveTs = [NSMutableArray arrayWithCapacity:res.waveform_timestamps.size()];
+            for (double t : res.waveform_timestamps) [waveTs addObject:@(t)];
+            out[@"waveform_timestamps"] = waveTs;
         }
         // Time domain
         out[@"sdnn"] = @(res.sdnn);

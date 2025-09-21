@@ -1,7 +1,16 @@
+export interface RingBufferSnapshot<T> {
+  readonly values: T[];
+  readonly head: number;
+  readonly length: number;
+  readonly capacity: number;
+  readonly version: number;
+}
+
 export class RingBuffer<T> {
   private readonly buffer: T[];
   private head = 0;
   private length = 0;
+  private version = 0;
 
   constructor(private readonly capacity: number) {
     if (capacity <= 0) {
@@ -17,6 +26,7 @@ export class RingBuffer<T> {
     } else {
       this.head = (this.head + 1) % this.capacity;
     }
+    this.version += 1;
   }
 
   getAll(): T[] {
@@ -30,6 +40,7 @@ export class RingBuffer<T> {
   clear(): void {
     this.head = 0;
     this.length = 0;
+    this.version += 1;
   }
 
   isFull(): boolean {
@@ -50,5 +61,16 @@ export class RingBuffer<T> {
 
   getHeadIndex(): number {
     return this.head;
+  }
+
+  snapshot(): RingBufferSnapshot<T> {
+    const values = this.getAll();
+    return {
+      values,
+      head: this.head,
+      length: this.length,
+      capacity: this.capacity,
+      version: this.version,
+    };
   }
 }

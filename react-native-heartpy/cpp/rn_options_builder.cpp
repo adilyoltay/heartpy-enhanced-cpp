@@ -119,6 +119,12 @@ heartpy::Options hp_build_options_from_jsi(Runtime& rt, const Object& opts, cons
             o.bpmMin = getNum(rt, p, "bpmMin", o.bpmMin);
             o.bpmMax = getNum(rt, p, "bpmMax", o.bpmMax);
         }
+        // Preprocessing
+        if (hasProp(rt, opts, "preprocessing")) {
+            auto prep = opts.getProperty(rt, "preprocessing").asObject(rt);
+            o.removeBaselineWander = getBool(rt, prep, "removeBaselineWander", o.removeBaselineWander);
+            o.enhancePeaks = getBool(rt, prep, "enhancePeaks", o.enhancePeaks);
+        }
         // Quality
         if (hasProp(rt, opts, "quality")) {
             auto q = opts.getProperty(rt, "quality").asObject(rt);
@@ -140,6 +146,8 @@ heartpy::Options hp_build_options_from_jsi(Runtime& rt, const Object& opts, cons
             o.segmentWidth = getNum(rt, seg, "width", o.segmentWidth);
             o.segmentOverlap = getNum(rt, seg, "overlap", o.segmentOverlap);
         }
+        o.snrTauSec = getNum(rt, opts, "snrTauSec", o.snrTauSec);
+        o.snrActiveTauSec = getNum(rt, opts, "snrActiveTauSec", o.snrActiveTauSec);
     }
     // Validate core subset; caller handles clamps
     if (err_code || err_msg) {

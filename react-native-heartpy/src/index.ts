@@ -65,6 +65,10 @@ export type HeartPyOptions = {
 
 	// Realtime streaming controls
 	windowSeconds?: number;
+
+	// Streaming SNR smoothing controls
+	snrTauSec?: number;
+	snrActiveTauSec?: number;
 };
 
 export type QualityInfo = {
@@ -97,6 +101,11 @@ export type HeartPyResult = {
 	ibiMs: number[];
 	rrList: number[];
 	peakList: number[];
+	peakTimestamps?: number[];
+	peakListRaw?: number[];
+	binaryPeakMask?: number[];
+	waveform_values?: number[];
+	waveform_timestamps?: number[];
 	
 	// Time domain measures
 	sdnn: number;

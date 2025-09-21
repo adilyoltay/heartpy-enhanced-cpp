@@ -19,9 +19,10 @@ type Props = {
   onSample: (sample: PPGSample) => Promise<void>;
   isActive: boolean;
   onFpsUpdate?: (fps: number) => void; // FPS callback for dynamic sampleRate
+  hidden?: boolean;
 };
 
-export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element {
+export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Props): JSX.Element {
   const device = useCameraDevice('back');
   const {hasPermission, requestPermission} = useCameraPermission();
   const enableProcessorTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -75,8 +76,9 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
     console.log('[PPGCamera] Props received', {
       hasOnSample: typeof onSample === 'function',
       isActive,
+      hidden,
     });
-  }, [onSample, isActive]);
+  }, [onSample, isActive, hidden]);
 
   // NATIVE MODULES EVENT LISTENER: Listen for samples from PPGCameraManager
   useEffect(() => {
@@ -369,6 +371,13 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
   }, [hasTorch, isActive]);
 
   if (!device || !hasPermission) {
+    if (hidden) {
+      return (
+        <View style={styles.hiddenPlaceholder}>
+          <Text style={styles.hiddenPlaceholderText}>Kamera izni gerekli</Text>
+        </View>
+      );
+    }
     return (
       <View style={styles.placeholder}>
         <Text style={styles.placeholderText}>Kamera izni gerekli</Text>
@@ -378,7 +387,7 @@ export function PPGCamera({onSample, isActive, onFpsUpdate}: Props): JSX.Element
 
   return (
     <Camera
-      style={styles.camera}
+      style={hidden ? styles.hiddenCamera : styles.camera}
       device={device}
       isActive={isActive}
       frameProcessor={plugin && frameProcessorEnabled ? frameProcessor : undefined}
@@ -396,6 +405,14 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: '#000',
   },
+  hiddenCamera: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+    top: -100,
+    left: -100,
+  },
   placeholder: {
     width: '100%',
     aspectRatio: 3 / 4,
@@ -407,5 +424,16 @@ const styles = StyleSheet.create({
   },
   placeholderText: {
     color: '#666',
+  },
+  hiddenPlaceholder: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    top: -100,
+    left: -100,
+  },
+  hiddenPlaceholderText: {
+    color: '#666',
+    fontSize: 10,
   },
 });

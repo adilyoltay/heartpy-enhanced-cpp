@@ -35,7 +35,8 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             boolean breathingAsBpm,
             int sdsdMode,
             int poincareMode,
-            boolean pnnAsPercent
+            boolean pnnAsPercent,
+            double snrTauSec, double snrActiveTauSec
     );
 
     private static native String analyzeRRNativeJson(
@@ -64,7 +65,8 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             boolean breathingAsBpm,
             int sdsdMode,
             int poincareMode,
-            boolean pnnAsPercent
+            boolean pnnAsPercent,
+            double snrTauSec, double snrActiveTauSec
     );
 
     private static native double[] interpolateClippingNative(double[] signal, double fs, double threshold);
@@ -88,7 +90,8 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             boolean breathingAsBpm,
             int sdsdMode,
             int poincareMode,
-            boolean pnnAsPercent
+            boolean pnnAsPercent,
+            double snrTauSec, double snrActiveTauSec
     );
     private static native void rtSetWindowNative(long handle, double windowSeconds);
     private static native void rtPushNative(long handle, double[] samples, double t0);
@@ -381,6 +384,8 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         int sdsdMode=1; // 1=abs, 0=signed
         int poincareMode=1; // 1=masked, 0=formula
         boolean pnnAsPercent=true;
+        double snrTauSec=10.0;
+        double snrActiveTauSec=7.0;
     }
 
     private static Opts parseOptions(com.facebook.react.bridge.ReadableMap options) {
@@ -465,6 +470,8 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             if (rr.hasKey("smooth")) o.rrSplineSmooth = rr.getDouble("smooth");
         }
         if (options.hasKey("breathingAsBpm")) o.breathingAsBpm = options.getBoolean("breathingAsBpm");
+        if (options.hasKey("snrTauSec")) o.snrTauSec = options.getDouble("snrTauSec");
+        if (options.hasKey("snrActiveTauSec")) o.snrActiveTauSec = options.getDouble("snrActiveTauSec");
         return o;
     }
 
@@ -666,7 +673,8 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                     o.breathingAsBpm,
                     o.sdsdMode,
                     o.poincareMode,
-                    o.pnnAsPercent);
+                    o.pnnAsPercent,
+                    o.snrTauSec, o.snrActiveTauSec);
             if (h == 0) { promise.reject("HEARTPY_E004", "hp_rt_create returned 0"); return; }
             promise.resolve(h);
         } catch (Exception e) {

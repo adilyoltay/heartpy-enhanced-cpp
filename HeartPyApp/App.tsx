@@ -1,38 +1,41 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
-import {SafeAreaView, StatusBar, StyleSheet, View} from 'react-native';
+import {SafeAreaView, ScrollView, StatusBar, StyleSheet, View} from 'react-native';
 import {PPGCamera} from './src/components/PPGCamera';
 import {PPGDisplay} from './src/components/PPGDisplay';
-import {PPGAnalyzer} from './src/core/PPGAnalyzer';
+import {PPGParameterControls} from './src/components/PPGParameterControls';
+import {PPGAnalyzer, DEFAULT_ANALYZER_OPTIONS, type AnalyzerTuningOptions} from './src/core/PPGAnalyzer';
 import {PPG_CONFIG} from './src/core/PPGConfig';
-import type {PPGMetrics, PPGSample, PPGState} from './src/types/PPGTypes';
+import type {
+  PPGSample,
+  PPGState,
+  PPGAnalysisFrame,
+} from './src/types/PPGTypes';
 
 function useAnalyzer() {
   const analyzerRef = useRef<PPGAnalyzer | null>(null);
-  const [metrics, setMetrics] = useState<PPGMetrics | null>(null);
-  const [waveform, setWaveform] = useState<number[]>([]);
+  const [analysisData, setAnalysisData] = useState<PPGAnalysisFrame>({
+    metrics: null,
+    waveform: [],
+  });
   const [state, setState] = useState<PPGState>('idle');
+  const [options, setOptions] = useState<AnalyzerTuningOptions>({...DEFAULT_ANALYZER_OPTIONS});
 
   useEffect(() => {
     console.log('[App] Initializing analyzer');
     analyzerRef.current = new PPGAnalyzer({
-      onMetrics: (nextMetrics, nextWaveform) => {
-        console.log('[App] Metrics received', {
-          bpm: nextMetrics?.bpm,
-          confidence: nextMetrics?.confidence,
-          snrDb: nextMetrics?.snrDb,
-          waveformSamples: nextWaveform.length,
-        });
-        setMetrics(nextMetrics);
-        setWaveform(nextWaveform);
-      },
-      onStateChange: (nextState) => {
+      onStateChange: nextState => {
         console.log('[App] Analyzer state changed', {nextState});
         setState(nextState);
       },
-      onFpsUpdate: (fps) => {
-        console.log('[App] FPS updated', {fps: fps.toFixed(1)});
-        // Note: FPS is tracked but not displayed in UI yet
-        // Could be added to metrics display if needed
+      onFrame: frame => {
+        console.log('[App] Frame received', {
+          bpm: frame.metrics?.bpm,
+          waveformSamples: frame.waveform.length,
+        });
+        setAnalysisData(frame);
+      },
+      onHeartRateUpdate: update => {
+        console.log('[App] Heart rate update', update);
       },
     });
     return () => {
@@ -61,9 +64,11 @@ function useAnalyzer() {
   const sampleCountRef = useRef(0);
   const addSample = useCallback(async (sample: PPGSample) => {
     sampleCountRef.current += 1;
-    
-    // THROTTLED LOG: Only log every Nth sample when debug enabled
-    if (PPG_CONFIG.debug.enabled && sampleCountRef.current % PPG_CONFIG.debug.sampleLogThrottle === 0) {
+
+    if (
+      PPG_CONFIG.debug.enabled &&
+      sampleCountRef.current % PPG_CONFIG.debug.sampleLogThrottle === 0
+    ) {
       console.log('[App] Sample received', {
         count: sampleCountRef.current,
         value: sample.value,
@@ -71,7 +76,7 @@ function useAnalyzer() {
         state: state,
       });
     }
-    
+
     try {
       await analyzerRef.current?.addSample(sample);
     } catch (error) {
@@ -83,26 +88,69 @@ function useAnalyzer() {
     analyzerRef.current?.updateSampleRate(fps);
   }, []);
 
-  return {metrics, waveform, state, start, stop, addSample, updateSampleRate};
+  const updateOptions = useCallback(async (partial: Partial<AnalyzerTuningOptions>) => {
+    const entries = Object.entries(partial).filter(([, value]) => value !== undefined);
+    if (entries.length === 0) {
+      return;
+    }
+
+    const sanitized = Object.fromEntries(entries) as Partial<AnalyzerTuningOptions>;
+
+    setOptions(prev => ({
+      ...prev,
+      ...sanitized,
+    }));
+
+    try {
+      await analyzerRef.current?.configure(sanitized);
+    } catch (error) {
+      console.error('[App] Failed to apply analyzer options', error);
+    }
+  }, []);
+
+  const resetOptions = useCallback(async () => {
+    const defaults = {...DEFAULT_ANALYZER_OPTIONS};
+    setOptions(defaults);
+    try {
+      await analyzerRef.current?.resetOptions();
+    } catch (error) {
+      console.error('[App] Failed to reset analyzer options', error);
+    }
+  }, []);
+
+  return {analysisData, state, start, stop, addSample, updateSampleRate, options, updateOptions, resetOptions};
 }
 
 function App(): React.JSX.Element {
-  const {metrics, waveform, state, start, stop, addSample, updateSampleRate} = useAnalyzer();
+  const {analysisData, state, start, stop, addSample, updateSampleRate, options, updateOptions, resetOptions} = useAnalyzer();
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="light-content" />
       <View style={styles.container}>
         <PPGDisplay
-          metrics={metrics}
-          waveform={waveform}
+          data={analysisData}
           state={state}
           onStart={start}
           onStop={stop}
         />
-        <PPGCamera 
-          onSample={addSample} 
-          isActive={state !== 'idle'} 
+        <ScrollView
+          style={styles.panelScroll}
+          contentContainerStyle={styles.panelScrollContent}
+          keyboardShouldPersistTaps="handled">
+          <PPGParameterControls
+            options={options}
+            onChange={updateOptions}
+            onReset={resetOptions}
+            disabled={state === 'starting'}
+          />
+        </ScrollView>
+      </View>
+      <View style={styles.hiddenCameraWrapper} pointerEvents="none">
+        <PPGCamera
+          hidden
+          onSample={addSample}
+          isActive={state !== 'idle'}
           onFpsUpdate={updateSampleRate}
         />
       </View>
@@ -120,6 +168,21 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 24,
     backgroundColor: '#000',
+  },
+  panelScroll: {
+    flexGrow: 0,
+    maxHeight: 280,
+  },
+  panelScrollContent: {
+    paddingBottom: 16,
+  },
+  hiddenCameraWrapper: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+    top: -100,
+    left: -100,
   },
 });
 

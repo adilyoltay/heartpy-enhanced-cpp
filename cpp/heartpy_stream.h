@@ -152,7 +152,8 @@ private:
     double displayHz_ {60.0};                // downsampled display rate (Hz)
 
     // Sliding window buffers (raw for now; later phases will hold filtered/causal)
-    std::vector<float> signal_;
+    std::vector<double> m_signal_buffer;
+    std::vector<double> m_timestamps;
     std::vector<float> filt_;
     std::vector<float> displayBuf_; // downsampled view for UI
     std::vector<SBiquad> bq_;

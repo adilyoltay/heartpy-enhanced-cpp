@@ -4,7 +4,7 @@
 #include <functional>
 
 #ifdef USE_KISSFFT
-#include "kissfft/kiss_fftr.h"
+#include "kiss_fftr.h"
 #endif
 
 namespace heartpy {
@@ -66,6 +66,7 @@ struct Options {
     double snrBandPassive = 0.12;      // Hz half-width in passive mode
     double snrBandActive = 0.18;       // Hz half-width in active mode
     double snrActiveTauSec = 7.0;      // EMA tau when active
+    double snrTauSec = 10.0;           // EMA tau in passive mode
     double snrBandBlendFactor = 0.30;  // blend toward instant when band changes
 
     // PSD stability options (defaults keep current behavior)
@@ -177,10 +178,15 @@ struct HeartMetrics {
 	// Basic metrics
 	double bpm = 0.0;
 	std::vector<double> ibiMs; // inter-beat intervals in ms
+	std::vector<double> peakTimestamps; // timestamps of detected peaks
 	std::vector<double> rrList; // clean RR intervals
     std::vector<int> peakList; // peak indices
     std::vector<int> peakListRaw; // pre-cleaning peaks
     std::vector<int> binaryPeakMask; // 1=accepted, 0=rejected (aligned to peakListRaw)
+
+	// Snapshot waveforms (synchronized with current analysis window)
+	std::vector<double> waveform_values;
+	std::vector<double> waveform_timestamps;
 
 	// Time domain measures
 	double sdnn = 0.0;
@@ -273,5 +279,4 @@ void setDeterministic(bool on);
 bool isDeterministic();
 
 }
-
 
