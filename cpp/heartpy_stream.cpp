@@ -226,7 +226,7 @@ void RealtimeAnalyzer::setWindowSeconds(double sec) {
     std::lock_guard<std::mutex> lock(dataMutex_);
     double clamped = std::max(1.0, std::min(MAX_WINDOW_SEC, sec));
     if (clamped != windowSec_) {
-        windowSec_ = clamped;
+    windowSec_ = clamped;
         // Restart warm-up timing so confidence re-gates after substantive window changes
         if ((useRing_ && ringSignal_.size() > 0) || (!useRing_ && !m_signal_buffer.empty())) {
             warmupStartTs_ = lastTs_;

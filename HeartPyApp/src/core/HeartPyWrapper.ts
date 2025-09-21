@@ -86,6 +86,15 @@ export class HeartPyWrapper {
            value <= max;
   }
 
+  // SNR için özel validasyon - 0 değeri de invalid olarak kabul edilir
+  private isValidSnrNumber(value: any): value is number {
+    return typeof value === 'number' &&
+           isFinite(value) &&
+           value > 0 && // 0 dahil negatif olmayan değerler
+           value >= -50 &&
+           value <= 50;
+  }
+
   private sanitizeNumber(value: any, fallback: number, min = -Infinity, max = Infinity): number {
     return this.isValidNumber(value, min, max) ? value : fallback;
   }
@@ -429,9 +438,10 @@ export class HeartPyWrapper {
       let isFallbackUsed = false;
 
       // Enhanced SNR validation and fallback with bridge safety
-      if (!this.isValidNumber(snrDb, -50, 50)) {
+      if (!this.isValidSnrNumber(snrDb)) {
         if (PPG_CONFIG.debug.enabled) {
-          console.log('[HeartPyWrapper] Invalid native SNR, using fallback:', snrDb);
+          const reason = snrDb === 0 ? 'zero' : 'out of range';
+          console.log(`[HeartPyWrapper] Invalid native SNR (${reason}), using fallback:`, snrDb);
         }
         const tail = this.getAnalysisTail();
         if (tail) {
