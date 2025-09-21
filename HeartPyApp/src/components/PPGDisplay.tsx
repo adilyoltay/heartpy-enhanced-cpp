@@ -1,8 +1,11 @@
 import React, {useEffect, useMemo, useRef} from 'react';
 import {StyleSheet, Text, TouchableOpacity, View} from 'react-native';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
+import Sound from 'react-native-sound';
 import {PPG_CONFIG} from '../core/PPGConfig';
 import type {PPGAnalysisFrame, PPGState} from '../types/PPGTypes';
+
+const HEARTBEAT_SOUND = require('../../assets/sounds/heartbeat.wav');
 
 // Bu component artık doğrudan C++'tan gelen senkronize edilmiş
 // dalga formu snapshot'ını render eder.
@@ -33,6 +36,24 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
   // --- GÜNCEL HAPTIC MANTIĞI ---
   const lastHapticPeakTsRef = useRef<number>(0);
   const lastHapticTimeRef = useRef<number>(0);
+  const heartSoundRef = useRef<Sound | null>(null);
+
+  // Heartbeat sound'u yükle
+  useEffect(() => {
+    const sound = new Sound(HEARTBEAT_SOUND, undefined, (error) => {
+      if (error) {
+        console.warn('[PPGDisplay] Heartbeat sound yüklenemedi', error);
+      } else {
+        console.log('[PPGDisplay] Heartbeat sound başarıyla yüklendi');
+      }
+    });
+    heartSoundRef.current = sound;
+
+    return () => {
+      heartSoundRef.current?.release();
+      heartSoundRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (
@@ -65,10 +86,28 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
         timeSinceLast: now - lastHapticTimeRef.current,
         debounceMs: MIN_INTERVAL_MS
       });
+
+      // Haptic feedback
       ReactNativeHapticFeedback.trigger(PPG_CONFIG.hapticIntensity, {
         enableVibrateFallback: true,
         ignoreAndroidSystemSettings: true,
       });
+
+      // Heartbeat sound çal
+      const heartSound = heartSoundRef.current;
+      if (heartSound && heartSound.isLoaded()) {
+        heartSound.stop(() => {
+          heartSound.setCurrentTime(0);
+          heartSound.play((success) => {
+            if (success) {
+              console.log('[PPGDisplay] Heartbeat sound çalındı');
+            } else {
+              console.warn('[PPGDisplay] Heartbeat sound çalınamadı');
+            }
+          });
+        });
+      }
+
       lastHapticPeakTsRef.current = latestPeakTs;
       lastHapticTimeRef.current = now;
     }
