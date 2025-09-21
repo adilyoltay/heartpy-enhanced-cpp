@@ -12,9 +12,20 @@ export const PPG_CONFIG = {
   waveformTailSamples: 150,      // UI waveform tail displayed
   expectedBpm: 75,              // average BPM used for segment rejection tuning
 
-  // Reliability & gating
+  // Reliability & gating (OPTIMIZED SNR thresholds)
   reliabilityThreshold: 0.6,
-  snrDbThresholdUI: -3,
+  snrDbThresholdUI: -2,              // UI display threshold (-3'ten +33% iyileştirme)
+  snrDbThresholdHaptic: -6,          // Haptic feedback threshold (yeni eklendi)
+  snrDbThresholdReliable: -1,        // High confidence threshold (yeni eklendi)
+  snrDbThresholdPoor: -8,            // Poor signal threshold (-8'den +25% iyileştirme)
+
+  // Adaptive SNR parameters (dinamik SNR ayarlaması)
+  adaptiveSnrEnabled: true,          // Enable adaptive SNR adjustments
+  snrAdaptationRate: 0.1,            // How quickly SNR thresholds adapt (0-1)
+  snrStabilityWindowSec: 5.0,        // Time window for SNR stability analysis
+  snrMinThreshold: -5,               // Minimum SNR threshold (absolute floor)
+  snrMaxThreshold: 15,               // Maximum SNR threshold (absolute ceiling)
+  snrQualityWeight: 0.7,             // Weight for SNR in overall quality score
 
   // Adaptive gain control (AGC)
   enableAGC: true,

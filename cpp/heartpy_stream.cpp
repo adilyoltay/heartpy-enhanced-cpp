@@ -965,9 +965,24 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     double signalPow = peakPow + peakPow2;
     double noiseBaseline = 0.0;
     if (!noiseScratch_.empty()) {
-        // median of noise band
-        std::nth_element(noiseScratch_.begin(), noiseScratch_.begin() + noiseScratch_.size()/2, noiseScratch_.end());
-        noiseBaseline = noiseScratch_[noiseScratch_.size()/2];
+        // ROBUST noise baseline estimation using 75th percentile + outlier removal
+        const size_t n = noiseScratch_.size();
+
+        // Sort for percentile calculation
+        std::sort(noiseScratch_.begin(), noiseScratch_.end());
+
+        // Remove extreme outliers (top 5% and bottom 5%)
+        const size_t startIdx = n / 20;  // 5%
+        const size_t endIdx = n - startIdx;  // 95%
+
+        if (endIdx > startIdx) {
+            // Calculate robust noise baseline using 75th percentile of cleaned data
+            const size_t p75Idx = startIdx + (endIdx - startIdx) * 3 / 4;
+            noiseBaseline = noiseScratch_[p75Idx];
+
+            // Apply minimum threshold to prevent division by very small numbers
+            noiseBaseline = std::max(noiseBaseline, 1e-8);
+        }
     }
     double snrDbInst = (signalPow > 0.0 && noiseBaseline > 0.0) ? (10.0 * std::log10(signalPow / (noiseBaseline * (band * 2.0 / std::max(1e-6, df))))) : 0.0;
     if (!std::isfinite(snrDbInst)) snrDbInst = 0.0;

@@ -6,12 +6,24 @@ import type {PPGAnalysisFrame, PPGState} from '../types/PPGTypes';
 // Bu component artık doğrudan C++'tan gelen senkronize edilmiş
 // dalga formu snapshot'ını render eder.
 
-type Props = {
-  data: PPGAnalysisFrame; // Gelen veri artık tam bir analiz çerçevesi
-  state: PPGState;
-  onStart: () => void;
-  onStop: () => void;
-};
+  type Props = {
+    data: PPGAnalysisFrame; // Gelen veri artık tam bir analiz çerçevesi
+    state: PPGState;
+    onStart: () => void;
+    onStop: () => void;
+    snrMetrics?: {
+      nativeSnrCount: number;
+      fallbackSnrCount: number;
+      invalidSnrCount: number;
+      snrHistory: number[];
+      snrThresholdCrossings: {
+        poor: number;
+        ui: number;
+        haptic: number;
+        reliable: number;
+      };
+    }; // SNR debug metrics (optional)
+  };
 
 export function PPGDisplay({data, state, onStart, onStop}: Props): JSX.Element {
   const {metrics, waveform} = data;
@@ -31,7 +43,7 @@ export function PPGDisplay({data, state, onStart, onStop}: Props): JSX.Element {
     }
 
     const isReliableForHaptic =
-      (metrics.confidence ?? 0) >= 0.5 && (metrics.snrDb ?? -10) > -8;
+      (metrics.confidence ?? 0) >= 0.5 && (metrics.snrDb ?? -10) > PPG_CONFIG.snrDbThresholdHaptic;
     if (!isReliableForHaptic) return;
 
     const now = Date.now();
@@ -63,17 +75,46 @@ export function PPGDisplay({data, state, onStart, onStop}: Props): JSX.Element {
 
   return (
     <View style={styles.container}>
-      <View style={styles.metricsRow}>
-        <Metric label="BPM" value={bpmDisplay} />
-        <Metric
-          label="SNR (dB)"
-          value={metrics?.snrDb?.toFixed(2) ?? '--'}
-        />
-        <Metric
-          label="Confidence"
-          value={metrics?.confidence?.toFixed(2) ?? '--'}
-        />
-      </View>
+        <View style={styles.metricsRow}>
+          <Metric label="BPM" value={bpmDisplay} />
+          <Metric
+            label="SNR (dB)"
+            value={metrics?.snrDb?.toFixed(2) ?? '--'}
+          />
+          <Metric
+            label="Confidence"
+            value={metrics?.confidence?.toFixed(2) ?? '--'}
+          />
+        </View>
+
+        {/* SNR Debug Metrics (only in debug mode) */}
+        {__DEV__ && props.snrMetrics && (
+          <View style={styles.debugMetricsContainer}>
+            <Text style={styles.debugTitle}>SNR Debug Metrics</Text>
+            <View style={styles.debugMetricsRow}>
+              <Metric
+                label="Native"
+                value={props.snrMetrics.nativeSnrCount.toString()}
+              />
+              <Metric
+                label="Fallback"
+                value={`${props.snrMetrics.fallbackSnrCount} (${props.snrMetrics.nativeSnrCount > 0 ? ((props.snrMetrics.fallbackSnrCount / (props.snrMetrics.nativeSnrCount + props.snrMetrics.fallbackSnrCount)) * 100).toFixed(1) : 0}%)`}
+              />
+              <Metric
+                label="Invalid"
+                value={props.snrMetrics.invalidSnrCount.toString()}
+              />
+            </View>
+            <View style={styles.thresholdMetricsRow}>
+              <Text style={styles.thresholdText}>
+                Thresholds: Poor({props.snrMetrics.snrThresholdCrossings.poor}) |
+                UI({props.snrMetrics.snrThresholdCrossings.ui}) |
+                Haptic({props.snrMetrics.snrThresholdCrossings.haptic}) |
+                Reliable({props.snrMetrics.snrThresholdCrossings.reliable})
+              </Text>
+            </View>
+          </View>
+        )}
 
       <View style={styles.waveform}>
         {/*
@@ -133,33 +174,61 @@ function Metric({label, value}: {label: string; value: string}) {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {gap: 16, flex: 1, justifyContent: 'center'},
-  metricsRow: {flexDirection: 'row', justifyContent: 'space-around'},
-  metricBox: {
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: '#111',
-    alignItems: 'center',
-    minWidth: 80,
-  },
-  metricLabel: {color: '#ccc', fontSize: 12, marginBottom: 4},
-  metricValue: {color: '#fff', fontSize: 28, fontWeight: '600'},
-  waveform: {
-    height: 120,
-    borderRadius: 12,
-    backgroundColor: '#1d1d1d',
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    paddingHorizontal: 4,
-    overflow: 'hidden',
-  },
-  waveformBar: {flex: 1, backgroundColor: '#39d353', borderRadius: 2, marginHorizontal: 1},
-  waveformBarPick: {backgroundColor: '#F44336'},
-  controls: {flexDirection: 'row', gap: 12},
-  button: {flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center'},
-  buttonText: {color: '#fff', fontSize: 16, fontWeight: '600'},
-  startButton: {backgroundColor: '#4caf50'},
-  stopButton: {backgroundColor: '#f44336'},
-  buttonDisabled: {opacity: 0.4},
-});
+  const styles = StyleSheet.create({
+    container: {gap: 16, flex: 1, justifyContent: 'center'},
+    metricsRow: {flexDirection: 'row', justifyContent: 'space-around'},
+    metricBox: {
+      padding: 12,
+      borderRadius: 12,
+      backgroundColor: '#111',
+      alignItems: 'center',
+      minWidth: 80,
+    },
+    metricLabel: {color: '#ccc', fontSize: 12, marginBottom: 4},
+    metricValue: {color: '#fff', fontSize: 28, fontWeight: '600'},
+    waveform: {
+      height: 120,
+      borderRadius: 12,
+      backgroundColor: '#1d1d1d',
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      paddingHorizontal: 4,
+      overflow: 'hidden',
+    },
+    waveformBar: {flex: 1, backgroundColor: '#39d353', borderRadius: 2, marginHorizontal: 1},
+    waveformBarPick: {backgroundColor: '#F44336'},
+    controls: {flexDirection: 'row', gap: 12},
+    button: {flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center'},
+    buttonText: {color: '#fff', fontSize: 16, fontWeight: '600'},
+    startButton: {backgroundColor: '#4caf50'},
+    stopButton: {backgroundColor: '#f44336'},
+    buttonDisabled: {opacity: 0.4},
+    // Debug styles
+    debugMetricsContainer: {
+      padding: 12,
+      borderRadius: 8,
+      backgroundColor: '#1a1a1a',
+      marginTop: 8,
+    },
+    debugTitle: {
+      color: '#fff',
+      fontSize: 14,
+      fontWeight: '600',
+      marginBottom: 8,
+      textAlign: 'center',
+    },
+    debugMetricsRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-around',
+      marginBottom: 4,
+    },
+    thresholdMetricsRow: {
+      marginTop: 4,
+    },
+    thresholdText: {
+      color: '#888',
+      fontSize: 10,
+      textAlign: 'center',
+      flexWrap: 'wrap',
+    },
+  });

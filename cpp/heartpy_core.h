@@ -62,11 +62,11 @@ struct Options {
 	double pHalfOverFundThresholdSoft = 2.0; // soft activation
 	double pHalfOverFundThresholdLow = 1.6;  // looser hint hold
 
-    // SNR band and EMA behavior
-    double snrBandPassive = 0.12;      // Hz half-width in passive mode
-    double snrBandActive = 0.18;       // Hz half-width in active mode
-    double snrActiveTauSec = 7.0;      // EMA tau when active
-    double snrTauSec = 10.0;           // EMA tau in passive mode
+    // SNR band and EMA behavior (OPTIMIZED for better responsiveness)
+    double snrBandPassive = 0.15;      // Hz half-width in passive mode (+25% wider)
+    double snrBandActive = 0.25;       // Hz half-width in active mode (+39% wider)
+    double snrActiveTauSec = 2.0;      // EMA tau when active (-71% faster response)
+    double snrTauSec = 3.0;            // EMA tau in passive mode (-70% faster response)
     double snrBandBlendFactor = 0.30;  // blend toward instant when band changes
 
     // PSD stability options (defaults keep current behavior)

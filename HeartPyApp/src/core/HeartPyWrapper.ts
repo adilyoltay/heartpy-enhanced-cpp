@@ -48,6 +48,150 @@ export class HeartPyWrapper {
   private lastCameraConfidence: number = 0.85; // Track camera confidence for fallback
   private lastResult: HeartPyResult | null = null;
 
+  // SNR debugging and metrics collection
+  private snrMetrics = {
+    nativeSnrCount: 0,
+    fallbackSnrCount: 0,
+    invalidSnrCount: 0,
+    snrHistory: [] as number[],
+    lastSnrValues: [] as number[],
+    snrThresholdCrossings: {
+      poor: 0,
+      ui: 0,
+      haptic: 0,
+      reliable: 0
+    }
+  };
+
+  // SNR validation utilities
+  private isValidSnrDb(value: number): boolean {
+    return typeof value === 'number' &&
+           isFinite(value) &&
+           value >= -50 &&  // Minimum makul SNR değeri
+           value <= 50;     // Maximum makul SNR değeri
+  }
+
+  private sanitizeSnrDb(value: number): number {
+    if (!this.isValidSnrDb(value)) {
+      console.warn('[HeartPyWrapper] Invalid SNR value detected:', value);
+      return -10; // Güvenli fallback değeri
+    }
+    return value;
+  }
+
+  // Bridge validation utilities for type safety
+  private isValidNumber(value: any, min = -Infinity, max = Infinity): value is number {
+    return typeof value === 'number' &&
+           isFinite(value) &&
+           value >= min &&
+           value <= max;
+  }
+
+  private sanitizeNumber(value: any, fallback: number, min = -Infinity, max = Infinity): number {
+    return this.isValidNumber(value, min, max) ? value : fallback;
+  }
+
+  private isValidArray(value: any): value is any[] {
+    return Array.isArray(value) && value.length > 0;
+  }
+
+  private sanitizeArray<T>(value: any, fallback: T[]): T[] {
+    return this.isValidArray(value) ? value : fallback;
+  }
+
+  private sanitizeBoolean(value: any, fallback: boolean): boolean {
+    return typeof value === 'boolean' ? value : fallback;
+  }
+
+  // SNR metrics and logging utilities
+  private updateSnrMetrics(nativeSnr: any, finalSnr: number, isFallbackUsed: boolean): void {
+    // Update counters
+    if (this.isValidSnrDb(nativeSnr)) {
+      this.snrMetrics.nativeSnrCount++;
+    } else {
+      this.snrMetrics.invalidSnrCount++;
+    }
+
+    if (isFallbackUsed) {
+      this.snrMetrics.fallbackSnrCount++;
+    }
+
+    // Update history
+    this.snrMetrics.snrHistory.push(finalSnr);
+    this.snrMetrics.lastSnrValues.push(finalSnr);
+
+    // Keep only last 100 values
+    if (this.snrMetrics.snrHistory.length > 100) {
+      this.snrMetrics.snrHistory.shift();
+    }
+    if (this.snrMetrics.lastSnrValues.length > 10) {
+      this.snrMetrics.lastSnrValues.shift();
+    }
+
+    // Update threshold crossings
+    this.updateThresholdCrossings(finalSnr);
+  }
+
+  private updateThresholdCrossings(snrDb: number): void {
+    const thresholds = {
+      poor: PPG_CONFIG.snrDbThresholdPoor,
+      ui: PPG_CONFIG.snrDbThresholdUI,
+      haptic: PPG_CONFIG.snrDbThresholdHaptic,
+      reliable: PPG_CONFIG.snrDbThresholdReliable
+    };
+
+    Object.entries(thresholds).forEach(([key, threshold]) => {
+      if (snrDb <= threshold) {
+        this.snrMetrics.snrThresholdCrossings[key as keyof typeof this.snrMetrics.snrThresholdCrossings]++;
+      }
+    });
+  }
+
+  private logSnrDebugInfo(nativeSnr: any, finalSnr: number, isFallbackUsed: boolean): void {
+    if (!PPG_CONFIG.debug.enabled) return;
+
+    const avgSnr = this.snrMetrics.snrHistory.length > 0
+      ? this.snrMetrics.snrHistory.reduce((a, b) => a + b, 0) / this.snrMetrics.snrHistory.length
+      : 0;
+
+    console.log('[HeartPyWrapper] SNR Debug Info:', {
+      nativeSnr: nativeSnr,
+      finalSnr: finalSnr.toFixed(2),
+      isFallbackUsed,
+      metrics: {
+        nativeCount: this.snrMetrics.nativeSnrCount,
+        fallbackCount: this.snrMetrics.fallbackSnrCount,
+        invalidCount: this.snrMetrics.invalidSnrCount,
+        fallbackRatio: this.snrMetrics.nativeSnrCount > 0
+          ? (this.snrMetrics.fallbackSnrCount / (this.snrMetrics.nativeSnrCount + this.snrMetrics.fallbackSnrCount) * 100).toFixed(1) + '%'
+          : 'N/A',
+        averageSnr: avgSnr.toFixed(2),
+        last5Snr: this.snrMetrics.lastSnrValues.slice(-5).map(v => v.toFixed(2)),
+        thresholdCrossings: this.snrMetrics.snrThresholdCrossings
+      }
+    });
+  }
+
+  public getSnrMetrics() {
+    return { ...this.snrMetrics };
+  }
+
+  public resetSnrMetrics(): void {
+    this.snrMetrics = {
+      nativeSnrCount: 0,
+      fallbackSnrCount: 0,
+      invalidSnrCount: 0,
+      snrHistory: [],
+      lastSnrValues: [],
+      snrThresholdCrossings: {
+        poor: 0,
+        ui: 0,
+        haptic: 0,
+        reliable: 0
+      }
+    };
+  }
+
   setBufferRef(buffer: RingBuffer<any>): void {
     this.bufferRef = buffer;
   }
@@ -274,23 +418,40 @@ export class HeartPyWrapper {
       const goodQuality = (quality as any).goodQuality === true;
       const totalBeats =
         typeof (quality as any).totalBeats === 'number' ? (quality as any).totalBeats : 0;
-      const rejectionRateRaw =
-        typeof (quality as any).rejectionRate === 'number'
-          ? (quality as any).rejectionRate
-          : undefined;
+      const rejectionRateRaw = this.sanitizeNumber(
+        (quality as any).rejectionRate,
+        0,
+        0,
+        1
+      );
 
-      let snrDb =
-        typeof (quality as any).snrDb === 'number' && (quality as any).snrDb !== 0
-          ? (quality as any).snrDb
-          : undefined;
+      let snrDb = (quality as any).snrDb;
+      const originalSnrDb = snrDb;
+      let isFallbackUsed = false;
 
-      if (snrDb == null) {
+      // Enhanced SNR validation and fallback with bridge safety
+      if (!this.isValidNumber(snrDb, -50, 50)) {
+        if (PPG_CONFIG.debug.enabled) {
+          console.log('[HeartPyWrapper] Invalid native SNR, using fallback:', snrDb);
+        }
         const tail = this.getAnalysisTail();
         if (tail) {
           snrDb = this.computeSnrFallbackDb(tail);
+          isFallbackUsed = true;
+        } else {
+          snrDb = -10; // Safe fallback
+          isFallbackUsed = true;
         }
+      } else {
+        // Sanitize native SNR value
+        snrDb = this.sanitizeSnrDb(snrDb);
       }
-      const normalizedSnrDb = snrDb ?? -10;
+
+      const normalizedSnrDb = snrDb;
+
+      // Update SNR metrics and log debug info
+      this.updateSnrMetrics(originalSnrDb, normalizedSnrDb, isFallbackUsed);
+      this.logSnrDebugInfo(originalSnrDb, normalizedSnrDb, isFallbackUsed);
 
       const snrScore = Math.min(
         1,
@@ -424,21 +585,76 @@ export class HeartPyWrapper {
   }
 
   private computeSnrFallbackDb(window: Float32Array): number {
-    if (window.length < 16) return -10;
-    let min = Infinity;
-    let max = -Infinity;
-    let sumSq = 0;
-    for (let i = 0; i < window.length; i += 1) {
-      const v = window[i];
-      if (v < min) min = v;
-      if (v > max) max = v;
-      sumSq += v * v;
+    if (window.length < 32) {
+      console.warn('[HeartPyWrapper] Insufficient window length for SNR calculation:', window.length);
+      return -10;
     }
-    const peakToPeak = max - min;
-    const rms = Math.sqrt(sumSq / window.length);
-    const noiseRms = Math.max(1e-6, Math.min(rms, peakToPeak / 2));
-    const snr = (peakToPeak / 2) / noiseRms;
-    return 20 * Math.log10(Math.max(snr, 1e-6));
+
+    // Extract signal and noise components using spectral analysis approach
+    const { signalRms, noiseRms } = this.extractSignalNoiseComponents(window);
+
+    if (noiseRms <= 0) {
+      console.warn('[HeartPyWrapper] Invalid noise RMS:', noiseRms);
+      return -10;
+    }
+
+    const snr = signalRms / noiseRms;
+    const snrDb = 20 * Math.log10(Math.max(snr, 1e-6));
+
+    // Clamp to reasonable range
+    const clampedSnrDb = Math.max(-50, Math.min(30, snrDb));
+
+    if (PPG_CONFIG.debug.enabled) {
+      console.log('[HeartPyWrapper] Fallback SNR calculated:', {
+        signalRms: signalRms.toFixed(4),
+        noiseRms: noiseRms.toFixed(4),
+        snr: snr.toFixed(2),
+        snrDb: snrDb.toFixed(2),
+        clampedSnrDb: clampedSnrDb.toFixed(2)
+      });
+    }
+
+    return clampedSnrDb;
+  }
+
+  private extractSignalNoiseComponents(window: Float32Array): { signalRms: number; noiseRms: number } {
+    // Simple but effective signal extraction using trend analysis
+    const values = Array.from(window);
+
+    // Remove DC component (mean)
+    const mean = values.reduce((sum, val) => sum + val, 0) / values.length;
+    const centeredValues = values.map(val => val - mean);
+
+    // Estimate signal power using autocorrelation at lag 1 (approximate heart rate period)
+    let signalPower = 0;
+    let noisePower = 0;
+
+    if (centeredValues.length > 8) {
+      // Use autocorrelation approach for signal detection
+      let autoCorrSum = 0;
+      let totalSumSq = 0;
+
+      for (let i = 0; i < centeredValues.length; i++) {
+        totalSumSq += centeredValues[i] * centeredValues[i];
+        if (i > 0) {
+          autoCorrSum += centeredValues[i] * centeredValues[i - 1];
+        }
+      }
+
+      const autoCorrCoeff = autoCorrSum / totalSumSq;
+      signalPower = Math.abs(autoCorrCoeff) * totalSumSq / centeredValues.length;
+      noisePower = (1 - Math.abs(autoCorrCoeff)) * totalSumSq / centeredValues.length;
+    } else {
+      // Fallback to RMS for very short windows
+      const totalPower = centeredValues.reduce((sum, val) => sum + val * val, 0) / centeredValues.length;
+      signalPower = totalPower * 0.3; // Conservative estimate
+      noisePower = totalPower * 0.7;
+    }
+
+    const signalRms = Math.sqrt(Math.max(0, signalPower));
+    const noiseRms = Math.sqrt(Math.max(1e-10, noisePower)); // Prevent division by zero
+
+    return { signalRms, noiseRms };
   }
 
   private normalizePeaks(rawPeaks: number[], result?: any): number[] {
