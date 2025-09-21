@@ -118,11 +118,24 @@ function useAnalyzer() {
     }
   }, []);
 
-  return {analysisData, state, start, stop, addSample, updateSampleRate, options, updateOptions, resetOptions};
+  const snrMetrics = analyzerRef.current?.getSnrMetrics();
+
+  return {
+    analysisData,
+    state,
+    start,
+    stop,
+    addSample,
+    updateSampleRate,
+    options,
+    updateOptions,
+    resetOptions,
+    snrMetrics
+  };
 }
 
 function App(): React.JSX.Element {
-  const {analysisData, state, start, stop, addSample, updateSampleRate, options, updateOptions, resetOptions} = useAnalyzer();
+  const {analysisData, state, start, stop, addSample, updateSampleRate, options, updateOptions, resetOptions, snrMetrics} = useAnalyzer();
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -133,6 +146,7 @@ function App(): React.JSX.Element {
           state={state}
           onStart={start}
           onStop={stop}
+          snrMetrics={snrMetrics}
         />
         <ScrollView
           style={styles.panelScroll}

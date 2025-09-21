@@ -25,7 +25,7 @@ import type {PPGAnalysisFrame, PPGState} from '../types/PPGTypes';
     }; // SNR debug metrics (optional)
   };
 
-export function PPGDisplay({data, state, onStart, onStop}: Props): JSX.Element {
+export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): JSX.Element {
   const {metrics, waveform} = data;
   const bpmDisplay = metrics?.bpm ? metrics.bpm.toFixed(1) : '--';
 
@@ -88,29 +88,29 @@ export function PPGDisplay({data, state, onStart, onStop}: Props): JSX.Element {
         </View>
 
         {/* SNR Debug Metrics (only in debug mode) */}
-        {__DEV__ && props.snrMetrics && (
+        {__DEV__ && snrMetrics && (
           <View style={styles.debugMetricsContainer}>
             <Text style={styles.debugTitle}>SNR Debug Metrics</Text>
             <View style={styles.debugMetricsRow}>
               <Metric
                 label="Native"
-                value={props.snrMetrics.nativeSnrCount.toString()}
+                value={snrMetrics.nativeSnrCount.toString()}
               />
               <Metric
                 label="Fallback"
-                value={`${props.snrMetrics.fallbackSnrCount} (${props.snrMetrics.nativeSnrCount > 0 ? ((props.snrMetrics.fallbackSnrCount / (props.snrMetrics.nativeSnrCount + props.snrMetrics.fallbackSnrCount)) * 100).toFixed(1) : 0}%)`}
+                value={`${snrMetrics.fallbackSnrCount} (${snrMetrics.nativeSnrCount > 0 ? ((snrMetrics.fallbackSnrCount / (snrMetrics.nativeSnrCount + snrMetrics.fallbackSnrCount)) * 100).toFixed(1) : 0}%)`}
               />
               <Metric
                 label="Invalid"
-                value={props.snrMetrics.invalidSnrCount.toString()}
+                value={snrMetrics.invalidSnrCount.toString()}
               />
             </View>
             <View style={styles.thresholdMetricsRow}>
               <Text style={styles.thresholdText}>
-                Thresholds: Poor({props.snrMetrics.snrThresholdCrossings.poor}) |
-                UI({props.snrMetrics.snrThresholdCrossings.ui}) |
-                Haptic({props.snrMetrics.snrThresholdCrossings.haptic}) |
-                Reliable({props.snrMetrics.snrThresholdCrossings.reliable})
+                Thresholds: Poor({snrMetrics.snrThresholdCrossings.poor}) |
+                UI({snrMetrics.snrThresholdCrossings.ui}) |
+                Haptic({snrMetrics.snrThresholdCrossings.haptic}) |
+                Reliable({snrMetrics.snrThresholdCrossings.reliable})
               </Text>
             </View>
           </View>
