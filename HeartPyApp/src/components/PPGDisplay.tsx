@@ -1,6 +1,7 @@
 import React, {useEffect, useMemo, useRef} from 'react';
 import {StyleSheet, Text, TouchableOpacity, View} from 'react-native';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
+import {PPG_CONFIG} from '../core/PPGConfig';
 import type {PPGAnalysisFrame, PPGState} from '../types/PPGTypes';
 
 // Bu component artık doğrudan C++'tan gelen senkronize edilmiş
