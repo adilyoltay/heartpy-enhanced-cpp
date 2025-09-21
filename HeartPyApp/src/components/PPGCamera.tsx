@@ -83,14 +83,19 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
   // NATIVE MODULES EVENT LISTENER: Listen for samples from PPGCameraManager
   useEffect(() => {
     console.log('[PPGCamera] Setting up NativeModules event listener');
-    
+    console.log('[PPGCamera] PPGCameraManager available:', !!PPGCameraManager);
+    console.log('[PPGCamera] onSample available:', typeof onSample === 'function');
+
     if (!PPGCameraManager) {
       console.warn('[PPGCamera] PPGCameraManager not available');
       return;
     }
 
     const eventEmitter = new NativeEventEmitter(PPGCameraManager);
+    console.log('[PPGCamera] EventEmitter created, adding PPGSample listener');
            const subscription = eventEmitter.addListener('PPGSample', (event) => {
+             console.log('[PPGCamera] PPGSample event received:', event);
+
              // FIXED: Reduce log flooding for NaN values during warm-up
              if (typeof event.value === 'number' && !isNaN(event.value)) {
                console.log('[PPGCamera] Received valid sample from NativeModules', {
@@ -99,15 +104,19 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
                  confidence: event.confidence,
                });
              } else {
-               console.log('[PPGCamera] Received NaN sample (warm-up/low signal)');
+               console.log('[PPGCamera] Received NaN sample (warm-up/low signal):', {
+                 value: event.value,
+                 timestamp: event.timestamp,
+                 confidence: event.confidence,
+               });
              }
-             
+
              // FPS Monitoring: Calculate FPS from JS event timestamps (safe from worklet context)
              calculateFPS(event.timestamp);
-             
+
              // NOTE: Camera confidence is always ~0.85, so we don't filter here
              // Poor signal detection is handled by PPGAnalyzer based on metrics/SNR
-             
+
              const sample: PPGSample = {
                value: event.value,
                timestamp: event.timestamp,
@@ -140,6 +149,8 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
       console.log('[PPGCamera] Initializing frame processor plugin');
       const created = VisionCameraProxy.initFrameProcessorPlugin('ppgMean', {}) ?? null;
       console.log('[PPGCamera] Frame processor plugin ready:', !!created);
+      console.log('[PPGCamera] Plugin type:', typeof created);
+      console.log('[PPGCamera] Plugin callable:', typeof created?.call === 'function');
       return created;
     } catch (error) {
       console.warn('[PPGCamera] frame processor unavailable', error);

@@ -452,9 +452,12 @@ static double dcMean = NAN;
       NSDictionary* userInfo = @{ @"value": @(pushSample),
                                   @"timestamp": @([[NSDate date] timeIntervalSince1970]),
                                   @"confidence": @(finalConfidence) };
+      NSLog(@"📸 PPGMeanPlugin: About to post notification #%d value: %.3f confidence: %.2f",
+            notificationCount, pushSample, finalConfidence);
       [[NSNotificationCenter defaultCenter] postNotificationName:@"HeartPyPPGSample"
                                                           object:nil
                                                         userInfo:userInfo];
+      NSLog(@"📸 PPGMeanPlugin: Successfully posted notification #%d", notificationCount);
 
       if (notificationCount % 30 == 0) {
         NSLog(@"📸 PPGMeanPlugin posted notification #%d value: %.3f confidence: %.2f",
@@ -466,6 +469,8 @@ static double dcMean = NAN;
               agcRms,
               pushSample);
       }
+    } else {
+      NSLog(@"📸 PPGMeanPlugin: Skipping notification - sample not finite: %f", pushSample);
     }
   } @catch (__unused id e) {}
   return @(pushSample);

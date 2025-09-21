@@ -332,17 +332,24 @@ RCT_EXPORT_METHOD(processSample:(nonnull NSNumber *)value timestamp:(nonnull NSN
     NSNumber *value = userInfo[@"value"];
     NSNumber *timestamp = userInfo[@"timestamp"];
     NSNumber *confidence = userInfo[@"confidence"];
-    
+
+    RCTLogInfo(@"📸 PPGCameraManager: Received notification with userInfo: %@", userInfo);
+    RCTLogInfo(@"📸 PPGCameraManager: value: %@, timestamp: %@, confidence: %@",
+               value, timestamp, confidence);
+
     if (value && timestamp) {
-        RCTLogInfo(@"📸 PPGCameraManager: Received PPG sample - value: %.3f, timestamp: %.0f, confidence: %.2f", 
+        RCTLogInfo(@"📸 PPGCameraManager: Received PPG sample - value: %.3f, timestamp: %.0f, confidence: %.2f",
                    value.doubleValue, timestamp.doubleValue, confidence.doubleValue);
-        
+
         // Forward sample to React Native via event
         [self sendEventWithName:@"PPGSample" body:@{
             @"value": value,
             @"timestamp": timestamp,
             @"confidence": confidence ?: @(0.0)
         }];
+        RCTLogInfo(@"📸 PPGCameraManager: Successfully sent PPGSample event to React Native");
+    } else {
+        RCTLogWarn(@"📸 PPGCameraManager: Invalid sample data - value: %@, timestamp: %@", value, timestamp);
     }
 }
 
