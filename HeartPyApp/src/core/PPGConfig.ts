@@ -7,9 +7,9 @@ const isDebugMode = __DEV__ || process.env.NODE_ENV === 'development';
 export const PPG_CONFIG = {
   // Sampling & buffering
   sampleRate: 30,
-  analysisWindow: 150,          // samples (~5 s @ 30 Hz)
-  ringBufferSize: 450,          // analyzer/history buffer length
-  waveformTailSamples: 150,      // UI waveform tail displayed
+  analysisWindow: 360,          // samples (~12 s @ 30 Hz)
+  ringBufferSize: 720,          // analyzer/history buffer length (~24 s)
+  waveformTailSamples: 180,     // UI waveform tail displayed (~6 s)
   expectedBpm: 75,              // average BPM used for segment rejection tuning
 
   // Reliability & gating (OPTIMIZED SNR thresholds)
@@ -21,7 +21,7 @@ export const PPG_CONFIG = {
 
   // Haptic feedback settings
   hapticDebounceMs: 600,             // Minimum interval between haptic triggers (300ms'den 600ms'ye)
-  hapticMinConfidence: 0.7,          // Minimum confidence for haptic (0.5'ten 0.7'ye)
+  hapticMinConfidence: 0.6,          // Minimum confidence for haptic (0.5'ten 0.6'ya)
   hapticIntensity: 'impactHeavy',     // Haptic intensity type
 
   // Adaptive SNR parameters (dinamik SNR ayarlaması)
@@ -41,9 +41,19 @@ export const PPG_CONFIG = {
   agcGainMax: 20,
 
   // Analyzer warm-up / batching
-  minSamplesBeforePollSec: 6.0, // P0 FIX: Increased from 1.5s to 6s for BPM stability
+  minSamplesBeforePollSec: 12.0, // Require ~12 s reservoir before polling native
   microBatchSamples: 16,
   microBatchLatencyMs: 150,
+
+  // Native analyzer tightening
+  rrOutlierPercent: 0.25,
+  rrOutlierMinMs: 180,
+  rrOutlierMaxMs: 320,
+  peakMinSpacingMs: 320,
+  thresholdRR: true,              // Enable HeartPy-style RR masking by default
+  calcFreqEnabled: false,         // Default OFF on mobile to save CPU; enable only when needed
+  filterMode: 'butter-filtfilt',  // Use zero-phase Butterworth by default
+  filterOrder: 2,                 // Order for the Butterworth cascades
 
   // Camera preferences
   ppgChannel: 'red',            // 'red' (torch) | 'green'
@@ -56,5 +66,8 @@ export const PPG_CONFIG = {
   debug: {
     enabled: isDebugMode,
     sampleLogThrottle: 30,
+    enableSnrLogging: true, // Surface C++ SNR log stream
+    enableDetailedSnrLogging: false, // Verbose SNR logs (default kapalı, ihtiyaç halinde aç)
+    enableAdaptivePsd: true, // Toggle adaptive PSD + fallbacks during QA
   },
 } as const;

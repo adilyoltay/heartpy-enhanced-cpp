@@ -3,6 +3,10 @@ export type HeartPyOptions = {
 	bandpass?: { lowHz: number; highHz: number; order?: number };
 	welch?: { nfft?: number; overlap?: number; wsizeSec?: number };
 	peak?: { refractoryMs?: number; thresholdScale?: number; bpmMin?: number; bpmMax?: number };
+	filter?: { mode?: 'auto' | 'rbj' | 'butter' | 'butter-filtfilt'; order?: number };
+
+	// Global frequency-domain toggle (parity with HeartPy calc_freq)
+	calcFreq?: boolean;
 	
 	// Preprocessing options
 	preprocessing?: {
@@ -69,6 +73,7 @@ export type HeartPyOptions = {
 	// Streaming SNR smoothing controls
 	snrTauSec?: number;
 	snrActiveTauSec?: number;
+	adaptivePsd?: boolean;
 };
 
 export type QualityInfo = {
@@ -93,6 +98,8 @@ export type QualityInfo = {
 	rrShortFrac?: number;
 	rrLongMs?: number;
 	pHalfOverFund?: number;
+	snrWarmupActive?: number;
+	snrSampleCount?: number;
 };
 
 export type HeartPyResult = {

@@ -47,6 +47,7 @@ export class HeartPyWrapper {
   private bufferRef: RingBuffer<any> | null = null; // Reference to analyzer's buffer (values or {value,timestamp})
   private lastCameraConfidence: number = 0.85; // Track camera confidence for fallback
   private lastResult: HeartPyResult | null = null;
+  private pollSequence: number = 0;
 
   // SNR debugging and metrics collection
   private snrMetrics = {
@@ -60,14 +61,18 @@ export class HeartPyWrapper {
       ui: 0,
       haptic: 0,
       reliable: 0
-    }
+    },
+    totalPolls: 0,
+    zeroNativeCount: 0,
+    fallbackReasonCounts: {} as Record<string, number>,
   };
 
   // SNR validation utilities
   private isValidSnrDb(value: number): boolean {
     return typeof value === 'number' &&
            isFinite(value) &&
-           value > 0; // DEĞİŞİKLİK: value >= -50 yerine value > 0
+           value >= -50 &&
+           value <= 50;
   }
 
   private sanitizeSnrDb(value: number): number {
@@ -86,13 +91,14 @@ export class HeartPyWrapper {
            value <= max;
   }
 
-  // SNR için özel validasyon - 0 değeri de invalid olarak kabul edilir
+  // SNR için özel validasyon - pozitif değerler kabul edilir
   private isValidSnrNumber(value: any): value is number {
-    return typeof value === 'number' &&
-           isFinite(value) &&
-           value > 0 && // 0 dahil negatif olmayan değerler
-           value >= -50 &&
-           value <= 50;
+    const isNum = typeof value === 'number' && isFinite(value);
+    const inRange = isNum && value > 0 && value <= 50;
+    if (PPG_CONFIG.debug.enabled) {
+      console.log('[HeartPyWrapper] isValidSnrNumber', {value, isNum, inRange});
+    }
+    return inRange;
   }
 
   private sanitizeNumber(value: any, fallback: number, min = -Infinity, max = Infinity): number {
@@ -112,16 +118,25 @@ export class HeartPyWrapper {
   }
 
   // SNR metrics and logging utilities
-  private updateSnrMetrics(nativeSnr: any, finalSnr: number, isFallbackUsed: boolean): void {
+  private updateSnrMetrics(nativeSnr: any, finalSnr: number, isFallbackUsed: boolean, fallbackReason?: string): void {
     // Update counters
+    this.snrMetrics.totalPolls += 1;
     if (this.isValidSnrDb(nativeSnr)) {
       this.snrMetrics.nativeSnrCount++;
     } else {
       this.snrMetrics.invalidSnrCount++;
     }
 
+    if (typeof nativeSnr === 'number' && Math.abs(nativeSnr) < 1e-9) {
+      this.snrMetrics.zeroNativeCount++;
+    }
+
     if (isFallbackUsed) {
       this.snrMetrics.fallbackSnrCount++;
+      if (fallbackReason) {
+        this.snrMetrics.fallbackReasonCounts[fallbackReason] =
+          (this.snrMetrics.fallbackReasonCounts[fallbackReason] ?? 0) + 1;
+      }
     }
 
     // Update history
@@ -161,6 +176,10 @@ export class HeartPyWrapper {
     const avgSnr = this.snrMetrics.snrHistory.length > 0
       ? this.snrMetrics.snrHistory.reduce((a, b) => a + b, 0) / this.snrMetrics.snrHistory.length
       : 0;
+    const totalSnrSamples = this.snrMetrics.nativeSnrCount + this.snrMetrics.fallbackSnrCount;
+    const fallbackRatioPct = totalSnrSamples > 0
+      ? (this.snrMetrics.fallbackSnrCount / totalSnrSamples) * 100
+      : 0;
 
     console.log('[HeartPyWrapper] SNR Debug Info:', {
       nativeSnr: nativeSnr,
@@ -170,12 +189,15 @@ export class HeartPyWrapper {
         nativeCount: this.snrMetrics.nativeSnrCount,
         fallbackCount: this.snrMetrics.fallbackSnrCount,
         invalidCount: this.snrMetrics.invalidSnrCount,
-        fallbackRatio: this.snrMetrics.nativeSnrCount > 0
-          ? (this.snrMetrics.fallbackSnrCount / (this.snrMetrics.nativeSnrCount + this.snrMetrics.fallbackSnrCount) * 100).toFixed(1) + '%'
+        zeroNativeCount: this.snrMetrics.zeroNativeCount,
+        totalPolls: this.snrMetrics.totalPolls,
+        fallbackRatio: totalSnrSamples > 0
+          ? `${fallbackRatioPct.toFixed(1)}%`
           : 'N/A',
         averageSnr: avgSnr.toFixed(2),
         last5Snr: this.snrMetrics.lastSnrValues.slice(-5).map(v => v.toFixed(2)),
-        thresholdCrossings: this.snrMetrics.snrThresholdCrossings
+        thresholdCrossings: this.snrMetrics.snrThresholdCrossings,
+        fallbackReasons: this.snrMetrics.fallbackReasonCounts,
       }
     });
   }
@@ -196,7 +218,10 @@ export class HeartPyWrapper {
         ui: 0,
         haptic: 0,
         reliable: 0
-      }
+      },
+      totalPolls: 0,
+      zeroNativeCount: 0,
+      fallbackReasonCounts: {},
     };
   }
 
@@ -222,6 +247,19 @@ export class HeartPyWrapper {
       removeBaselineWander?: boolean;
       snrTauSec?: number;
       snrActiveTauSec?: number;
+      adaptivePsd?: boolean;
+      calcFreq?: boolean;
+      thresholdRR?: boolean;
+      filterMode?: 'auto' | 'rbj' | 'butter' | 'butter-filtfilt';
+      filterOrder?: number;
+      minPeakDistanceMs?: number;
+      rrOutlierPercent?: number;
+      rrOutlierMinMs?: number;
+      rrOutlierMaxMs?: number;
+      filter?: {
+        mode?: 'auto' | 'rbj' | 'butter' | 'butter-filtfilt';
+        order?: number;
+      };
     },
   ): Promise<void> {
     console.log('[HeartPyWrapper] Create called with sampleRate:', sampleRate);
@@ -232,6 +270,7 @@ export class HeartPyWrapper {
 
     try {
       this.lastResult = null;
+      this.pollSequence = 0;
       // HOTFIX: Disable JSI to prevent EXC_BAD_ACCESS crash
       console.log('[HeartPyWrapper] Loading react-native-heartpy...');
       const {RealtimeAnalyzer} = require('react-native-heartpy');
@@ -244,8 +283,8 @@ export class HeartPyWrapper {
       const windowSeconds = windowSamples / sampleRate;
       const expectedBeatsInWindow = (PPG_CONFIG.expectedBpm / 60) * windowSeconds;
 
-      // FIXED: Use actual window duration (5 seconds) for segment rejection
-      const rejectionWindowSeconds = PPG_CONFIG.analysisWindow / 30; // Convert samples to seconds (150/30=5s)
+      // FIXED: Use actual window duration (~12 seconds) for segment rejection
+      const rejectionWindowSeconds = PPG_CONFIG.analysisWindow / 30; // Convert samples to seconds
       const segmentRejectWindowBeats = Math.max(4, Math.round(PPG_CONFIG.expectedBpm / 60 * rejectionWindowSeconds));
       const segmentRejectMaxRejects = Math.max(2, Math.floor(segmentRejectWindowBeats * 0.3)); // 30% rejection rate
 
@@ -274,6 +313,9 @@ export class HeartPyWrapper {
       const requestedLowHz = options?.lowCutoffHz ?? defaultBandpassLowHz;
       const requestedHighHz = options?.highCutoffHz ?? defaultBandpassHighHz;
       const requestedOrder = options?.bandpassOrder ?? defaultBandpassOrder;
+
+      const requestedFilterMode = options?.filterMode ?? options?.filter?.mode;
+      const requestedFilterOrder = options?.filterOrder ?? options?.filter?.order ?? requestedOrder;
 
       // Ensure filter bounds stay within a stable and physically meaningful range
       const effectiveLowHz = Math.max(0.05, Math.min(requestedLowHz, nyquistHz - 0.2));
@@ -310,21 +352,44 @@ export class HeartPyWrapper {
         peakConfig.pHalfOverFundThresholdSoft = pHalfOverFundThresholdSoft;
       }
 
+      const minPeakDistanceMs = options?.minPeakDistanceMs ?? PPG_CONFIG.peakMinSpacingMs;
+      if (Number.isFinite(minPeakDistanceMs)) {
+        peakConfig.minPeakDistanceMs = minPeakDistanceMs;
+      }
+
+      const rrOutlierPercent =
+        options?.rrOutlierPercent ?? PPG_CONFIG.rrOutlierPercent ?? 0.25;
+      const rrOutlierMinMs = options?.rrOutlierMinMs ?? PPG_CONFIG.rrOutlierMinMs ?? 180;
+      const rrOutlierMaxMs = options?.rrOutlierMaxMs ?? PPG_CONFIG.rrOutlierMaxMs ?? 320;
+      peakConfig.rrOutlierPercent = rrOutlierPercent;
+      peakConfig.rrOutlierMinMs = rrOutlierMinMs;
+      peakConfig.rrOutlierMaxMs = rrOutlierMaxMs;
+
       const preprocessingConfig: Record<string, boolean> = {};
       if (options?.removeBaselineWander !== undefined) {
         preprocessingConfig.removeBaselineWander = options.removeBaselineWander;
       }
 
+      const qualityConfig: Record<string, any> = {
+        thresholdRR:
+          options?.thresholdRR ?? PPG_CONFIG.thresholdRR ?? false,
+        rejectSegmentwise: true,
+        segmentRejectWindowBeats,
+        segmentRejectMaxRejects,
+      };
+
       const realtimeOptions: Record<string, any> = {
         bandpass: bandpassConfig,
         peak: peakConfig,
-        quality: {
-          rejectSegmentwise: true,
-          segmentRejectWindowBeats,
-          segmentRejectMaxRejects,
-        },
+        quality: qualityConfig,
         windowSeconds,
         welch: welchConfig,
+        adaptivePsd: PPG_CONFIG.debug.enableAdaptivePsd !== false,
+        calcFreq: options?.calcFreq ?? PPG_CONFIG.calcFreqEnabled ?? true,
+        filter: {
+          mode: requestedFilterMode ?? PPG_CONFIG.filterMode ?? 'auto',
+          order: requestedFilterOrder,
+        },
       };
 
       if (Object.keys(preprocessingConfig).length > 0) {
@@ -353,12 +418,14 @@ export class HeartPyWrapper {
     }
     
     // DETAILED LOG: Track sample push
-    console.log('[HeartPyWrapper] push', {
-      length: samples.length,
-      firstValue: samples[0],
-      lastValue: samples[samples.length - 1],
-      avgValue: samples.reduce((a, b) => a + b, 0) / samples.length,
-    });
+    if (PPG_CONFIG.debug.enableDetailedSnrLogging && PPG_CONFIG.debug.enabled) {
+      console.log('[HeartPyWrapper] push', {
+        length: samples.length,
+        firstValue: samples[0],
+        lastValue: samples[samples.length - 1],
+        avgValue: samples.reduce((a, b) => a + b, 0) / samples.length,
+      });
+    }
     
     await this.analyzer.push(samples);
   }
@@ -373,12 +440,14 @@ export class HeartPyWrapper {
       const samplesArray = samples instanceof Float32Array ? samples : new Float32Array(samples);
       const timestampsArray = timestamps instanceof Float64Array ? timestamps : new Float64Array(timestamps);
       
-      console.log('[HeartPyWrapper] pushWithTimestamps', {
-        sampleCount: samplesArray.length,
-        timestampCount: timestampsArray.length,
-        firstValue: samplesArray[0],
-        firstTimestamp: timestampsArray[0],
-      });
+      if (PPG_CONFIG.debug.enableDetailedSnrLogging && PPG_CONFIG.debug.enabled) {
+        console.log('[HeartPyWrapper] pushWithTimestamps', {
+          sampleCount: samplesArray.length,
+          timestampCount: timestampsArray.length,
+          firstValue: samplesArray[0],
+          firstTimestamp: timestampsArray[0],
+        });
+      }
       
       await this.analyzer.pushWithTimestamps(samplesArray, timestampsArray);
     } catch (error) {
@@ -397,25 +466,30 @@ export class HeartPyWrapper {
     }
     
     try {
-      console.log('[HeartPyWrapper] poll request');
+      const pollId = ++this.pollSequence;
+      const pollTimestamp = Date.now();
+      const verbose = !!(PPG_CONFIG.debug.enableDetailedSnrLogging && PPG_CONFIG.debug.enabled);
+      if (verbose) {
+        console.log('[HeartPyWrapper] poll request', {pollId, pollTimestamp});
+      }
       const result = await this.analyzer.poll();
       // Raw native result for diagnostics (ensure bridge passes peakTimestamps)
-      try {
-        console.log(
-          '[HeartPyWrapper] Raw Native Poll Result:',
-          JSON.stringify(result),
-        );
-      } catch (e) {
-        console.log('[HeartPyWrapper] Raw Native Poll Result: <unserializable>');
+      if (verbose) {
+        try {
+          console.log('[HeartPyWrapper] Raw Native Poll Result:', JSON.stringify(result));
+        } catch (e) {
+          console.log('[HeartPyWrapper] Raw Native Poll Result: <unserializable>', {pollId});
+        }
+        console.log('[HeartPyWrapper] poll response', {
+          pollId,
+          hasResult: !!result,
+          bpm: result?.bpm,
+          quality: result?.quality,
+          hf: result?.hf,
+          lf: result?.lf,
+          totalPower: result?.totalPower,
+        });
       }
-      console.log('[HeartPyWrapper] poll response', {
-        hasResult: !!result,
-        bpm: result?.bpm,
-        quality: result?.quality,
-        hf: result?.hf,
-        lf: result?.lf,
-        totalPower: result?.totalPower,
-      });
       if (!result) {
         return null;
       }
@@ -436,20 +510,47 @@ export class HeartPyWrapper {
       let snrDb = (quality as any).snrDb;
       const originalSnrDb = snrDb;
       let isFallbackUsed = false;
+      let fallbackReason: string | undefined;
+      const warmupActive = ((quality as any)?.snrWarmupActive ?? 0) === 1;
+      const snrSampleCount = typeof (quality as any)?.snrSampleCount === 'number'
+        ? (quality as any).snrSampleCount
+        : null;
+
+      if (verbose) {
+        console.log('[HeartPyWrapper] native SNR raw', {
+          pollId,
+          originalSnrDb,
+          type: typeof originalSnrDb,
+        });
+      }
+
+      if (typeof snrDb === 'string') {
+        snrDb = Number(snrDb);
+      }
+
+      if (verbose) {
+        console.log('[HeartPyWrapper] native SNR parsed', {pollId, value: snrDb});
+      }
 
       // Enhanced SNR validation and fallback with bridge safety
       if (!this.isValidSnrNumber(snrDb)) {
-        if (PPG_CONFIG.debug.enabled) {
-          const reason = snrDb === 0 ? 'zero' : 'out of range';
-          console.log(`[HeartPyWrapper] Invalid native SNR (${reason}), using fallback:`, snrDb);
+        const reason = snrDb === 0 ? 'zero' : 'out of range';
+        if (verbose) {
+          console.log(`[HeartPyWrapper] Invalid native SNR (${reason}), using fallback`, {
+            pollId,
+            rawValue: snrDb,
+          });
         }
+        fallbackReason = reason === 'zero' ? 'native_zero' : 'native_invalid';
         const tail = this.getAnalysisTail();
         if (tail) {
           snrDb = this.computeSnrFallbackDb(tail);
           isFallbackUsed = true;
+          fallbackReason = `${fallbackReason}_tail`;
         } else {
           snrDb = -10; // Safe fallback
           isFallbackUsed = true;
+          fallbackReason = `${fallbackReason}_no_tail`;
         }
       } else {
         // Sanitize native SNR value
@@ -459,7 +560,36 @@ export class HeartPyWrapper {
       const normalizedSnrDb = snrDb;
 
       // Update SNR metrics and log debug info
-      this.updateSnrMetrics(originalSnrDb, normalizedSnrDb, isFallbackUsed);
+      const hardFallbackActive = ((quality as any)?.hardFallbackActive ?? 0) === 1;
+      if (isFallbackUsed && hardFallbackActive) {
+        fallbackReason = fallbackReason ? `${fallbackReason}|hard_fallback` : 'hard_fallback';
+      }
+      if (warmupActive) {
+        fallbackReason = fallbackReason ?? 'snr_warmup';
+      }
+      this.updateSnrMetrics(originalSnrDb, normalizedSnrDb, isFallbackUsed, fallbackReason);
+      const totalSnrSamples = this.snrMetrics.nativeSnrCount + this.snrMetrics.fallbackSnrCount;
+      const fallbackRatioPct = totalSnrSamples > 0
+        ? (this.snrMetrics.fallbackSnrCount / totalSnrSamples) * 100
+        : 0;
+      const f0Hz = typeof (quality as any)?.f0Hz === 'number' ? (quality as any).f0Hz : null;
+      console.log('[HeartPyWrapper] poll snr summary', {
+        pollId,
+        originalSnrDb,
+        sanitizedSnrDb: normalizedSnrDb,
+        isFallbackUsed,
+        fallbackRatioPct: Number(fallbackRatioPct.toFixed(1)),
+        fallbackReason,
+        f0Hz,
+        hardFallbackActive,
+        warmupActive,
+        snrSampleCount,
+        totals: {
+          nativeSnrCount: this.snrMetrics.nativeSnrCount,
+          fallbackSnrCount: this.snrMetrics.fallbackSnrCount,
+          invalidSnrCount: this.snrMetrics.invalidSnrCount,
+        },
+      });
       this.logSnrDebugInfo(originalSnrDb, normalizedSnrDb, isFallbackUsed);
 
       const snrScore = Math.min(
@@ -496,8 +626,9 @@ export class HeartPyWrapper {
       // P0 FIX: Define bufferLength before use to fix TypeScript compilation error
       const bufferLength = this.bufferRef?.getLength() ?? 0;
 
-      if (PPG_CONFIG.debug.enabled) {
+      if (verbose) {
         console.log('[HeartPyWrapper] Native peak data', {
+          pollId,
           rawPeakList,
           normalizedPeaks: peakList,
           bufferLength,
@@ -506,9 +637,12 @@ export class HeartPyWrapper {
       }
 
       const metrics = {
+        pollId,
+        pollTimestamp,
         bpm: typeof native?.bpm === 'number' ? native.bpm : 0,
         confidence,
         snrDb: normalizedSnrDb,
+        signalQuality,
         hasResult: goodQuality,
         peakList,
         peakTimestamps: peakTimestampsMs,
@@ -519,19 +653,39 @@ export class HeartPyWrapper {
           signalQuality,
           totalBeats,
           rejectionRate: rejectionRateRaw,
+          confidence,
+          snrWarmupActive: warmupActive ? 1 : 0,
+          snrSampleCount,
+        },
+        snrDebug: {
+          originalSnrDb: typeof originalSnrDb === 'number' ? originalSnrDb : null,
+          sanitizedSnrDb: normalizedSnrDb,
+          isFallbackUsed,
+          fallbackRatioPct: Number(fallbackRatioPct.toFixed(1)),
+          fallbackReason,
+          f0Hz,
+          hardFallbackActive,
+          warmupActive,
+          sampleCount: snrSampleCount,
         },
       };
 
-      if (PPG_CONFIG.debug.enabled) {
+      if (verbose) {
         console.log('[HeartPyWrapper] Native metrics', {
+          pollId,
           bpm: metrics.bpm,
           confidence: metrics.confidence,
           snrDb: metrics.snrDb,
           hasResult: metrics.hasResult,
           totalBeats: metrics.quality.totalBeats,
           rejectionRate: metrics.quality.rejectionRate,
-          signalQuality: metrics.quality.signalQuality,
+          signalQuality: metrics.signalQuality,
+          qualitySignal: metrics.quality.signalQuality,
           peakCount: metrics.peakList.length,
+          isFallbackUsed,
+          hardFallbackActive,
+          warmupActive,
+          snrSampleCount,
         });
       }
 

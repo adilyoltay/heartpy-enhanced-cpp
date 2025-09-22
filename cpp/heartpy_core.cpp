@@ -5,6 +5,20 @@
 #include <numeric>
 #include <complex>
 #include <stdexcept>
+#include <string>
+#include <sstream>
+#include <atomic>
+#include <cstdio>
+#include <cstdarg>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+#include <os/log.h>
+#endif
+#endif
 #ifdef USE_ACCELERATE_FFT
 #include <Accelerate/Accelerate.h>
 #endif
@@ -19,6 +33,44 @@ static bool s_deterministic = false;
 namespace {
 
 static constexpr double PI = 3.141592653589793238462643383279502884;
+
+static std::atomic<unsigned long long> g_welchGuardFallbackCount{0};
+static std::atomic<unsigned long long> g_welchGuardFailureCount{0};
+
+static void logWelchGuard(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    std::fprintf(stderr, "[HeartPySNR][welchPSD] ");
+    std::vfprintf(stderr, fmt, args);
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+    va_end(args);
+}
+
+static void logAnalyze(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+#if defined(__ANDROID__)
+    __android_log_vprint(ANDROID_LOG_DEBUG, "HeartPyAnalyze", fmt, args);
+#elif defined(__APPLE__)
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+    char buffer[512];
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEBUG, "[HeartPyAnalyze] %{public}s", buffer);
+#else
+    std::fprintf(stderr, "[HeartPyAnalyze] ");
+    std::vfprintf(stderr, fmt, args);
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+#endif
+#else
+    std::fprintf(stderr, "[HeartPyAnalyze] ");
+    std::vfprintf(stderr, fmt, args);
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+#endif
+    va_end(args);
+}
 
 // fwd decl
 static std::vector<int> quotientFilterMask(const std::vector<double>& rr, const std::vector<int>& base_mask, int iterations = 2);
@@ -201,11 +253,107 @@ static void fft_inplace(std::vector<std::complex<double>>& a) {
 PSDResult welchPSD(const std::vector<double>& x, double fs, int nfft, double overlap) {
     const int n = static_cast<int>(x.size());
     if (nfft <= 0) nfft = 256;
-    if (n < nfft) return {{}, {}};
-    int step = static_cast<int>(std::round(nfft * (1.0 - overlap)));
-    step = std::max(1, step);
-    const int nseg = 1 + (n - nfft) / step;
-    if (nseg <= 0) return {{}, {}};
+    overlap = clamp(overlap, 0.0, 0.95);
+
+    constexpr int kMinNfft = 32;
+    const int originalNfft = nfft;
+    const double originalOverlap = overlap;
+
+    auto largestPowerOfTwoLE = [](int value) -> int {
+        if (value < 1) return 0;
+        int pow2 = 1;
+        while ((pow2 << 1) <= value && (pow2 << 1) > 0) {
+            pow2 <<= 1;
+        }
+        return pow2;
+    };
+
+    int workingNfft = std::max(kMinNfft, nfft);
+    double workingOverlap = overlap;
+    int step = 1;
+    int nseg = 0;
+    bool paramsReady = false;
+    bool adjustmentOccurred = false;
+
+    while (workingNfft >= kMinNfft) {
+        if (n < workingNfft) {
+            int nextNfft = largestPowerOfTwoLE(n);
+            if (nextNfft < kMinNfft) {
+                break;
+            }
+            if (nextNfft != workingNfft) {
+                logWelchGuard("Signal shorter than nfft (%d < %d). Reducing nfft to %d", n, workingNfft, nextNfft);
+                adjustmentOccurred = true;
+                workingNfft = nextNfft;
+                continue;
+            }
+        }
+
+        if (n <= workingNfft) {
+            // Even with maximum overlap we cannot form >=2 segments; shrink nfft further
+            if (workingNfft == kMinNfft) {
+                break;
+            }
+            int nextNfft = largestPowerOfTwoLE(workingNfft - 1);
+            if (nextNfft < kMinNfft) {
+                break;
+            }
+            logWelchGuard("Insufficient signal span for nfft=%d (n=%d). Reducing to %d", workingNfft, n, nextNfft);
+            adjustmentOccurred = true;
+            workingNfft = nextNfft;
+            continue;
+        }
+
+        double minOverlapForTwo = 1.0 - static_cast<double>(n - workingNfft) / static_cast<double>(workingNfft);
+        minOverlapForTwo = clamp(minOverlapForTwo, 0.0, 0.95);
+        double candidateOverlap = std::max(workingOverlap, minOverlapForTwo + 0.02);
+        candidateOverlap = clamp(candidateOverlap, 0.0, 0.95);
+
+        double stepFloat = static_cast<double>(workingNfft) * (1.0 - candidateOverlap);
+        if (stepFloat < 1.0) stepFloat = 1.0;
+        step = std::max(1, static_cast<int>(std::round(stepFloat)));
+        nseg = 1 + (n - workingNfft) / step;
+
+        if (nseg >= 2) {
+            if (std::fabs(candidateOverlap - workingOverlap) > 1e-6) {
+                adjustmentOccurred = true;
+            }
+            workingOverlap = candidateOverlap;
+            paramsReady = true;
+            break;
+        }
+
+        if (candidateOverlap < 0.95 - 1e-6) {
+            workingOverlap = std::min(0.95, candidateOverlap + 0.05);
+            adjustmentOccurred = true;
+            continue;
+        }
+
+        if (workingNfft == kMinNfft) {
+            break;
+        }
+        int nextNfft = largestPowerOfTwoLE(workingNfft - 1);
+        if (nextNfft < kMinNfft) {
+            break;
+        }
+        logWelchGuard("Rounding prevented nseg>=2 for nfft=%d (n=%d). Reducing to %d", workingNfft, n, nextNfft);
+        adjustmentOccurred = true;
+        workingNfft = nextNfft;
+    }
+
+    if (!paramsReady) {
+        g_welchGuardFailureCount.fetch_add(1);
+        logWelchGuard("Unable to satisfy Welch params (n=%d, requested nfft=%d)", n, originalNfft);
+        return {{}, {}};
+    }
+
+    if (adjustmentOccurred) {
+        g_welchGuardFallbackCount.fetch_add(1);
+        logWelchGuard("Adjusted Welch params: nfft %d -> %d, overlap %.3f -> %.3f, nseg=%d, n=%d", originalNfft, workingNfft, originalOverlap, workingOverlap, nseg, n);
+    }
+
+    nfft = workingNfft;
+    overlap = workingOverlap;
 
     // Hann window
     std::vector<double> w(nfft);
@@ -712,7 +860,22 @@ std::vector<double> enhancePeaks(const std::vector<double>& signal, double /*fs*
     return result;
 }
 
+template <typename T>
+std::string vectorToString(const std::vector<T>& vec) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < vec.size(); ++i) {
+        oss << vec[i];
+        if (i < vec.size() - 1) {
+            oss << ", ";
+        }
+    }
+    oss << "]";
+    return oss.str();
+}
+
 HeartMetrics analyzeSignal(const std::vector<double>& signal, double fs, const Options& opt) {
+
 	if (signal.empty()) throw std::invalid_argument("signal is empty");
 	if (fs <= 0.0) throw std::invalid_argument("fs must be > 0");
 
@@ -744,14 +907,15 @@ HeartMetrics analyzeSignal(const std::vector<double>& signal, double fs, const O
 					  [offset](double val) { return val + offset; });
 	}
 
+	logAnalyze("analyzeSignal: filtered signal size=%zu (fs=%.3f)", processed.size(), fs);
+
 	// 1) Detrend for later spectral analysis
 	int detrendWin = std::max(5, static_cast<int>(std::round(0.75 * fs)));
 	std::vector<double> x = movingAverageDetrend(processed, detrendWin);
 
 	// 2) Bandpass (used primarily for spectral analysis); peak detection will use processed
-	// If order>=3: use simple 3x one-pole HP/LP with filtfilt-like zero-phase (Butterworth-like)
-	// Else: RBJ biquad bandpass
-	if (opt.iirOrder >= 3) {
+	// Modes: AUTO (legacy), RBJ biquad, or BUTTER_FILTFILT (zero‑phase via forward+reverse one‑pole cascades)
+	{
 		auto onePoleLP = [&](const std::vector<double>& s, double fc){
 			double rc = 1.0 / (2.0 * PI * fc);
 			double dt = 1.0 / fs;
@@ -768,18 +932,31 @@ HeartMetrics analyzeSignal(const std::vector<double>& signal, double fs, const O
 			for (size_t i = 1; i < s.size(); ++i) y[i] = alpha * (y[i-1] + s[i] - s[i-1]);
 			return y;
 		};
-		std::vector<double> y = x;
+		auto do_filtfilt = [&](std::vector<double> in, double lo, double hi, int order){
+			order = std::max(1, order);
+			for (int i = 0; i < order; ++i) in = onePoleHP(in, lo);
+			for (int i = 0; i < order; ++i) in = onePoleLP(in, hi);
+			std::reverse(in.begin(), in.end());
+			for (int i = 0; i < order; ++i) in = onePoleHP(in, lo);
+			for (int i = 0; i < order; ++i) in = onePoleLP(in, hi);
+			std::reverse(in.begin(), in.end());
+			return in;
+		};
 		double lo = std::max(0.0001, opt.lowHz);
 		double hi = std::max(0.0001, opt.highHz);
-		for (int i = 0; i < 3; ++i) y = onePoleHP(y, lo);
-		for (int i = 0; i < 3; ++i) y = onePoleLP(y, hi);
-		std::reverse(y.begin(), y.end());
-		for (int i = 0; i < 3; ++i) y = onePoleHP(y, lo);
-		for (int i = 0; i < 3; ++i) y = onePoleLP(y, hi);
-		std::reverse(y.begin(), y.end());
-		x = y;
-	} else {
-		x = bandpassFilter(x, fs, opt.lowHz, opt.highHz, opt.iirOrder);
+		switch (opt.filterMode) {
+			case Options::FilterMode::RBJ:
+				x = bandpassFilter(x, fs, opt.lowHz, opt.highHz, opt.iirOrder);
+				break;
+			case Options::FilterMode::BUTTER_FILTFILT:
+				x = do_filtfilt(x, lo, hi, opt.iirOrder);
+				break;
+			case Options::FilterMode::AUTO:
+			default:
+				if (opt.iirOrder >= 3) x = do_filtfilt(x, lo, hi, opt.iirOrder);
+				else x = bandpassFilter(x, fs, opt.lowHz, opt.highHz, opt.iirOrder);
+				break;
+		}
 	}
 
 	// 3) Peak detection: HeartPy-style fit_peaks on scaled processed signal
@@ -794,25 +971,69 @@ HeartMetrics analyzeSignal(const std::vector<double>& signal, double fs, const O
     }
     m.peakList = peaks;
     m.peakListRaw = peaks; // capture raw peaks before cleaning
+    // After peak detection (detectPeaksHP_local)
+    logAnalyze("analyzeSignal: raw peaks detected=%zu (hpfit_ok=%d)", m.peakListRaw.size(), hpfit.ok ? 1 : 0);
+    logAnalyze("analyzeSignal: raw peaks content: %s", vectorToString(m.peakListRaw).c_str());
 
 	// Quality assessment
 	m.quality = assessSignalQuality(x, peaks, fs);
 
     // 4) HeartPy-style check_peaks: remove RR outliers based on mean ± max(30%, 300ms)
-    if (peaks.size() >= 2) {
+	    if (peaks.size() >= 2) {
         std::vector<double> rr_raw;
         rr_raw.reserve(peaks.size() - 1);
         for (size_t i = 1; i < peaks.size(); ++i) rr_raw.push_back((peaks[i] - peaks[i - 1]) * 1000.0 / fs);
+        logAnalyze("analyzeSignal: rr intervals raw (ms): %s", vectorToString(rr_raw).c_str());
         double mean_rr = mean(rr_raw);
-        double thirty = 0.3 * mean_rr;
-        double lower = mean_rr - (thirty <= 300.0 ? 300.0 : thirty);
-        double upper = mean_rr + (thirty <= 300.0 ? 300.0 : thirty);
+        double rrPercent = clamp(opt.rrOutlierPercent, 0.0, 1.0);
+        double percentDelta = mean_rr * rrPercent;
+        double deltaMin = std::max(0.0, opt.rrOutlierMinMs);
+        double deltaMax = std::max(deltaMin, opt.rrOutlierMaxMs > 0.0 ? opt.rrOutlierMaxMs : percentDelta);
+        double rrDelta = clamp(percentDelta, deltaMin > 0.0 ? deltaMin : percentDelta, deltaMax);
+        double lower = mean_rr - rrDelta;
+        double upper = mean_rr + rrDelta;
+        logAnalyze("analyzeSignal: rr bounds lower=%.3f upper=%.3f mean=%.3f delta=%.3f (percent=%.2f%%)",
+                   lower, upper, mean_rr, rrDelta, rrPercent * 100.0);
         // indices to remove in peaklist are rr indices + 1
         std::vector<char> keep_peak(peaks.size(), 1);
         for (size_t i = 0; i < rr_raw.size(); ++i) {
             if (rr_raw[i] <= lower || rr_raw[i] >= upper) {
                 size_t idx = i + 1; if (idx < keep_peak.size()) keep_peak[idx] = 0;
             }
+        }
+        size_t keepCount = 0;
+        size_t rejectCount = 0;
+        {
+            std::vector<int> keepMask;
+            keepMask.reserve(keep_peak.size());
+            for (char v : keep_peak) {
+                if (v) {
+                    ++keepCount;
+                } else {
+                    ++rejectCount;
+                }
+                keepMask.push_back(static_cast<int>(v));
+            }
+            logAnalyze("analyzeSignal: keep mask after rr filter: %s", vectorToString(keepMask).c_str());
+        }
+        logAnalyze("analyzeSignal: rr filter keep_count=%zu reject_count=%zu", keepCount, rejectCount);
+        {
+            std::vector<std::string> decisions;
+            decisions.reserve(peaks.size());
+            for (size_t i = 0; i < peaks.size(); ++i) {
+                std::ostringstream oss;
+                oss << peaks[i] << (keep_peak[i] ? "@keep" : "@drop");
+                decisions.push_back(oss.str());
+            }
+            logAnalyze("analyzeSignal: rr filter decisions: %s", vectorToString(decisions).c_str());
+        }
+        {
+            std::vector<int> peakDiffSamples;
+            peakDiffSamples.reserve(peaks.size() > 1 ? peaks.size() - 1 : 0);
+            for (size_t i = 1; i < peaks.size(); ++i) {
+                peakDiffSamples.push_back(peaks[i] - peaks[i - 1]);
+            }
+            logAnalyze("analyzeSignal: peak sample deltas: %s", vectorToString(peakDiffSamples).c_str());
         }
         // Segmentwise rejection (HeartPy check_binary_quality): non-overlapping windows of N beats
         if (opt.rejectSegmentwise) {
@@ -838,6 +1059,7 @@ HeartMetrics analyzeSignal(const std::vector<double>& signal, double fs, const O
             }
         }
         std::vector<int> peaks_cor; peaks_cor.reserve(peaks.size());
+        std::vector<size_t> acceptedRawIndices; acceptedRawIndices.reserve(peaks.size());
         m.binaryPeakMask.clear(); m.binaryPeakMask.reserve(keep_peak.size());
         m.quality.rejectedIndices.clear();
         for (size_t i = 0; i < peaks.size(); ++i) {
@@ -845,17 +1067,103 @@ HeartMetrics analyzeSignal(const std::vector<double>& signal, double fs, const O
             m.binaryPeakMask.push_back(accept);
             if (accept) {
                 peaks_cor.push_back(peaks[i]);
+                acceptedRawIndices.push_back(i);
             } else {
                 m.quality.rejectedIndices.push_back(static_cast<int>(i));
             }
         }
+
+        std::vector<int> spacingRejectedRawIndices;
+        std::vector<double> spacingRejectedDeltaMs;
+        if (opt.minPeakDistanceMs > 0.0 && peaks_cor.size() > 1) {
+            double spacingMs = opt.minPeakDistanceMs;
+            int minSamples = static_cast<int>(std::ceil(spacingMs * fs / 1000.0));
+            if (minSamples > 1) {
+                std::vector<int> filteredPeaks;
+                std::vector<size_t> filteredRawIndices;
+                filteredPeaks.reserve(peaks_cor.size());
+                filteredRawIndices.reserve(acceptedRawIndices.size());
+                filteredPeaks.push_back(peaks_cor.front());
+                filteredRawIndices.push_back(acceptedRawIndices.front());
+                int lastSample = peaks_cor.front();
+                for (size_t idx = 1; idx < peaks_cor.size(); ++idx) {
+                    int sample = peaks_cor[idx];
+                    size_t rawIdx = acceptedRawIndices[idx];
+                    int deltaSamples = sample - lastSample;
+                    double deltaMs = deltaSamples * 1000.0 / fs;
+                    if (deltaSamples < minSamples) {
+                        spacingRejectedRawIndices.push_back(static_cast<int>(rawIdx));
+                        spacingRejectedDeltaMs.push_back(deltaMs);
+                        keep_peak[rawIdx] = 0;
+                        m.binaryPeakMask[rawIdx] = 0;
+                        m.quality.rejectedIndices.push_back(static_cast<int>(rawIdx));
+                        continue;
+                    }
+                    filteredPeaks.push_back(sample);
+                    filteredRawIndices.push_back(rawIdx);
+                    lastSample = sample;
+                }
+                if (!spacingRejectedRawIndices.empty()) {
+                    logAnalyze("analyzeSignal: spacing filter min_ms=%.3f removed=%zu", spacingMs, spacingRejectedRawIndices.size());
+                    logAnalyze("analyzeSignal: spacing rejected raw indices: %s", vectorToString(spacingRejectedRawIndices).c_str());
+                    logAnalyze("analyzeSignal: spacing rejected delta (ms): %s", vectorToString(spacingRejectedDeltaMs).c_str());
+                    peaks_cor = std::move(filteredPeaks);
+                    acceptedRawIndices = std::move(filteredRawIndices);
+                    std::vector<int> keepMaskUpdated;
+                    keepMaskUpdated.reserve(keep_peak.size());
+                    for (char v : keep_peak) keepMaskUpdated.push_back(static_cast<int>(v));
+                    logAnalyze("analyzeSignal: keep mask after spacing: %s", vectorToString(keepMaskUpdated).c_str());
+                }
+            }
+        }
+
+        if (peaks_cor.size() > 1) {
+            std::vector<int> peakDiffSamplesCor;
+            peakDiffSamplesCor.reserve(peaks_cor.size() - 1);
+            std::vector<double> peakDiffMsCor;
+            peakDiffMsCor.reserve(peaks_cor.size() - 1);
+            for (size_t i = 1; i < peaks_cor.size(); ++i) {
+                int sampleDelta = peaks_cor[i] - peaks_cor[i - 1];
+                peakDiffSamplesCor.push_back(sampleDelta);
+                peakDiffMsCor.push_back(sampleDelta * 1000.0 / fs);
+            }
+            logAnalyze("analyzeSignal: corrected peak sample deltas: %s", vectorToString(peakDiffSamplesCor).c_str());
+            logAnalyze("analyzeSignal: corrected peak delta (ms): %s", vectorToString(peakDiffMsCor).c_str());
+        }
         // recompute RR list corrected
+        m.ibiMs.clear();
         for (size_t i = 1; i < peaks_cor.size(); ++i) m.ibiMs.push_back((peaks_cor[i] - peaks_cor[i - 1]) * 1000.0 / fs);
         m.peakList = peaks_cor;
+        if (!m.quality.rejectedIndices.empty()) {
+            std::sort(m.quality.rejectedIndices.begin(), m.quality.rejectedIndices.end());
+            m.quality.rejectedIndices.erase(std::unique(m.quality.rejectedIndices.begin(), m.quality.rejectedIndices.end()), m.quality.rejectedIndices.end());
+        }
     }
-	
+	logAnalyze("analyzeSignal: consolidated peaks=%zu (raw=%zu)", m.peakList.size(), m.peakListRaw.size());
+	logAnalyze("analyzeSignal: consolidated peaks content: %s", vectorToString(m.peakList).c_str());
+
 	m.rrList = m.ibiMs; // Initially same
-	
+	logAnalyze("analyzeSignal: rrList input peaks=%zu", m.peakList.size());
+	logAnalyze("analyzeSignal: rr intervals (initial): %s", vectorToString(m.rrList).c_str());
+
+	// Apply HeartPy threshold_rr masking before optional cleaning (parity with HP)
+	if (opt.thresholdRR && !m.rrList.empty()) {
+		double mean_rr = mean(m.rrList);
+		double margin = std::max(0.3 * mean_rr, 300.0);
+		double lower = mean_rr - margin;
+		double upper = mean_rr + margin;
+		std::vector<double> rr_cor;
+		rr_cor.reserve(m.rrList.size());
+		for (size_t i = 0; i < m.rrList.size(); ++i) {
+			double v = m.rrList[i];
+			if (!(v <= lower || v >= upper)) rr_cor.push_back(v);
+		}
+		if (!rr_cor.empty()) {
+			m.rrList.swap(rr_cor);
+			logAnalyze("analyzeSignal: threshold_rr masked rrList size=%zu", m.rrList.size());
+		}
+	}
+
 	// Clean RR intervals if requested
 	if (opt.cleanRR && !m.rrList.empty()) {
 		switch (opt.cleanMethod) {
@@ -872,10 +1180,15 @@ HeartMetrics analyzeSignal(const std::vector<double>& signal, double fs, const O
 				break;
 		}
 	}
-	
+	logAnalyze("analyzeSignal: rrList size=%zu", m.rrList.size());
+	logAnalyze("analyzeSignal: rrList content: %s", vectorToString(m.rrList).c_str());
+
 	if (!m.rrList.empty()) {
 		double meanIbi = mean(m.rrList);
 		m.bpm = 60000.0 / meanIbi;
+		logAnalyze("analyzeSignal: calculated BPM=%.2f (rrCount=%zu)", m.bpm, m.rrList.size());
+	} else {
+		logAnalyze("analyzeSignal: unable to compute BPM (rrCount=0, peaks=%zu)", m.peakList.size());
 	}
 
 	// 5) Enhanced Time-domain metrics
@@ -934,8 +1247,8 @@ HeartMetrics analyzeSignal(const std::vector<double>& signal, double fs, const O
 		}
 	}
 
-	// RR-based Welch per HeartPy/SciPy
-	if (m.ibiMs.size() >= 2) {
+	// RR-based Welch per HeartPy/SciPy (guarded by calcFreq)
+	if (opt.calcFreq && m.ibiMs.size() >= 2) {
 		// RR_list_cor equivalent
 		const std::vector<double>& rr = m.ibiMs;
 		// cumulative time in ms
@@ -1479,6 +1792,9 @@ std::pair<std::vector<double>, std::vector<double>> welchPowerSpectrum(
     PSDResult psd = welchPSD(signal, fs, nfft, overlap);
     return {psd.freqs, psd.psd};
 }
+
+unsigned long long getWelchPsdGuardFallbackCount() { return g_welchGuardFallbackCount.load(); }
+unsigned long long getWelchPsdGuardFailureCount() { return g_welchGuardFailureCount.load(); }
 
 void setDeterministic(bool on) { s_deterministic = on; }
 bool isDeterministic() { return s_deterministic; }

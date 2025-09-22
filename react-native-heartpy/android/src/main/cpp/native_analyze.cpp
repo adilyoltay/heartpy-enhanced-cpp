@@ -58,6 +58,8 @@ static std::string to_json(const heartpy::HeartMetrics& r, bool includeSegments=
     os << ",\"doublingHintFlag\":" << r.quality.doublingHintFlag;
     os << ",\"hardFallbackActive\":" << r.quality.hardFallbackActive;
     os << ",\"rrFallbackModeActive\":" << r.quality.rrFallbackModeActive;
+    os << ",\"snrWarmupActive\":" << r.quality.snrWarmupActive;
+    os << ",\"snrSampleCount\":" << r.quality.snrSampleCount;
     os << ",\"refractoryMsActive\":" << r.quality.refractoryMsActive;
     os << ",\"minRRBoundMs\":" << r.quality.minRRBoundMs;
     os << ",\"pairFrac\":" << r.quality.pairFrac;
@@ -139,7 +141,11 @@ Java_com_heartpy_HeartPyModule_analyzeNativeJson(
         jint poincareMode,
         jboolean pnnAsPercent,
         jdouble snrTauSec,
-        jdouble snrActiveTauSec) {
+        jdouble snrActiveTauSec,
+        jboolean adaptivePsd,
+        jboolean thresholdRR,
+        jboolean calcFreq,
+        jint filterMode) {
     jsize len = env->GetArrayLength(jSignal);
     std::vector<double> signal(len);
     env->GetDoubleArrayRegion(jSignal, 0, len, signal.data());
@@ -163,6 +169,10 @@ Java_com_heartpy_HeartPyModule_analyzeNativeJson(
     opt.pnnAsPercent = (pnnAsPercent==JNI_TRUE);
     opt.snrTauSec = snrTauSec;
     opt.snrActiveTauSec = snrActiveTauSec;
+    opt.adaptivePsd = (adaptivePsd == JNI_TRUE);
+    opt.thresholdRR = (thresholdRR == JNI_TRUE);
+    opt.calcFreq = (calcFreq == JNI_TRUE);
+    opt.filterMode = (filterMode==1? heartpy::Options::FilterMode::RBJ : (filterMode==2? heartpy::Options::FilterMode::BUTTER_FILTFILT : heartpy::Options::FilterMode::AUTO));
 
     auto res = heartpy::analyzeSignal(signal, fs, opt);
     std::string json = to_json(res, false);
@@ -240,7 +250,11 @@ Java_com_heartpy_HeartPyModule_analyzeSegmentwiseNativeJson(
         jint poincareMode,
         jboolean pnnAsPercent,
         jdouble snrTauSec,
-        jdouble snrActiveTauSec) {
+        jdouble snrActiveTauSec,
+        jboolean adaptivePsd,
+        jboolean thresholdRR,
+        jboolean calcFreq,
+        jint filterMode) {
     jsize len = env->GetArrayLength(jSignal);
     std::vector<double> signal(len);
     env->GetDoubleArrayRegion(jSignal, 0, len, signal.data());
@@ -262,6 +276,10 @@ Java_com_heartpy_HeartPyModule_analyzeSegmentwiseNativeJson(
     opt.pnnAsPercent = (pnnAsPercent==JNI_TRUE);
     opt.snrTauSec = snrTauSec;
     opt.snrActiveTauSec = snrActiveTauSec;
+    opt.adaptivePsd = (adaptivePsd == JNI_TRUE);
+    opt.thresholdRR = (thresholdRR == JNI_TRUE);
+    opt.calcFreq = (calcFreq == JNI_TRUE);
+    opt.filterMode = (filterMode==1? heartpy::Options::FilterMode::RBJ : (filterMode==2? heartpy::Options::FilterMode::BUTTER_FILTFILT : heartpy::Options::FilterMode::AUTO));
     auto res = heartpy::analyzeSignalSegmentwise(signal, fs, opt);
     std::string json = to_json(res, true);
     return env->NewStringUTF(json.c_str());
@@ -347,7 +365,10 @@ Java_com_heartpy_HeartPyModule_rtCreateNative(
         jint poincareMode,
         jboolean pnnAsPercent,
         jdouble snrTauSec,
-        jdouble snrActiveTauSec) {
+        jdouble snrActiveTauSec,
+        jboolean thresholdRR,
+        jboolean calcFreq,
+        jint filterMode) {
     heartpy::Options opt;
     opt.lowHz = lowHz; opt.highHz = highHz; opt.iirOrder = order;
     opt.nfft = nfft; opt.overlap = overlap; opt.welchWsizeSec = welchWsizeSec;
@@ -366,6 +387,9 @@ Java_com_heartpy_HeartPyModule_rtCreateNative(
     opt.pnnAsPercent = (pnnAsPercent==JNI_TRUE);
     opt.snrTauSec = snrTauSec;
     opt.snrActiveTauSec = snrActiveTauSec;
+    opt.thresholdRR = (thresholdRR == JNI_TRUE);
+    opt.calcFreq = (calcFreq == JNI_TRUE);
+    opt.filterMode = (filterMode==1? heartpy::Options::FilterMode::RBJ : (filterMode==2? heartpy::Options::FilterMode::BUTTER_FILTFILT : heartpy::Options::FilterMode::AUTO));
     void* h = hp_rt_create(fs, &opt);
     return (jlong)h;
 }
@@ -659,5 +683,3 @@ static void installBinding(facebook::jsi::Runtime& rt) {
     );
     rt.global().setProperty(rt, "__hpRtDestroy", fnDestroy);
 }
-
-

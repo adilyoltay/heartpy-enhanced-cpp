@@ -11,15 +11,18 @@ namespace heartpy {
 
 // Enhanced Options structure with all Python HeartPy features
 struct Options {
+	enum class FilterMode { AUTO, RBJ, BUTTER_FILTFILT };
 	// Bandpass filtering
 	double lowHz = 0.5;
 	double highHz = 5.0;
 	int iirOrder = 2;
+	FilterMode filterMode = FilterMode::AUTO; // AUTO: legacy; RBJ or BUTTER_FILTFILT selectable
 
 	// Welch PSD
 	int nfft = 256;              // used if explicitly set; otherwise derived from welchWsizeSec
 	double overlap = 0.5;        // ratio 0..1 (50% default like SciPy)
 	double welchWsizeSec = 240;  // HeartPy default Welch window size in seconds
+    bool adaptivePsd = true;    // enable dynamic Welch parameter tuning/fallbacks
     // RR spline smoothing controls
     double rrSplineSmooth = 0.1; // legacy: blend factor 0..1 for pre-smoothing
     double rrSplineS = 10.0;      // UnivariateSpline-like smoothing factor (quick test default ~10)
@@ -28,14 +31,20 @@ struct Options {
 	// Segmentwise rejection (check_binary_quality)
     int segmentRejectMaxRejects = 3; // maximum rejects per 10-beat window
 
-	// Breathing output control
+    // Breathing output control
     bool breathingAsBpm = false; // false: Hz (HeartPy), true: breaths/min
+    // Frequency-domain computation control (parity with HeartPy calc_freq)
+    bool calcFreq = true;       // if false, skip VLF/LF/HF and LF/HF computation
 
 	// Peak detection
 	double refractoryMs = 150.0; // P1 FIX: Reduced from 250ms to 150ms for better sensitivity
+	double minPeakDistanceMs = 320.0; // Post-processing guard to drop tightly spaced beats
 	double thresholdScale = 0.3; // P1 FIX: Reduced from 0.5 to 0.3 for more sensitive peak detection
 	double bpmMin = 35.0; // P1 FIX: Lowered from 40 to 35 for broader range
 	double bpmMax = 180.0;
+	double rrOutlierPercent = 0.25;  // tighten RR outlier band (was 30%)
+	double rrOutlierMinMs = 180.0;   // enforce minimum absolute band
+	double rrOutlierMaxMs = 320.0;   // cap RR band expansion
 
 	// HP-style thresholding (rolling_mean + ma_perc lift)
 	bool   useHPThreshold = false;   // if true, prefer HP-style threshold in streaming
@@ -103,8 +112,8 @@ struct Options {
 	enum class CleanMethod { QUOTIENT_FILTER, IQR, Z_SCORE } cleanMethod = CleanMethod::QUOTIENT_FILTER;
     int cleanIterations = 2; // iterations for quotient filter (HeartPy default ~2)
 
-	// RR thresholding (HeartPy threshold_rr): default false
-	bool thresholdRR = false;
+    // RR thresholding (HeartPy threshold_rr): default false
+    bool thresholdRR = false;
 
 	// SDSD computation mode (signed vs abs diffs)
 	enum class SdsdMode { SIGNED, ABS } sdsdMode = SdsdMode::ABS;
@@ -156,6 +165,8 @@ struct QualityInfo {
     int    hardFallbackActive = 0;   // 1 when hard fallback elevated refractory is active
     int    doublingHintFlag = 0;     // 1 when PSD-only doubling hint is active
     int    rrFallbackModeActive = 0; // 1 when RR-only fallback mode gating is active (debug)
+    int    snrWarmupActive = 0;      // 1 when SNR warm-up guard is active
+    double snrSampleCount = 0.0;     // samples available to SNR computation
 
     // Audit/telemetry (non-blocking; full JSON only)
     unsigned long long droppedSamplesTotal = 0;      // cumulative samples dropped (vector path trimming)
@@ -274,9 +285,12 @@ std::vector<double> calculatePoincare(const std::vector<double>& rrIntervals);
 std::pair<std::vector<double>, std::vector<double>> welchPowerSpectrum(const std::vector<double>& signal, 
                                                                         double fs, int nfft = 256, double overlap = 0.5);
 
+// Diagnostics for PSD guard fallbacks
+unsigned long long getWelchPsdGuardFallbackCount();
+unsigned long long getWelchPsdGuardFailureCount();
+
 // Global deterministic toggle for core spectral routines (runtime)
 void setDeterministic(bool on);
 bool isDeterministic();
 
 }
-

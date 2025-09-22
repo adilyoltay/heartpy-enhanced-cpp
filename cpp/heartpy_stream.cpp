@@ -3,8 +3,31 @@
 #include <deque>
 #include <cmath>
 #include <cassert>
+#include <optional>
+#include <limits>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#define LOG_TAG "HeartPySNR"
+#define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, fmt, ##__VA_ARGS__)
+#elif defined(__APPLE__)
+#include <cstdio>
+#define LOGD(fmt, ...)                                                                                             \
+    do {                                                                                                           \
+        std::fprintf(stderr, "[HeartPySNR] " fmt "\n", ##__VA_ARGS__);                                           \
+        std::fflush(stderr);                                                                                       \
+    } while (0)
+#else
+#include <cstdio>
+#define LOGD(fmt, ...)                                                                                             \
+    do {                                                                                                           \
+        std::fprintf(stderr, "[HeartPySNR] " fmt "\n", ##__VA_ARGS__);                                           \
+        std::fflush(stderr);                                                                                       \
+    } while (0)
+#endif
 
 namespace heartpy {
+
+namespace { constexpr double kSnrFallbackDb = -5.0; }
 
 // Defensive helpers
 static inline int clampIndexInt(int i, int n) {
@@ -893,12 +916,29 @@ double RealtimeAnalyzer::medianOfRR(const std::vector<double>& rr) {
 }
 
 void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
-    if ((lastTs_ - lastPsdTime_) < psdUpdateSec_) return;
+    const double sinceLastPsd = lastTs_ - lastPsdTime_;
+    if (sinceLastPsd < psdUpdateSec_) {
+        out.quality = lastQuality_;
+        out.quality.snrSampleCount = static_cast<double>(filt_.size());
+        LOGD("updateSNR cadence skip: dt=%.3f < %.3f, reuse previous quality (snr=%.3f)", sinceLastPsd, psdUpdateSec_, out.quality.snrDb);
+        return;
+    }
     lastPsdTime_ = lastTs_;
 
     // Use full-rate filtered window for PSD and derive SNR around HR
     const double effFs = (effectiveFs_ > 1e-6 ? effectiveFs_ : fs_);
-    if (effFs <= 0.0 || filt_.size() < 32) return;
+    const size_t sampleCount = filt_.size();
+    LOGD("updateSNR: effFs=%.3f, filt_.size()=%zu, fs_=%.3f", effFs, sampleCount, fs_);
+    out.quality.snrSampleCount = static_cast<double>(sampleCount);
+    if (effFs <= 0.0 || sampleCount < 16) {
+        LOGD("Early return: effFs=%.3f <= 0.0 OR filt_.size()=%zu < 16", effFs, sampleCount);
+        double fallbackDb = snrEmaValid_ ? snrEmaDb_ : kSnrFallbackDb;
+        if (!std::isfinite(fallbackDb)) fallbackDb = kSnrFallbackDb;
+        out.quality.snrDb = fallbackDb;
+        out.quality.hardFallbackActive = 1;
+        out.quality.snrWarmupActive = 1;
+        return;
+    }
 
     // Estimate HR frequency f0 (Hz) from streaming RR if available; fallback to out.bpm; reuse last if missing
     double f0 = 0.0;
@@ -910,9 +950,13 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     if (f0 <= 0.0 && lastF0Hz_ > 0.0) f0 = lastF0Hz_;
     // If no HR estimate, skip SNR update
     if (f0 <= 0.0) {
+        LOGD("Early return: f0 <= 0.0 (f0=%.6f)", f0);
         // Set a fallback SNR value instead of returning
-        out.quality.snrDb = -5.0; // Conservative fallback
+        double fallbackDb = snrEmaValid_ ? snrEmaDb_ : kSnrFallbackDb;
+        if (!std::isfinite(fallbackDb)) fallbackDb = kSnrFallbackDb;
+        out.quality.snrDb = fallbackDb;
         out.quality.f0Hz = 0.0;
+        out.quality.hardFallbackActive = 1;
         return;
     }
     lastF0Hz_ = f0;
@@ -920,86 +964,329 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     // Build analysis vector (copy of filt_) — reuse buffer to reduce reallocations
     yBufferD_.resize(filt_.size());
     for (size_t i = 0; i < filt_.size(); ++i) yBufferD_[i] = (double)filt_[i];
+    LOGD("yBufferD_.size(): %zu, filt_.size(): %zu", yBufferD_.size(), filt_.size());
 
     // Welch PSD on the full-rate filtered signal
-    auto coerceNfft = [](int n)->int {
+    struct WelchConfig {
+        int nfft;
+        double overlap;
+        int nseg;
+        bool adjusted;
+    };
+
+    auto largestPowerOfTwoLE = [](size_t value) -> int {
+        if (value < 1) return 0;
+        size_t pow2 = 1;
+        while ((pow2 << 1) <= value) {
+            pow2 <<= 1;
+        }
+        return static_cast<int>(pow2);
+    };
+
+    auto coerceNfft = [&](int n) -> int {
         if (n <= 0) return 256;
-        // Coerce to nearest of {256,512,1024}
-        int cand[3] = {256,512,1024};
-        int best = cand[0];
-        int bestd = std::abs(n - cand[0]);
-        for (int i = 1; i < 3; ++i) { int d = std::abs(n - cand[i]); if (d < bestd) { bestd = d; best = cand[i]; } }
+        int candidates[] = {1024, 512, 384, 256, 192, 128, 96, 64, 48, 32};
+        int best = candidates[sizeof(candidates)/sizeof(candidates[0]) - 1];
+        int bestd = std::numeric_limits<int>::max();
+        for (int cand : candidates) {
+            if (cand < 32) continue;
+            int d = std::abs(n - cand);
+            if (d < bestd) { bestd = d; best = cand; }
+        }
         return best;
     };
+
+    auto chooseWelchConfig = [&](size_t sampleCount) -> std::optional<WelchConfig> {
+        constexpr int kMinNfft = 32;
+        if (sampleCount < static_cast<size_t>(kMinNfft)) {
+            return std::nullopt;
+        }
+        double baseOverlap = std::clamp(opt_.overlap, 0.0, 0.90);
+        int desired = coerceNfft(opt_.nfft);
+        desired = std::min(desired, largestPowerOfTwoLE(sampleCount));
+        desired = std::max(desired, kMinNfft);
+
+        int workingNfft = desired;
+        double workingOverlap = baseOverlap;
+        bool adjusted = false;
+
+        while (workingNfft >= kMinNfft) {
+            if (workingNfft > static_cast<int>(sampleCount)) {
+                int next = largestPowerOfTwoLE(sampleCount);
+                if (next < kMinNfft) break;
+                workingNfft = next;
+                adjusted = true;
+                continue;
+            }
+            if (static_cast<size_t>(workingNfft) >= sampleCount) {
+                if (workingNfft == kMinNfft) break;
+                int next = largestPowerOfTwoLE(static_cast<size_t>(workingNfft - 1));
+                if (next < kMinNfft) break;
+                workingNfft = next;
+                adjusted = true;
+                continue;
+            }
+
+            double minOverlapForTwo = 1.0 - (static_cast<double>(sampleCount - workingNfft) / static_cast<double>(workingNfft));
+            minOverlapForTwo = std::clamp(minOverlapForTwo, 0.0, 0.93);
+            double overlapCandidate = std::max(workingOverlap, minOverlapForTwo + 0.02);
+            overlapCandidate = std::clamp(overlapCandidate, baseOverlap, 0.93);
+
+            double stepFloat = static_cast<double>(workingNfft) * (1.0 - overlapCandidate);
+            if (stepFloat < 1.0) stepFloat = 1.0;
+            int step = std::max(1, static_cast<int>(std::round(stepFloat)));
+            int nseg = 1 + static_cast<int>((sampleCount - workingNfft) / step);
+            if (nseg >= 2) {
+                if (std::fabs(overlapCandidate - baseOverlap) > 1e-6 || workingNfft != desired) {
+                    adjusted = true;
+                }
+                return WelchConfig{workingNfft, overlapCandidate, nseg, adjusted};
+            }
+
+            if (overlapCandidate < 0.93 - 1e-6) {
+                workingOverlap = std::min(0.93, overlapCandidate + 0.05);
+                adjusted = true;
+                continue;
+            }
+
+            if (workingNfft == kMinNfft) break;
+            int next = largestPowerOfTwoLE(static_cast<size_t>(workingNfft - 1));
+            if (next < kMinNfft) break;
+            workingNfft = next;
+            adjusted = true;
+        }
+
+        return std::nullopt;
+    };
+
+    enum class SnrSource { FreshPsd, CachedPsd, TimeDomain };
+    SnrSource snrSource = SnrSource::FreshPsd;
+    bool harmonicEligible = false;
+    const std::vector<double>* freqBins = nullptr;
+    const std::vector<double>* powerBins = nullptr;
     int nfft = coerceNfft(opt_.nfft);
-    // Deterministic mode: force scalar DFT in core
-    heartpy::setDeterministic(opt_.deterministic);
-    auto ps = welchPowerSpectrum(yBufferD_, effFs, nfft, opt_.overlap);
-    const auto &frq = ps.first; const auto &P = ps.second;
-    if (frq.size() < 4 || frq.size() != P.size()) return;
+    double overlapForCall = opt_.overlap;
 
-    auto inBand = [](double f, double c, double bw){ return std::fabs(f - c) <= bw; };
-    double nyq = 0.5 * effFs;
-    double df = (frq.size() > 1 ? frq[1] - frq[0] : 0.0);
-    // Adaptive signal band width based on resolution
-    // Active flags for widened SNR band and faster EMA
-    double lastActiveTs = 0.0;
-    if (softLastTrueTs_ > 0.0) lastActiveTs = std::max(lastActiveTs, softLastTrueTs_);
-    if (doublingLastTrueTs_ > 0.0) lastActiveTs = std::max(lastActiveTs, doublingLastTrueTs_);
-    if (hintLastTrueTs_ > 0.0) lastActiveTs = std::max(lastActiveTs, hintLastTrueTs_);
-    bool persistMapLoc = (lastActiveTs > 0.0) && ((lastTs_ - lastActiveTs) <= 5.0);
-    bool activeSnr = doublingHintActive_ || softDoublingActive_ || doublingActive_ || persistMapLoc;
-    // SNR signal-band half-width (Hz): Options control passive/active widths
-    double baseBw = activeSnr ? opt_.snrBandActive : opt_.snrBandPassive;
-    double band = std::max(2.0 * df, baseBw);
-    double guard = 0.03; // extra exclusion around signal bands
-    double peakPow = 0.0; // integrated signal power
-    double peakPow2 = 0.0;
-    noiseScratch_.clear();
-    noiseScratch_.reserve(frq.size());
-    for (size_t i = 0; i < frq.size(); ++i) {
-        double f = frq[i];
-        double pv = std::abs(P[i]);
-        bool sig1 = inBand(f, f0, band);
-        bool sig2 = (2.0 * f0 < nyq) && inBand(f, 2.0 * f0, band);
-        if (sig1) peakPow += pv;
-        if (sig2) peakPow2 += pv;
-        bool nearSig = inBand(f, f0, band + guard) || ((2.0 * f0 < nyq) && inBand(f, 2.0 * f0, band + guard));
-        if (!nearSig && f >= 0.4 && f <= 5.0) noiseScratch_.push_back(pv);
-    }
-    double signalPow = peakPow + peakPow2;
-    double noiseBaseline = 0.0;
-    if (!noiseScratch_.empty()) {
-        // ROBUST noise baseline estimation using 75th percentile + outlier removal
-        const size_t n = noiseScratch_.size();
-
-        // Sort for percentile calculation
-        std::sort(noiseScratch_.begin(), noiseScratch_.end());
-
-        // Remove extreme outliers (top 5% and bottom 5%)
-        const size_t startIdx = n / 20;  // 5%
-        const size_t endIdx = n - startIdx;  // 95%
-
-        if (endIdx > startIdx) {
-            // Calculate robust noise baseline using 75th percentile of cleaned data
-            const size_t p75Idx = startIdx + (endIdx - startIdx) * 3 / 4;
-            noiseBaseline = noiseScratch_[p75Idx];
-
-            // Apply minimum threshold to prevent division by very small numbers
-            noiseBaseline = std::max(noiseBaseline, 1e-8);
+    std::optional<WelchConfig> welchConfig;
+    if (opt_.adaptivePsd) {
+        welchConfig = chooseWelchConfig(yBufferD_.size());
+    } else {
+        WelchConfig preset{
+            coerceNfft(opt_.nfft),
+            std::clamp(opt_.overlap, 0.0, 0.90),
+            0,
+            false,
+        };
+        if (preset.nfft > static_cast<int>(yBufferD_.size())) {
+            int fallbackNfft = largestPowerOfTwoLE(yBufferD_.size());
+            preset.nfft = (fallbackNfft >= 32) ? fallbackNfft : 0;
+        }
+        if (preset.nfft >= 32) {
+            welchConfig = preset;
         }
     }
-    double snrDbInst = 0.0;
-    if (signalPow > 1e-10 && noiseBaseline > 1e-10) { // More robust thresholds
-        double noiseBandwidth = band * 2.0 / std::max(1e-6, df);
-        if (noiseBandwidth > 1e-6) { // Ensure valid bandwidth
-            double snrRatio = signalPow / (noiseBaseline * noiseBandwidth);
-            if (snrRatio > 1e-10) { // Prevent log of very small numbers
-                snrDbInst = 10.0 * std::log10(snrRatio);
-                if (!std::isfinite(snrDbInst)) snrDbInst = 0.0;
+
+    if (!welchConfig.has_value()) {
+        ++psdInvalidFramesTotal_;
+        if (opt_.adaptivePsd) {
+            LOGD("Insufficient data for Welch PSD (samples=%zu). Falling back to time-domain SNR", yBufferD_.size());
+            snrSource = SnrSource::TimeDomain;
+            lastPsdValid_ = false;
+        } else {
+            LOGD("Insufficient data for Welch PSD (adaptive disabled, samples=%zu). Skipping SNR update", yBufferD_.size());
+            return;
+        }
+    } else {
+        if (welchConfig->adjusted) {
+            ++psdParamClampEventsTotal_;
+            LOGD("Welch params adjusted: nfft=%d, overlap=%.3f, nseg=%d", welchConfig->nfft, welchConfig->overlap, welchConfig->nseg);
+        }
+        nfft = welchConfig->nfft;
+        overlapForCall = welchConfig->overlap;
+        LOGD("WelchPSD input: signal.size()=%zu, fs=%.3f, nfft=%d, overlap=%.3f, nseg=%d", yBufferD_.size(), effFs, nfft, overlapForCall, welchConfig->nseg);
+        heartpy::setDeterministic(opt_.deterministic);
+        auto ps = welchPowerSpectrum(yBufferD_, effFs, nfft, overlapForCall);
+        const auto& frq = ps.first;
+        const auto& P = ps.second;
+        LOGD("PSD calculation: frq.size()=%zu, P.size()=%zu", frq.size(), P.size());
+        if (frq.size() >= 4 && frq.size() == P.size()) {
+            lastPsdFreq_ = frq;
+            lastPsdPower_ = P;
+            lastPsdFs_ = effFs;
+            lastPsdNfft_ = nfft;
+            lastPsdOverlap_ = overlapForCall;
+            lastPsdValid_ = true;
+            freqBins = &lastPsdFreq_;
+            powerBins = &lastPsdPower_;
+            harmonicEligible = true;
+        } else {
+            ++psdInvalidFramesTotal_;
+            LOGD("PSD validation failed (frq.size()=%zu, P.size()=%zu)", frq.size(), P.size());
+            if (!opt_.adaptivePsd) {
+                LOGD("Adaptive PSD disabled; aborting SNR update after invalid PSD");
+                return;
+            }
+            if (lastPsdValid_ && lastPsdFreq_.size() >= 4 && lastPsdFreq_.size() == lastPsdPower_.size()) {
+                freqBins = &lastPsdFreq_;
+                powerBins = &lastPsdPower_;
+                snrSource = SnrSource::CachedPsd;
+                ++psdReuseFallbackEventsTotal_;
+                LOGD("Reusing cached PSD (bins=%zu, last nfft=%d, overlap=%.3f)", lastPsdFreq_.size(), lastPsdNfft_, lastPsdOverlap_);
+            } else {
+                snrSource = SnrSource::TimeDomain;
+                lastPsdValid_ = false;
             }
         }
     }
+
+    auto computeTimeDomainSnrDb = [](const std::vector<double>& samples) -> double {
+        if (samples.size() < 16) {
+            return kSnrFallbackDb;
+        }
+        double mean = 0.0;
+        for (double v : samples) mean += v;
+        mean /= static_cast<double>(samples.size());
+        double signalVar = 0.0;
+        for (double v : samples) {
+            double d = v - mean;
+            signalVar += d * d;
+        }
+        signalVar /= std::max<size_t>(1, samples.size() - 1);
+        if (signalVar <= 1e-10) {
+            return kSnrFallbackDb;
+        }
+        double diffVar = 0.0;
+        for (size_t i = 1; i < samples.size(); ++i) {
+            double d = samples[i] - samples[i - 1];
+            diffVar += d * d;
+        }
+        diffVar /= std::max<size_t>(1, samples.size() - 1);
+        double noiseVar = std::max(1e-10, diffVar * 0.5);
+        double ratio = signalVar / noiseVar;
+        double snrDb = 10.0 * std::log10(std::max(1e-10, ratio));
+        if (!std::isfinite(snrDb)) snrDb = kSnrFallbackDb;
+        return snrDb;
+    };
+
+    auto inBand = [](double f, double c, double bw){ return std::fabs(f - c) <= bw; };
+    double signalPow = 0.0;
+    double noiseBaseline = 0.0;
+    double band = 0.0;
+    double df = 0.0;
+    double snrDbInst = kSnrFallbackDb;
+    bool activeSnr = false;
+    double baseBw = opt_.snrBandPassive;
+    double warmupSec = std::clamp(windowSec_ * 0.6, 6.0, 18.0);
+    double warmupElapsed = std::isfinite(warmupStartTs_)
+        ? std::max(0.0, lastTs_ - warmupStartTs_)
+        : std::max(0.0, lastTs_ - firstTsApprox_);
+    size_t minSamplesForSNR = static_cast<size_t>(std::ceil(std::max(128.0, std::max(4.0, windowSec_ * 0.6) * effFs)));
+    size_t minPeaksForSNR = std::max<size_t>(6, static_cast<size_t>(std::ceil(windowSec_ * 0.4)));
+    bool insufficientPeaks = acceptedPeaksTotal_ < minPeaksForSNR;
+    bool warmupActive = (warmupElapsed < warmupSec) || (sampleCount < minSamplesForSNR) || insufficientPeaks;
+    LOGD("updateSNR warmup check: elapsed=%.3f sec, warmupSec=%.3f sec, windowSec=%.3f, sampleCount=%zu, minSamples=%zu, acceptedPeaks=%zu, warmupActive=%d",
+         warmupElapsed, warmupSec, windowSec_, sampleCount, minSamplesForSNR, acceptedPeaksTotal_, warmupActive ? 1 : 0);
+
+    if (warmupActive) {
+        double warmSnr = snrEmaValid_ ? snrEmaDb_ : computeTimeDomainSnrDb(yBufferD_);
+        if (!std::isfinite(warmSnr) || warmSnr <= 0.0) warmSnr = 8.0;
+        snrEmaDb_ = warmSnr;
+        snrEmaValid_ = true;
+        out.quality.snrDb = warmSnr;
+        out.quality.f0Hz = lastF0Hz_;
+        out.quality.snrWarmupActive = 1;
+        out.quality.hardFallbackActive = 0;
+        return;
+    }
+    out.quality.snrWarmupActive = 0;
+
+    if (snrSource == SnrSource::TimeDomain) {
+        snrDbInst = computeTimeDomainSnrDb(yBufferD_);
+        ++psdTimeDomainFallbackEventsTotal_;
+        LOGD("Time-domain SNR fallback applied: %.3f dB", snrDbInst);
+    } else {
+        const auto& frq = *freqBins;
+        const auto& P = *powerBins;
+        double freqMin = frq.empty() ? 0.0 : frq.front();
+        double freqMax = frq.empty() ? 0.0 : frq.back();
+        df = (frq.size() > 1 ? frq[1] - frq[0] : 0.0);
+        double nyq = 0.5 * effFs;
+        LOGD("Using %s PSD (bins=%zu) for SNR computation", snrSource == SnrSource::FreshPsd ? "fresh" : "cached", frq.size());
+        LOGD("PSD frequency span: %.4f Hz -> %.4f Hz (df=%.6f, nyquist=%.3f)", freqMin, freqMax, df, nyq);
+
+        double lastActiveTs = 0.0;
+        if (softLastTrueTs_ > 0.0) lastActiveTs = std::max(lastActiveTs, softLastTrueTs_);
+        if (doublingLastTrueTs_ > 0.0) lastActiveTs = std::max(lastActiveTs, doublingLastTrueTs_);
+        if (hintLastTrueTs_ > 0.0) lastActiveTs = std::max(lastActiveTs, hintLastTrueTs_);
+        bool persistMapLoc = (lastActiveTs > 0.0) && ((lastTs_ - lastActiveTs) <= 5.0);
+        activeSnr = doublingHintActive_ || softDoublingActive_ || doublingActive_ || persistMapLoc;
+        baseBw = activeSnr ? opt_.snrBandActive : opt_.snrBandPassive;
+        band = std::max(2.0 * df, baseBw);
+        double guard = 0.03;
+        double peakPow = 0.0;
+        double peakPow2 = 0.0;
+        noiseScratch_.clear();
+        noiseScratch_.reserve(frq.size());
+        double bandLoFund = std::max(0.0, f0 - band);
+        double bandHiFund = f0 + band;
+        double bandLoHarm = (2.0 * f0 < nyq) ? std::max(0.0, 2.0 * f0 - band) : 0.0;
+        double bandHiHarm = (2.0 * f0 < nyq) ? (2.0 * f0 + band) : 0.0;
+        LOGD("Signal band (fundamental): %.4f Hz -> %.4f Hz", bandLoFund, bandHiFund);
+        if (2.0 * f0 < nyq) {
+            LOGD("Signal band (harmonic): %.4f Hz -> %.4f Hz", bandLoHarm, bandHiHarm);
+        }
+        for (size_t i = 0; i < frq.size(); ++i) {
+            double f = frq[i];
+            double pv = std::abs(P[i]);
+            bool sig1 = inBand(f, f0, band);
+            bool sig2 = (2.0 * f0 < nyq) && inBand(f, 2.0 * f0, band);
+            if (sig1) peakPow += pv;
+            if (sig2) peakPow2 += pv;
+            bool nearSig = inBand(f, f0, band + guard) || ((2.0 * f0 < nyq) && inBand(f, 2.0 * f0, band + guard));
+            if (!nearSig && f >= 0.4 && f <= 5.0) noiseScratch_.push_back(pv);
+        }
+        LOGD("noiseScratch population: %zu (after exclusions)", noiseScratch_.size());
+        if (noiseScratch_.empty()) {
+            LOGD("Noise candidate window empty; guard=%.3f, evaluation band=%.3f-%.3f Hz", guard, bandLoFund, bandHiFund);
+        }
+        LOGD("peak power fundamental=%.6e, harmonic=%.6e", peakPow, peakPow2);
+        signalPow = peakPow + peakPow2;
+        if (!noiseScratch_.empty()) {
+            const size_t n = noiseScratch_.size();
+            std::sort(noiseScratch_.begin(), noiseScratch_.end());
+            const size_t startIdx = n / 20;
+            const size_t endIdx = n - startIdx;
+            if (endIdx > startIdx) {
+                const size_t p75Idx = startIdx + (endIdx - startIdx) * 3 / 4;
+                noiseBaseline = std::max(noiseScratch_[p75Idx], 1e-8);
+            }
+        }
+        LOGD("f0: %.3f", f0);
+        LOGD("signalPow: %.6f", signalPow);
+        LOGD("noiseBaseline: %.6f", noiseBaseline);
+        LOGD("band: %.6f, df: %.6f", band, df);
+        LOGD("noiseScratch_.size(): %zu", noiseScratch_.size());
+
+        if (signalPow > 1e-10 && noiseBaseline > 1e-10) {
+            LOGD("Signal power threshold passed: signalPow=%.6e > 1e-10, noiseBaseline=%.6e > 1e-10", signalPow, noiseBaseline);
+            double noiseBandwidth = band * 2.0 / std::max(1e-6, df);
+            if (noiseBandwidth > 1e-6) {
+                double snrRatio = signalPow / (noiseBaseline * noiseBandwidth);
+                if (snrRatio > 1e-10) {
+                    double candidate = 10.0 * std::log10(snrRatio);
+                    if (std::isfinite(candidate)) {
+                        snrDbInst = candidate;
+                    }
+                }
+            }
+        } else {
+            LOGD("Signal power threshold failed: signalPow=%.6e <= 1e-10 OR noiseBaseline=%.6e <= 1e-10", signalPow, noiseBaseline);
+        }
+    }
+    double snrDbInstRaw = snrDbInst;
+    LOGD("snrDbInst (before clamp): %.3f", snrDbInstRaw);
+    if (!std::isfinite(snrDbInst)) snrDbInst = kSnrFallbackDb;
+    LOGD("snrDbInst (after clamp): %.3f", snrDbInst);
     // EMA smoothing over time (tau = 8s when active)
     double now = lastTs_;
     double dt = (lastSnrUpdateTime_ > 0.0) ? (now - lastSnrUpdateTime_) : psdUpdateSec_;
@@ -1018,7 +1305,7 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     }
     lastSnrBaseBw_ = baseBw; lastSnrActiveMode_ = activeSnr;
     lastSnrUpdateTime_ = now;
-    if (!std::isfinite(snrEmaDb_)) snrEmaDb_ = 0.0;
+    if (!std::isfinite(snrEmaDb_)) snrEmaDb_ = kSnrFallbackDb;
     out.quality.snrDb = snrEmaDb_;
     out.quality.f0Hz = lastF0Hz_;
 
@@ -1030,66 +1317,73 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
         lastLoggedSnr = snrEmaDb_;
     }
 
-    // Harmonic suppression heuristic (conservative)
-    // Compute power near fundamental and half-fundamental
     double f0Half = 0.5 * lastF0Hz_;
-    double pFund = 0.0, pHalf = 0.0;
-    if (lastF0Hz_ > 0.0) {
-        for (size_t i = 0; i < frq.size(); ++i) {
-            double f = frq[i]; double pv = std::abs(P[i]);
-            if (inBand(f, lastF0Hz_, band)) pFund += pv;
-            if (f0Half > 0.0 && inBand(f, f0Half, band)) pHalf += pv;
-        }
-    }
-    // RR bimodality and pair consistency
-    double shortFrac = 0.0, longRR = 0.0, rrCV = 0.0, pairFrac = 0.0;
-    double shortMean = 0.0, longMean = 0.0;
-    if (!out.rrList.empty()) {
-        std::vector<double> rr = out.rrList;
-        // median
-        std::vector<double> tmp = rr; std::nth_element(tmp.begin(), tmp.begin() + tmp.size()/2, tmp.end());
-        double med = tmp[tmp.size()/2];
-        double thr = 0.8 * med;
-        double sumLong = 0.0, sumShort = 0.0; int cntLong = 0, cntShort = 0;
-        for (double r : rr) { if (r >= thr) { sumLong += r; ++cntLong; } else { sumShort += r; ++cntShort; } }
-        if (cntLong > 0) longRR = sumLong / cntLong; else longRR = med;
-        longMean = (cntLong > 0 ? (sumLong / cntLong) : med);
-        shortMean = (cntShort > 0 ? (sumShort / cntShort) : 0.0);
-        shortFrac = (rr.size() > 0 ? (cntShort / (double)rr.size()) : 0.0);
-        // RR CV
-        double mean_rr = meanVec(rr);
-        double var_rr = 0.0; for (double r : rr) { double d = r - mean_rr; var_rr += d * d; }
-        var_rr /= (double)rr.size(); rrCV = (mean_rr > 1e-9) ? std::sqrt(std::max(0.0, var_rr)) / mean_rr : 0.0;
-        // Pair consistency
-        int cntPairs = 0, goodPairs = 0;
-        for (size_t i = 0; i + 1 < rr.size(); ++i) {
-            double s = rr[i] + rr[i + 1];
-            if (longRR > 0.0) {
-                ++cntPairs;
-                if (s >= 0.85 * longRR && s <= 1.15 * longRR) ++goodPairs;
-            }
-        }
-        pairFrac = (cntPairs > 0 ? (goodPairs / (double)cntPairs) : 0.0);
-    }
-    // Tiered harmonic suppression
-    double ratioHalfFund = (pFund > 0.0 ? (pHalf / pFund) : 0.0);
-    // Compute warm-up first (used for adaptive drift tolerance)
+    double pFund = 0.0;
+    double pHalf = 0.0;
+    double shortFrac = 0.0;
+    double longRR = 0.0;
+    double rrCV = 0.0;
+    double pairFrac = 0.0;
+    double shortMean = 0.0;
+    double longMean = 0.0;
+    double ratioHalfFund = 0.0;
+    bool halfStable = false;
+
     int acceptedRR = std::max(0, (int)acceptedPeaksTotal_ - 1);
     bool warmupPassed = ((lastTs_ - firstTsApprox_) >= 15.0) && (acceptedRR >= 10);
-    // Track half-f0 stability over recent PSD updates (longer history, adaptive drift)
-    int halfLen = std::max(2, opt_.halfF0HistLen);
-    if (f0Half > 0.0) { halfF0Hist_.push_back(f0Half); if ((int)halfF0Hist_.size() > halfLen) halfF0Hist_.pop_front(); }
-    else halfF0Hist_.clear();
-    double driftTol = warmupPassed ? opt_.halfF0TolHzWarm : opt_.halfF0TolHzCold;
-    bool halfStable = false; if (halfF0Hist_.size() >= 2) { double fmin = *std::min_element(halfF0Hist_.begin(), halfF0Hist_.end()); double fmax = *std::max_element(halfF0Hist_.begin(), halfF0Hist_.end()); halfStable = ((fmax - fmin) <= driftTol); }
-    // Warm-up for soft flag: time ≥15s AND ≥10 accepted RR (decouple from bpmEma)
-    bool softGuards = (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.30) && warmupPassed;
-    // Anchor soft logic to start only after warm-up passes; reset on transition
-    if (warmupPassed && !warmupWasPassed_) { softConsecPass_ = 0; halfF0Hist_.clear(); }
-    warmupWasPassed_ = warmupPassed;
+
+    if (harmonicEligible && freqBins && powerBins) {
+        const auto& frqForHarm = *freqBins;
+        const auto& powForHarm = *powerBins;
+        if (lastF0Hz_ > 0.0) {
+            for (size_t i = 0; i < frqForHarm.size(); ++i) {
+                double f = frqForHarm[i];
+                double pv = std::abs(powForHarm[i]);
+                if (inBand(f, lastF0Hz_, band)) pFund += pv;
+                if (f0Half > 0.0 && inBand(f, f0Half, band)) pHalf += pv;
+            }
+        }
+        if (!out.rrList.empty()) {
+            std::vector<double> rr = out.rrList;
+            std::vector<double> tmp = rr;
+            std::nth_element(tmp.begin(), tmp.begin() + tmp.size() / 2, tmp.end());
+            double med = tmp[tmp.size() / 2];
+            double thr = 0.8 * med;
+            double sumLong = 0.0, sumShort = 0.0; int cntLong = 0, cntShort = 0;
+            for (double r : rr) { if (r >= thr) { sumLong += r; ++cntLong; } else { sumShort += r; ++cntShort; } }
+            if (cntLong > 0) longRR = sumLong / cntLong; else longRR = med;
+            longMean = (cntLong > 0 ? (sumLong / cntLong) : med);
+            shortMean = (cntShort > 0 ? (sumShort / cntShort) : 0.0);
+            shortFrac = (rr.size() > 0 ? (cntShort / (double)rr.size()) : 0.0);
+            double mean_rr = meanVec(rr);
+            double var_rr = 0.0; for (double r : rr) { double d = r - mean_rr; var_rr += d * d; }
+            var_rr /= (double)rr.size(); rrCV = (mean_rr > 1e-9) ? std::sqrt(std::max(0.0, var_rr)) / mean_rr : 0.0;
+            int cntPairs = 0, goodPairs = 0;
+            for (size_t i = 0; i + 1 < rr.size(); ++i) {
+                double s = rr[i] + rr[i + 1];
+                if (longRR > 0.0) {
+                    ++cntPairs;
+                    if (s >= 0.85 * longRR && s <= 1.15 * longRR) ++goodPairs;
+                }
+            }
+            pairFrac = (cntPairs > 0 ? (goodPairs / (double)cntPairs) : 0.0);
+        }
+        ratioHalfFund = (pFund > 0.0 ? (pHalf / pFund) : 0.0);
+        LOGD("pHalf: %.6f, pFund: %.6f, ratioHalfFund: %.6f", pHalf, pFund, ratioHalfFund);
+
+        int halfLen = std::max(2, opt_.halfF0HistLen);
+        if (f0Half > 0.0) { halfF0Hist_.push_back(f0Half); if ((int)halfF0Hist_.size() > halfLen) halfF0Hist_.pop_front(); }
+        else halfF0Hist_.clear();
+        double driftTol = warmupPassed ? opt_.halfF0TolHzWarm : opt_.halfF0TolHzCold;
+        halfStable = false; if (halfF0Hist_.size() >= 2) { double fmin = *std::min_element(halfF0Hist_.begin(), halfF0Hist_.end()); double fmax = *std::max_element(halfF0Hist_.begin(), halfF0Hist_.end()); halfStable = ((fmax - fmin) <= driftTol); }
+        bool softGuards = (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.30) && warmupPassed;
+        if (warmupPassed && !warmupWasPassed_) { softConsecPass_ = 0; halfF0Hist_.clear(); }
+        warmupWasPassed_ = warmupPassed;
+        LOGD("warmupPassed: %d, halfStable: %d, rejectionRate: %.4f, rrCV: %.4f", warmupPassed ? 1 : 0, halfStable ? 1 : 0, out.quality.rejectionRate, rrCV);
     // Immediate soft activation post warm-up on PSD dominance (no streak requirement)
     bool softPass = warmupPassed && (ratioHalfFund >= opt_.pHalfOverFundThresholdSoft) && halfStable && softGuards;
     if (softPass) {
+        LOGD("softPass triggered");
         if (!softDoublingActive_) softStartTs_ = lastTs_;
         softDoublingActive_ = true;
         softConsecPass_ = 2; // for logging
@@ -1099,10 +1393,12 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
         // Only keep soft active if hard doubling is governing
         if (!doublingActive_) softDoublingActive_ = false;
     }
-    // Stage 2 hard flag check
-    bool persistHighBpm = (bpmEmaValid_ && bpmEma_ > 120.0 && out.quality.maPercActive < 25.0);
-    bool psdPersists = (ratioHalfFund >= 2.0) && halfStable;
-    bool hardStable = (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.20);
+        // Stage 2 hard flag check
+        bool persistHighBpm = (bpmEmaValid_ && bpmEma_ > 120.0 && out.quality.maPercActive < 25.0);
+        bool psdPersists = (ratioHalfFund >= 2.0) && halfStable;
+        LOGD("softDoublingActive_: %d, doublingActive_: %d, doublingHintActive_: %d", softDoublingActive_ ? 1 : 0, doublingActive_ ? 1 : 0, doublingHintActive_ ? 1 : 0);
+        bool hardStable = (out.quality.rejectionRate <= 0.05) && (rrCV <= 0.20);
+        LOGD("psdPersists: %d, hardStable: %d", psdPersists ? 1 : 0, hardStable ? 1 : 0);
     if (softDoublingActive_ && ((lastTs_ - softStartTs_) >= 8.0) && psdPersists && persistHighBpm && hardStable) {
         doublingActive_ = true;
         doublingHoldUntil_ = std::max(doublingHoldUntil_, lastTs_ + 5.0);
@@ -1167,9 +1463,12 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
             if ((lastTs_ - lastHintBadStart_) >= 2.0 && lastTs_ >= hintHoldUntil_) doublingHintActive_ = false;
         }
     }
-    if (!doublingHintActive_) rrFallbackDrivingHint_ = false;
-    // Consolidated RR-fallback mode gate: active only when hint is driven purely by RR
-    rrFallbackModeActive_ = rrFallbackDrivingHint_;
+        if (!doublingHintActive_) rrFallbackDrivingHint_ = false;
+        rrFallbackModeActive_ = rrFallbackDrivingHint_;
+    } else {
+        LOGD("Skipping harmonic suppression update: PSD not valid this frame (warmup=%d)", warmupPassed ? 1 : 0);
+        warmupWasPassed_ = warmupPassed;
+    }
 
     // Choose f0 used for SNR/conf
     // Auto-clear: if violation persists ≥5s, drop both flags
@@ -1191,8 +1490,23 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     double f0Used = f0;
     if (useHalfForSNR && f0 > 0.0) {
         double signalPowUsed = pHalf + pFund; // half fundamental + original f0
-        double snrDbInst2 = (signalPowUsed > 0.0 && noiseBaseline > 0.0) ? (10.0 * std::log10(signalPowUsed / (noiseBaseline * (band * 2.0 / std::max(1e-6, df))))) : 0.0;
-        if (!std::isfinite(snrDbInst2)) snrDbInst2 = 0.0;
+        double snrDbInst2 = kSnrFallbackDb;
+        if (signalPowUsed > 0.0 && noiseBaseline > 0.0) {
+            double bw2 = band * 2.0 / std::max(1e-6, df);
+            if (bw2 > 1e-6) {
+                double ratio2 = signalPowUsed / (noiseBaseline * bw2);
+                if (ratio2 > 1e-10) {
+                    double candidate2 = 10.0 * std::log10(ratio2);
+                    if (std::isfinite(candidate2)) {
+                        snrDbInst2 = candidate2;
+                    }
+                }
+            }
+        }
+        double snrDbInst2Raw = snrDbInst2;
+        LOGD("snrDbInst2 (before clamp): %.3f", snrDbInst2Raw);
+        if (!std::isfinite(snrDbInst2)) snrDbInst2 = kSnrFallbackDb;
+        LOGD("snrDbInst2 (after clamp): %.3f", snrDbInst2);
         if (!snrEmaValid_) { snrEmaDb_ = snrDbInst2; snrEmaValid_ = true; }
         else snrEmaDb_ = (1.0 - alpha) * snrEmaDb_ + alpha * snrDbInst2;
         f0Used = 0.5 * f0;
@@ -1218,7 +1532,7 @@ void RealtimeAnalyzer::updateSNR(HeartMetrics& out) {
     bool activeConf3 = doublingHintActive_ || softDoublingActive_ || doublingActive_ || persistMap3;
     double x0 = activeConf3 ? 5.2 : 6.0; // center (dB)
     double k = activeConf3 ? (1.0/1.2) : 0.8;  // slope
-    if (!std::isfinite(snrEmaDb_)) snrEmaDb_ = 0.0;
+    if (!std::isfinite(snrEmaDb_)) snrEmaDb_ = kSnrFallbackDb;
     double conf_snr = 1.0 / (1.0 + std::exp(-k * (snrEmaDb_ - x0)));
     if (!std::isfinite(conf_snr)) conf_snr = 0.0;
     // Multiply by (1 - rejection) and penalize high RR CV

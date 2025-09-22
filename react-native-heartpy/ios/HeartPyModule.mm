@@ -495,8 +495,22 @@ static heartpy::Options optionsFromNSDictionary(NSDictionary* optDict) {
         if (seg[@"replaceOutliers"]) opt.replaceOutliers = [seg[@"replaceOutliers"] boolValue];
     }
     if (optDict[@"breathingAsBpm"]) opt.breathingAsBpm = [optDict[@"breathingAsBpm"] boolValue];
+    // Global FD toggle (calc_freq parity)
+    if (optDict[@"calcFreq"]) opt.calcFreq = [optDict[@"calcFreq"] boolValue];
     if (optDict[@"snrTauSec"]) opt.snrTauSec = [optDict[@"snrTauSec"] doubleValue];
     if (optDict[@"snrActiveTauSec"]) opt.snrActiveTauSec = [optDict[@"snrActiveTauSec"] doubleValue];
+    if (optDict[@"adaptivePsd"]) opt.adaptivePsd = [optDict[@"adaptivePsd"] boolValue];
+    NSDictionary* filt = optDict[@"filter"];
+    if ([filt isKindOfClass:[NSDictionary class]]) {
+        id mode = filt[@"mode"];
+        if ([mode isKindOfClass:[NSString class]]) {
+            NSString* m = (NSString*)mode;
+            if ([m isEqualToString:@"rbj"]) opt.filterMode = heartpy::Options::FilterMode::RBJ;
+            else if ([m isEqualToString:@"butter"] || [m isEqualToString:@"butter-filtfilt"]) opt.filterMode = heartpy::Options::FilterMode::BUTTER_FILTFILT;
+            else opt.filterMode = heartpy::Options::FilterMode::AUTO;
+        }
+        if (filt[@"order"]) opt.iirOrder = [filt[@"order"] intValue];
+    }
     return opt;
 }
 
@@ -912,6 +926,8 @@ RCT_EXPORT_METHOD(rtPoll:(nonnull NSNumber*)handle
             q[@"doublingHintFlag"] = @(res.quality.doublingHintFlag);
             q[@"hardFallbackActive"] = @(res.quality.hardFallbackActive);
             q[@"rrFallbackModeActive"] = @(res.quality.rrFallbackModeActive);
+            q[@"snrWarmupActive"] = @(res.quality.snrWarmupActive);
+            q[@"snrSampleCount"] = @(res.quality.snrSampleCount);
             q[@"refractoryMsActive"] = @(res.quality.refractoryMsActive);
             q[@"minRRBoundMs"] = @(res.quality.minRRBoundMs);
             q[@"pairFrac"] = @(res.quality.pairFrac);

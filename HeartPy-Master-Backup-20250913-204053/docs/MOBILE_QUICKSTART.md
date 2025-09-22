@@ -112,6 +112,21 @@ console.log('Avg BPM', resSeg.bpm, 'Segments', resSeg.segments?.length ?? 0);
 - RR Smoothing: `{ rrSpline: { s, targetSse, smooth } }` (stabilizes FD/breathing on short windows)
 - Breathing: `breathingAsBpm: boolean` (Hz by default; true returns breaths/min)
 
+Mobile defaults (recommended):
+- `quality.thresholdRR: true` for masked time‑domain metrics on noisy signals.
+- `calcFreq: false` live; enable FD only on long windows or on-demand views.
+- `filter.mode: 'butter-filtfilt'` and `filter.order: 3` for HP‑like zero‑phase filtering.
+
+Example:
+```ts
+const res = await analyzeAsync(signal, fs, {
+  bandpass: { lowHz: 0.5, highHz: 5, order: 2 },
+  quality: { thresholdRR: true },
+  calcFreq: false,
+  filter: { mode: 'butter-filtfilt', order: 3 },
+});
+```
+
 Key parity notes:
 - pNN uses strict `>` with 1e‑6 rounding alignment (HeartPy parity).
 - Masked pairs: diffs counted only when both adjacent beats are valid.

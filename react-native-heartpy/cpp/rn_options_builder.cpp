@@ -104,6 +104,22 @@ heartpy::Options hp_build_options_from_jsi(Runtime& rt, const Object& opts, cons
             o.highHz = getNum(rt, bp, "highHz", o.highHz);
             o.iirOrder = (int)getNum(rt, bp, "order", o.iirOrder);
         }
+        // Filter mode (optional)
+        if (hasProp(rt, opts, "filter")) {
+            auto filt = opts.getProperty(rt, "filter").asObject(rt);
+            if (hasProp(rt, filt, "mode")) {
+                auto s = filt.getProperty(rt, "mode");
+                if (s.isString()) {
+                    std::string m = s.asString(rt).utf8(rt);
+                    if (m == "rbj") o.filterMode = heartpy::Options::FilterMode::RBJ;
+                    else if (m == "butter" || m == "butter-filtfilt") o.filterMode = heartpy::Options::FilterMode::BUTTER_FILTFILT;
+                    else o.filterMode = heartpy::Options::FilterMode::AUTO;
+                }
+            }
+            if (hasProp(rt, filt, "order")) {
+                o.iirOrder = (int)getNum(rt, filt, "order", o.iirOrder);
+            }
+        }
         // Welch
         if (hasProp(rt, opts, "welch")) {
             auto w = opts.getProperty(rt, "welch").asObject(rt);
@@ -115,9 +131,13 @@ heartpy::Options hp_build_options_from_jsi(Runtime& rt, const Object& opts, cons
         if (hasProp(rt, opts, "peak")) {
             auto p = opts.getProperty(rt, "peak").asObject(rt);
             o.refractoryMs = getNum(rt, p, "refractoryMs", o.refractoryMs);
+            o.minPeakDistanceMs = getNum(rt, p, "minPeakDistanceMs", o.minPeakDistanceMs);
             o.thresholdScale = getNum(rt, p, "thresholdScale", o.thresholdScale);
             o.bpmMin = getNum(rt, p, "bpmMin", o.bpmMin);
             o.bpmMax = getNum(rt, p, "bpmMax", o.bpmMax);
+            o.rrOutlierPercent = getNum(rt, p, "rrOutlierPercent", o.rrOutlierPercent);
+            o.rrOutlierMinMs = getNum(rt, p, "rrOutlierMinMs", o.rrOutlierMinMs);
+            o.rrOutlierMaxMs = getNum(rt, p, "rrOutlierMaxMs", o.rrOutlierMaxMs);
         }
         // Preprocessing
         if (hasProp(rt, opts, "preprocessing")) {
@@ -133,6 +153,8 @@ heartpy::Options hp_build_options_from_jsi(Runtime& rt, const Object& opts, cons
             if (hasProp(rt, q, "segmentRejectMaxRejects")) o.segmentRejectMaxRejects = (int)getNum(rt, q, "segmentRejectMaxRejects", o.segmentRejectMaxRejects);
             if (hasProp(rt, q, "segmentRejectWindowBeats")) o.segmentRejectWindowBeats = (int)getNum(rt, q, "segmentRejectWindowBeats", o.segmentRejectWindowBeats);
             o.segmentRejectOverlap = getNum(rt, q, "segmentRejectOverlap", o.segmentRejectOverlap);
+            // HeartPy threshold_rr parity
+            if (hasProp(rt, q, "thresholdRR")) o.thresholdRR = getBool(rt, q, "thresholdRR", o.thresholdRR);
         }
         // High precision
         if (hasProp(rt, opts, "highPrecision")) {
@@ -148,6 +170,11 @@ heartpy::Options hp_build_options_from_jsi(Runtime& rt, const Object& opts, cons
         }
         o.snrTauSec = getNum(rt, opts, "snrTauSec", o.snrTauSec);
         o.snrActiveTauSec = getNum(rt, opts, "snrActiveTauSec", o.snrActiveTauSec);
+        o.adaptivePsd = getBool(rt, opts, "adaptivePsd", o.adaptivePsd);
+        // Global FD toggle (calc_freq parity)
+        if (hasProp(rt, opts, "calcFreq")) {
+            o.calcFreq = getBool(rt, opts, "calcFreq", o.calcFreq);
+        }
     }
     // Validate core subset; caller handles clamps
     if (err_code || err_msg) {

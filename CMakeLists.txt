@@ -96,6 +96,17 @@ add_executable(bench_poll_latency examples/bench_poll_latency.cpp)
 target_link_libraries(bench_poll_latency PRIVATE heartpy_core)
 target_compile_definitions(bench_poll_latency PRIVATE HEARTPY_LOCK_TIMING=1)
 
+add_executable(welch_psd_adaptive_test examples/welch_psd_adaptive_test.cpp)
+target_link_libraries(welch_psd_adaptive_test PRIVATE heartpy_core)
+
+# calcFreq off smoke test
+add_executable(calcfreq_off_test examples/calcfreq_off_test.cpp)
+target_link_libraries(calcfreq_off_test PRIVATE heartpy_core)
+
+# threshold_rr mask test
+add_executable(threshold_rr_mask_test examples/threshold_rr_mask_test.cpp)
+target_link_libraries(threshold_rr_mask_test PRIVATE heartpy_core)
+
 # Acceptance check helper target (requires python3)
 add_custom_target(acceptance
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_acceptance.py --build-dir ${CMAKE_BINARY_DIR} --preset both --fs 50 --duration 180 --fast
@@ -127,5 +138,18 @@ add_test(NAME acceptance_ambient_180
 
 add_test(NAME concurrency_smoke
   COMMAND ${CMAKE_BINARY_DIR}/concurrency_smoke
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+add_test(NAME welch_psd_adaptive_test
+  COMMAND ${CMAKE_BINARY_DIR}/welch_psd_adaptive_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME calcfreq_off_test
+  COMMAND ${CMAKE_BINARY_DIR}/calcfreq_off_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME threshold_rr_mask_test
+  COMMAND ${CMAKE_BINARY_DIR}/threshold_rr_mask_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )

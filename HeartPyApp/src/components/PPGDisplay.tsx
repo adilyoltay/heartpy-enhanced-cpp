@@ -1,4 +1,4 @@
-import React, {useEffect, useMemo, useRef} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {StyleSheet, Text, TouchableOpacity, View} from 'react-native';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import Sound from 'react-native-sound';
@@ -29,6 +29,8 @@ const HEARTBEAT_SOUND = require('../../assets/sounds/heartbeat.wav');
     }; // SNR debug metrics (optional)
   };
 
+const MAX_WAVEFORM_BARS = 120;
+
 export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): JSX.Element {
   const {metrics, waveform} = data;
   const bpmDisplay = metrics?.bpm ? metrics.bpm.toFixed(1) : '--';
@@ -37,14 +39,26 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
   const lastHapticPeakTsRef = useRef<number>(0);
   const lastHapticTimeRef = useRef<number>(0);
   const heartSoundRef = useRef<Sound | null>(null);
+  const [audioLoaded, setAudioLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!PPG_CONFIG.debug.enabled) {
+      return;
+    }
+    console.log('[PPGDisplay] Audio loaded state', {audioLoaded});
+  }, [audioLoaded]);
 
   // Heartbeat sound'u yükle
   useEffect(() => {
     const sound = new Sound(HEARTBEAT_SOUND, undefined, (error) => {
       if (error) {
         console.warn('[PPGDisplay] Heartbeat sound yüklenemedi', error);
+        setAudioLoaded(false);
       } else {
-        console.log('[PPGDisplay] Heartbeat sound başarıyla yüklendi');
+        console.log('[PPGDisplay] Heartbeat sound başarıyla yüklendi', {
+          soundPath: HEARTBEAT_SOUND,
+        });
+        setAudioLoaded(true);
       }
     });
     heartSoundRef.current = sound;
@@ -52,6 +66,7 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
     return () => {
       heartSoundRef.current?.release();
       heartSoundRef.current = null;
+      setAudioLoaded(false);
     };
   }, []);
 
@@ -64,53 +79,182 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
       return;
     }
 
-    const isReliableForHaptic =
-      (metrics.confidence ?? 0) >= PPG_CONFIG.hapticMinConfidence &&
-      (metrics.snrDb ?? -10) > PPG_CONFIG.snrDbThresholdHaptic &&
-      metrics.signalQuality === 'good';
-    if (!isReliableForHaptic) return;
+    const pollId = metrics?.pollId ?? null;
+    const pollTimestamp = metrics?.pollTimestamp ?? null;
+    const verboseLogging = PPG_CONFIG.debug.enableDetailedSnrLogging === true;
+    const snrDebug = (metrics?.snrDebug ?? {}) as {
+      originalSnrDb?: number | null;
+      sanitizedSnrDb?: number;
+      isFallbackUsed?: boolean;
+      fallbackRatioPct?: number;
+      fallbackReason?: string;
+      f0Hz?: number | null;
+      hardFallbackActive?: boolean;
+      warmupActive?: boolean;
+      sampleCount?: number | null;
+    };
+    const sanitizedSnrDb = typeof snrDebug?.sanitizedSnrDb === 'number'
+      ? snrDebug.sanitizedSnrDb
+      : (metrics.snrDb ?? -10);
+    const originalSnrDb = typeof snrDebug?.originalSnrDb === 'number' ? snrDebug.originalSnrDb : null;
+    const snrFallbackUsed = !!snrDebug?.isFallbackUsed;
+
+    const resolvedSignalQuality = (metrics?.signalQuality ?? metrics?.quality?.signalQuality ?? 'unknown') as string;
+    const confidenceOk = (metrics.confidence ?? 0) >= PPG_CONFIG.hapticMinConfidence;
+    const snrOk = sanitizedSnrDb > PPG_CONFIG.snrDbThresholdHaptic;
+    const qualityOk = resolvedSignalQuality === 'good';
+    const isReliableForHaptic = confidenceOk && snrOk && qualityOk;
+
+    if (!isReliableForHaptic) {
+      if (PPG_CONFIG.debug.enabled && verboseLogging) {
+        const latestPeakTs = Math.max(...metrics.peakTimestamps);
+        const now = Date.now();
+        console.log('[PPGDisplay] Haptic guard failed', {
+          pollId,
+          pollTimestamp,
+          state,
+          confidence: metrics.confidence,
+          snrDb: sanitizedSnrDb,
+          originalSnrDb,
+          snrFallbackUsed,
+          signalQuality: resolvedSignalQuality,
+          snrFallbackRatioPct: snrDebug.fallbackRatioPct,
+          snrFallbackReason: snrDebug.fallbackReason,
+          f0Hz: snrDebug.f0Hz,
+          hardFallbackActive: snrDebug.hardFallbackActive,
+          warmupActive: snrDebug.warmupActive,
+          snrSampleCount: snrDebug.sampleCount,
+          thresholds: {
+            minConfidence: PPG_CONFIG.hapticMinConfidence,
+            snrThreshold: PPG_CONFIG.snrDbThresholdHaptic,
+          },
+          flags: {
+            confidenceOk,
+            snrOk,
+            qualityOk,
+          },
+          latestPeakTs,
+          now,
+          deltaMs: now - latestPeakTs,
+        });
+      }
+      if (PPG_CONFIG.debug.enabled && !verboseLogging) {
+        console.log('[PPGDisplay] Haptic guard skipped', {
+          pollId,
+          confidence: metrics.confidence,
+          snrDb: sanitizedSnrDb,
+          signalQuality: resolvedSignalQuality,
+        });
+      }
+      return;
+    }
 
     const now = Date.now();
     const MIN_INTERVAL_MS = PPG_CONFIG.hapticDebounceMs; // Config'den al
 
     const latestPeakTs = Math.max(...metrics.peakTimestamps);
+    const peakDeltaMs = now - latestPeakTs;
+    const timeSinceLastTrigger = now - lastHapticTimeRef.current;
+    const isNewPeak = latestPeakTs > lastHapticPeakTsRef.current;
+    const passesDebounce = timeSinceLastTrigger > MIN_INTERVAL_MS;
+    const pollToTriggerMs = pollTimestamp ? now - pollTimestamp : null;
 
-    if (
-      latestPeakTs > lastHapticPeakTsRef.current &&
-      now - lastHapticTimeRef.current > MIN_INTERVAL_MS
-    ) {
-      console.log('[PPGDisplay] HAPTIC TRIGGERED for peak timestamp:', latestPeakTs, {
-        confidence: metrics.confidence,
-        snrDb: metrics.snrDb,
-        signalQuality: metrics.signalQuality,
-        timeSinceLast: now - lastHapticTimeRef.current,
-        debounceMs: MIN_INTERVAL_MS
+    if (PPG_CONFIG.debug.enabled && verboseLogging) {
+      console.log('[PPGDisplay] Haptic timing eval', {
+        pollId,
+        latestPeakTs,
+        lastTriggeredPeak: lastHapticPeakTsRef.current,
+        isNewPeak,
+        timeSinceLastTrigger,
+        debounceMs: MIN_INTERVAL_MS,
+        peakDeltaMs,
+        passesDebounce,
+        deviceNow: now,
+        pollTimestamp,
+        pollToTriggerMs,
       });
+    }
 
-      // Haptic feedback
-      ReactNativeHapticFeedback.trigger(PPG_CONFIG.hapticIntensity, {
-        enableVibrateFallback: true,
-        ignoreAndroidSystemSettings: true,
-      });
-
-      // Heartbeat sound çal
-      const heartSound = heartSoundRef.current;
-      if (heartSound && heartSound.isLoaded()) {
-        heartSound.stop(() => {
-          heartSound.setCurrentTime(0);
-          heartSound.play((success) => {
-            if (success) {
-              console.log('[PPGDisplay] Heartbeat sound çalındı');
-            } else {
-              console.warn('[PPGDisplay] Heartbeat sound çalınamadı');
-            }
-          });
+    if (!isNewPeak) {
+      if (PPG_CONFIG.debug.enabled && verboseLogging) {
+        console.log('[PPGDisplay] Haptic skipped (stale peak)', {
+          pollId,
+          latestPeakTs,
+          lastTriggeredPeak: lastHapticPeakTsRef.current,
         });
       }
-
-      lastHapticPeakTsRef.current = latestPeakTs;
-      lastHapticTimeRef.current = now;
+      return;
     }
+
+    if (!passesDebounce) {
+      if (PPG_CONFIG.debug.enabled && verboseLogging) {
+        console.log('[PPGDisplay] Haptic skipped (debounce active)', {
+          pollId,
+          timeSinceLastTrigger,
+          debounceMs: MIN_INTERVAL_MS,
+          latestPeakTs,
+        });
+      }
+      return;
+    }
+
+    console.log('[PPGDisplay] HAPTIC TRIGGERED for peak timestamp:', latestPeakTs, {
+      pollId,
+      pollTimestamp,
+      pollToTriggerMs,
+      confidence: metrics.confidence,
+      snrDb: sanitizedSnrDb,
+      originalSnrDb,
+      snrFallbackUsed,
+      snrFallbackRatioPct: snrDebug.fallbackRatioPct,
+      snrFallbackReason: snrDebug.fallbackReason,
+      f0Hz: snrDebug.f0Hz,
+      hardFallbackActive: snrDebug.hardFallbackActive,
+      warmupActive: snrDebug.warmupActive,
+      snrSampleCount: snrDebug.sampleCount,
+      signalQuality: resolvedSignalQuality,
+      timeSinceLast: timeSinceLastTrigger,
+      debounceMs: MIN_INTERVAL_MS,
+      peakDeltaMs,
+      deviceNow: now,
+    });
+
+    // Haptic feedback
+    console.log('[PPGDisplay] ReactNativeHapticFeedback.trigger', {
+      intensity: PPG_CONFIG.hapticIntensity,
+      pollId,
+    });
+    ReactNativeHapticFeedback.trigger(PPG_CONFIG.hapticIntensity, {
+      enableVibrateFallback: true,
+      ignoreAndroidSystemSettings: true,
+    });
+
+    // Heartbeat sound çal
+    const heartSound = heartSoundRef.current;
+    if (heartSound && heartSound.isLoaded()) {
+      console.log('[PPGDisplay] Heartbeat sound playback attempt', {
+        audioLoaded,
+        duration: heartSound.getDuration ? heartSound.getDuration() : undefined,
+      });
+      heartSound.stop(() => {
+        heartSound.play((success) => {
+          if (success) {
+            console.log('[PPGDisplay] Heartbeat sound çalındı');
+          } else {
+            console.warn('[PPGDisplay] Heartbeat sound çalınamadı');
+          }
+        });
+      });
+    } else {
+      console.warn('[PPGDisplay] Heartbeat sound ready değil', {
+        hasSoundInstance: !!heartSound,
+        isLoaded: heartSound ? heartSound.isLoaded() : false,
+        audioLoadedState: audioLoaded,
+      });
+    }
+
+    lastHapticPeakTsRef.current = latestPeakTs;
+    lastHapticTimeRef.current = now;
   }, [metrics, state]);
 
   // --- GÜNCEL ve BASİTLEŞTİRİLMİŞ MARKER MANTIĞI ---
@@ -119,8 +263,23 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
     return new Set(metrics?.peakTimestamps || []);
   }, [metrics]);
 
+  const displayWaveform = useMemo(() => {
+    if (!waveform || waveform.length <= MAX_WAVEFORM_BARS) {
+      return waveform;
+    }
+    const stride = Math.ceil(waveform.length / MAX_WAVEFORM_BARS);
+    const sampled: typeof waveform = [] as typeof waveform;
+    for (let i = 0; i < waveform.length; i += stride) {
+      sampled.push(waveform[i]);
+      if (sampled.length >= MAX_WAVEFORM_BARS) {
+        break;
+      }
+    }
+    return sampled;
+  }, [waveform]);
+
   // Dalga formu verisindeki min/max değerlerini hesapla
-  const values = waveform.map(i => i.value);
+  const values = displayWaveform.map(i => i.value);
   const min = values.length ? Math.min(...values) : 0;
   const max = values.length ? Math.max(...values) : 0;
   const span = max - min || 1;
@@ -173,7 +332,7 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
           Doğrudan C++'tan gelen senkronize dalga formunu render et.
           Artık .slice() işlemine gerek yok.
         */}
-        {waveform.map((item, index) => {
+        {displayWaveform.map((item, index) => {
           // Bu bar'ın zaman damgası, tepe noktası set'inde var mı?
           const isPickPoint = peakTimestampSet.has(item.timestamp);
           const height = ((item.value - min) / span) * 100 + 2;
@@ -247,7 +406,12 @@ function Metric({label, value}: {label: string; value: string}) {
       paddingHorizontal: 4,
       overflow: 'hidden',
     },
-    waveformBar: {flex: 1, backgroundColor: '#39d353', borderRadius: 2, marginHorizontal: 1},
+    waveformBar: {
+      width: 2,
+      backgroundColor: '#39d353',
+      borderRadius: 1,
+      marginRight: 1,
+    },
     waveformBarPick: {backgroundColor: '#F44336'},
     controls: {flexDirection: 'row', gap: 12},
     button: {flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center'},

@@ -20,9 +20,12 @@ installJSI();
 
 const res = await analyzeAsync(ppgArray, 50, {
   bandpass: { lowHz: 0.5, highHz: 5, order: 2 },
-  welch: { nfft: 1024, overlap: 0.5 },
   peak: { refractoryMs: 320, thresholdScale: 0.5 },
-  quality: { rejectSegmentwise: true, segmentRejectWindowBeats: 10, segmentRejectMaxRejects: 3 },
+  quality: { thresholdRR: true, rejectSegmentwise: true, segmentRejectWindowBeats: 10, segmentRejectMaxRejects: 3 },
+  // Mobile defaults: save CPU by skipping FD unless needed
+  calcFreq: false,
+  // For HP‑like filtering, prefer zero‑phase butterworth
+  filter: { mode: 'butter-filtfilt', order: 3 },
 });
 
 // Render binary mask & segments
@@ -58,9 +61,18 @@ See `react-native-heartpy/examples/AppUsage.tsx` for a minimal component that:
 
 ### Streaming (concepts)
 
-- The C++ library ships a realtime streaming analyzer with a plain C bridge (`hp_rt_*`). The RN package currently focuses on batch; for streaming you can:
-  1) Create a TurboModule/JSI glue to `hp_rt_create/push/poll/destroy`, or
-  2) Use overlapped short windows (2–3s) as an approximation.
+- The C++ library ships a realtime streaming analyzer with a plain C bridge (`hp_rt_*`). The package exposes a NativeModules path by default (JSI optional). Example realtime options:
+
+```ts
+import { RealtimeAnalyzer } from 'react-native-heartpy';
+const rt = await RealtimeAnalyzer.create(30, {
+  bandpass: { lowHz: 0.5, highHz: 5, order: 2 },
+  quality: { thresholdRR: true },
+  calcFreq: false, // disable FD live
+  filter: { mode: 'butter-filtfilt', order: 3 },
+  windowSeconds: 12,
+});
+```
 
 ### License
 

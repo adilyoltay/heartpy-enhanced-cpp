@@ -36,7 +36,11 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             int sdsdMode,
             int poincareMode,
             boolean pnnAsPercent,
-            double snrTauSec, double snrActiveTauSec
+            double snrTauSec, double snrActiveTauSec,
+            boolean adaptivePsd,
+            boolean thresholdRR,
+            boolean calcFreq,
+            int filterMode
     );
 
     private static native String analyzeRRNativeJson(
@@ -66,7 +70,10 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             int sdsdMode,
             int poincareMode,
             boolean pnnAsPercent,
-            double snrTauSec, double snrActiveTauSec
+            double snrTauSec, double snrActiveTauSec,
+            boolean thresholdRR,
+            boolean calcFreq,
+            int filterMode
     );
 
     private static native double[] interpolateClippingNative(double[] signal, double fs, double threshold);
@@ -91,7 +98,10 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             int sdsdMode,
             int poincareMode,
             boolean pnnAsPercent,
-            double snrTauSec, double snrActiveTauSec
+            double snrTauSec, double snrActiveTauSec,
+            boolean thresholdRR,
+            boolean calcFreq,
+            int filterMode
     );
     private static native void rtSetWindowNative(long handle, double windowSeconds);
     private static native void rtPushNative(long handle, double[] samples, double t0);
@@ -386,6 +396,9 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         boolean pnnAsPercent=true;
         double snrTauSec=10.0;
         double snrActiveTauSec=7.0;
+        boolean adaptivePsd=true;
+        boolean calcFreq=true;
+        int filterMode=0; // 0=AUTO,1=RBJ,2=BUTTER
     }
 
     private static Opts parseOptions(com.facebook.react.bridge.ReadableMap options) {
@@ -419,6 +432,16 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             if (prep.hasKey("hampelThreshold")) o.hampelThreshold = prep.getDouble("hampelThreshold");
             if (prep.hasKey("removeBaselineWander")) o.removeBaselineWander = prep.getBoolean("removeBaselineWander");
             if (prep.hasKey("enhancePeaks")) o.enhancePeaks = prep.getBoolean("enhancePeaks");
+        }
+        if (options.hasKey("filter")) {
+            com.facebook.react.bridge.ReadableMap filt = options.getMap("filter");
+            if (filt.hasKey("mode")) {
+                String m = filt.getString("mode");
+                if ("rbj".equals(m)) o.filterMode = 1;
+                else if ("butter".equals(m) || "butter-filtfilt".equals(m)) o.filterMode = 2;
+                else o.filterMode = 0;
+            }
+            if (filt.hasKey("order")) o.order = filt.getInt("order");
         }
         if (options.hasKey("quality")) {
             com.facebook.react.bridge.ReadableMap q = options.getMap("quality");
@@ -470,8 +493,10 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             if (rr.hasKey("smooth")) o.rrSplineSmooth = rr.getDouble("smooth");
         }
         if (options.hasKey("breathingAsBpm")) o.breathingAsBpm = options.getBoolean("breathingAsBpm");
+        if (options.hasKey("calcFreq")) o.calcFreq = options.getBoolean("calcFreq");
         if (options.hasKey("snrTauSec")) o.snrTauSec = options.getDouble("snrTauSec");
         if (options.hasKey("snrActiveTauSec")) o.snrActiveTauSec = options.getDouble("snrActiveTauSec");
+        if (options.hasKey("adaptivePsd")) o.adaptivePsd = options.getBoolean("adaptivePsd");
         return o;
     }
 
@@ -494,8 +519,12 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                 o.breathingAsBpm,
                 o.sdsdMode,
                 o.poincareMode,
-                o.pnnAsPercent
-        );
+                o.pnnAsPercent,
+                o.snrTauSec, o.snrActiveTauSec,
+                o.adaptivePsd,
+                o.thresholdRR,
+                o.calcFreq,
+                o.filterMode);
         return jsonToWritableMap(json);
     }
 
@@ -521,8 +550,12 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                         o.breathingAsBpm,
                         o.sdsdMode,
                         o.poincareMode,
-                        o.pnnAsPercent
-                );
+                        o.pnnAsPercent,
+                        o.snrTauSec, o.snrActiveTauSec,
+                        o.adaptivePsd,
+                        o.thresholdRR,
+                        o.calcFreq,
+                        o.filterMode);
                 promise.resolve(jsonToWritableMap(json));
             } catch (Exception e) {
                 promise.reject("analyze_error", e);
@@ -573,7 +606,11 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                 o.breathingAsBpm,
                 o.sdsdMode,
                 o.poincareMode,
-                o.pnnAsPercent
+                o.pnnAsPercent,
+                o.snrTauSec, o.snrActiveTauSec,
+                o.thresholdRR,
+                o.calcFreq,
+                o.filterMode
         );
         return jsonToWritableMap(json);
     }
@@ -596,12 +633,16 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                         o.rejectSegmentwise, o.segmentRejectThreshold, o.segmentRejectMaxRejects, o.segmentRejectWindowBeats,
                         o.segmentRejectOverlap,
                         o.cleanRR, o.cleanMethod,
-                        o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
-                        o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
-                        o.breathingAsBpm,
-                        o.sdsdMode,
-                        o.poincareMode,
-                        o.pnnAsPercent
+                o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
+                o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
+                o.breathingAsBpm,
+                o.sdsdMode,
+                o.poincareMode,
+                        o.pnnAsPercent,
+                        o.snrTauSec, o.snrActiveTauSec,
+                        o.thresholdRR,
+                        o.calcFreq,
+                        o.filterMode
                 );
                 promise.resolve(jsonToWritableMap(json));
             } catch (Exception e) {
@@ -674,7 +715,10 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                     o.sdsdMode,
                     o.poincareMode,
                     o.pnnAsPercent,
-                    o.snrTauSec, o.snrActiveTauSec);
+                    o.snrTauSec, o.snrActiveTauSec,
+                    o.thresholdRR,
+                    o.calcFreq,
+                    o.filterMode);
             if (h == 0) { promise.reject("HEARTPY_E004", "hp_rt_create returned 0"); return; }
             promise.resolve(h);
         } catch (Exception e) {

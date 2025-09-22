@@ -134,6 +134,8 @@ private:
     std::vector<double> yBufferD_;
     std::vector<double> noiseScratch_;
     std::vector<char> keepScratch_;
+    std::vector<double> lastPsdFreq_;
+    std::vector<double> lastPsdPower_;
 
     double fs_ {0.0};              // nominal fs from constructor
     Options opt_ {};
@@ -200,6 +202,10 @@ private:
     unsigned long long timestampBacktrackEventsTotal_ {0};
     unsigned long long timestampsSkippedTotal_ {0};
     unsigned long long timeJumpEventsTotal_ {0};
+    unsigned long long psdParamClampEventsTotal_ {0};
+    unsigned long long psdReuseFallbackEventsTotal_ {0};
+    unsigned long long psdTimeDomainFallbackEventsTotal_ {0};
+    unsigned long long psdInvalidFramesTotal_ {0};
 
 #ifdef HEARTPY_LOCK_TIMING
 public:
@@ -278,6 +284,11 @@ public:
     // Temporary relaxation when oversuppression detected
     double chokeRelaxUntil_ {0.0};
     double chokeStartTs_ {0.0};
+
+    bool   lastPsdValid_ {false};
+    double lastPsdFs_ {0.0};
+    int    lastPsdNfft_ {0};
+    double lastPsdOverlap_ {0.0};
     // RR-based fallback tracking
     int    rrFallbackConsec_ {0};
     bool   rrFallbackActive_ {false};
