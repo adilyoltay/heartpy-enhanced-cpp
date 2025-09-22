@@ -12,6 +12,7 @@
     "prepare": "husky"
   },
   "dependencies": {
+    "@shopify/react-native-skia": "^0.1.214",
     "@react-native-async-storage/async-storage": "^1.21.0",
     "react": "18.2.0",
     "react-native": "0.74.3",

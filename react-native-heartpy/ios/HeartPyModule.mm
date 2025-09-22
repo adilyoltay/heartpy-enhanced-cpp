@@ -72,13 +72,13 @@ static double lastPPGConfidence = 0.0;
 
 // Store PPG sample from frame processor
 RCT_EXPORT_METHOD(storePPGSample:(double)value timestamp:(double)timestamp) {
-    dispatch_async(ppgBufferQueue, ^{
-        [globalPPGBuffer addObject:@(value)];
-        // Keep last 100 samples
-        if (globalPPGBuffer.count > 100) {
-            [globalPPGBuffer removeObjectAtIndex:0];
-        }
-    });
+  dispatch_async(ppgBufferQueue, ^{
+    [globalPPGBuffer addObject:@(value)];
+    // Keep last 100 samples
+    if (globalPPGBuffer.count > 100) {
+      [globalPPGBuffer removeObjectAtIndex:0];
+    }
+  });
 }
 
 // Get latest PPG samples for UI
@@ -581,11 +581,56 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(analyze:(NSArray<NSNumber*>*)signal
     q[@"rejectedBeats"] = @(res.quality.rejectedBeats);
     q[@"rejectionRate"] = @(res.quality.rejectionRate);
     q[@"goodQuality"] = @(res.quality.goodQuality);
+    q[@"snrDb"] = @(res.quality.snrDb);
+    q[@"confidence"] = @(res.quality.confidence);
+    q[@"f0Hz"] = @(res.quality.f0Hz);
+    q[@"maPercActive"] = @(res.quality.maPercActive);
+    q[@"doublingFlag"] = @(res.quality.doublingFlag);
+    q[@"softDoublingFlag"] = @(res.quality.softDoublingFlag);
+    q[@"doublingHintFlag"] = @(res.quality.doublingHintFlag);
+    q[@"hardFallbackActive"] = @(res.quality.hardFallbackActive);
+    q[@"rrFallbackModeActive"] = @(res.quality.rrFallbackModeActive);
+    q[@"snrWarmupActive"] = @(res.quality.snrWarmupActive);
+    q[@"snrSampleCount"] = @(res.quality.snrSampleCount);
+    q[@"refractoryMsActive"] = @(res.quality.refractoryMsActive);
+    q[@"minRRBoundMs"] = @(res.quality.minRRBoundMs);
+    q[@"pairFrac"] = @(res.quality.pairFrac);
+    q[@"rrShortFrac"] = @(res.quality.rrShortFrac);
+    q[@"rrLongMs"] = @(res.quality.rrLongMs);
+    q[@"pHalfOverFund"] = @(res.quality.pHalfOverFund);
     if (!res.quality.qualityWarning.empty()) {
         q[@"qualityWarning"] = [NSString stringWithUTF8String:res.quality.qualityWarning.c_str()];
     }
     out[@"quality"] = q;
+    NSMutableArray* binarySegments = [NSMutableArray arrayWithCapacity:res.binarySegments.size()];
+    for (const auto& seg : res.binarySegments) {
+        [binarySegments addObject:@{
+            @"index": @(seg.index),
+            @"startBeat": @(seg.startBeat),
+            @"endBeat": @(seg.endBeat),
+            @"totalBeats": @(seg.totalBeats),
+            @"rejectedBeats": @(seg.rejectedBeats),
+            @"accepted": @(seg.accepted)
+        }];
+    }
+    out[@"binarySegments"] = binarySegments;
     return out;
+}
+
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(analyzeTyped:(NSArray<NSNumber*>*)signal
+                                     fs:(nonnull NSNumber*)fs
+                                     options:(NSDictionary*)options)
+{
+    return [self analyze:signal fs:fs options:options];
+}
+
+RCT_EXPORT_METHOD(analyzeAsyncTyped:(NSArray<NSNumber*>*)signal
+                  fs:(nonnull NSNumber*)fs
+                  options:(NSDictionary*)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    [self analyzeAsync:signal fs:fs options:options resolver:resolve rejecter:reject];
 }
 
 // Async Promise-based variants to avoid blocking the JS thread

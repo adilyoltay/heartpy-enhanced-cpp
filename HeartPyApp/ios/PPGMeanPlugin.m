@@ -1,14 +1,103 @@
 #import <Foundation/Foundation.h>
 #import <VisionCamera/FrameProcessorPlugin.h>
 #import <CoreVideo/CoreVideo.h>
+#import <Accelerate/Accelerate.h>
 #include <math.h>
 
 @interface PPGMeanPlugin : FrameProcessorPlugin
 @end
 
+// SIMD helper function for BGRA green channel processing
+static double processBGRARoiWithSIMD(uint8_t* base, size_t bytesPerRow, 
+                                    size_t px0, size_t py0, size_t px1, size_t py1,
+                                    size_t xStep, size_t yStep, NSString* channel) {
+  // Ensure scratch buffer is large enough
+  size_t maxWidth = px1 - px0;
+  if (g_simdScratchSize < maxWidth) {
+    if (g_simdScratchBuffer) {
+      free(g_simdScratchBuffer);
+    }
+    g_simdScratchSize = maxWidth;
+    g_simdScratchBuffer = (float*)malloc(g_simdScratchSize * sizeof(float));
+  }
+  
+  double totalSum = 0.0;
+  size_t totalCount = 0;
+  
+  for (size_t y = py0; y < py1; y += yStep) {
+    uint8_t* row = base + y * bytesPerRow;
+    size_t rowWidth = px1 - px0;
+    
+    // Extract green channel with stride 4 using vDSP
+    vDSP_vfltu8((const uint8_t*)row + px0 * 4 + 1, 4, g_simdScratchBuffer, 1, rowWidth);
+    
+    // Calculate sum for this row
+    float rowSum = 0.0f;
+    vDSP_sve(g_simdScratchBuffer, 1, &rowSum, rowWidth);
+    
+    totalSum += rowSum;
+    totalCount += rowWidth;
+  }
+  
+  return (totalCount > 0) ? (totalSum / totalCount) : 0.0;
+}
+
+// Scalar fallback function for comparison
+static double processBGRARoiScalar(uint8_t* base, size_t bytesPerRow,
+                                  size_t px0, size_t py0, size_t px1, size_t py1,
+                                  size_t xStep, size_t yStep, NSString* channel) {
+  unsigned long long sumR = 0, sumG = 0, sumB = 0;
+  unsigned long long cnt = 0;
+  
+  for (size_t y = py0; y < py1; y += yStep) {
+    uint8_t* row = base + y * bytesPerRow;
+    for (size_t x = px0; x < px1; x += xStep) {
+      uint8_t b = row[x * 4 + 0];
+      uint8_t g = row[x * 4 + 1];
+      uint8_t r = row[x * 4 + 2];
+      sumR += r; sumG += g; sumB += b; cnt++;
+    }
+  }
+  
+  if (cnt == 0) return 0.0;
+  
+  double Rm = (double)sumR / (double)cnt;
+  double Gm = (double)sumG / (double)cnt;
+  double Bm = (double)sumB / (double)cnt;
+  
+  if ([channel isEqualToString:@"red"]) return Rm;
+  if ([channel isEqualToString:@"luma"]) return 0.114 * Bm + 0.587 * Gm + 0.299 * Rm;
+  return Gm; // default to green
+}
+
 @implementation PPGMeanPlugin
 
+// SIMD optimization buffers and performance tracking
+static float* g_simdScratchBuffer = NULL;
+static size_t g_simdScratchSize = 0;
+static BOOL g_simdEnabled = YES; // Default enabled
+static BOOL g_performanceLogging = NO; // Default disabled
+
+// Performance measurement arrays
+static double g_frameTimes[300]; // Store 300 frame times for p50/p95 calculation
+static int g_frameTimeIndex = 0;
+static int g_frameTimeCount = 0;
+
 - (id)callback:(Frame *)frame withArguments:(NSDictionary *)arguments {
+  // Performance measurement start
+  CFTimeInterval startTime = CACurrentMediaTime();
+  
+  // SIMD flag control
+  NSNumber* simdFlag = arguments[@"simdEnabled"];
+  if (simdFlag != nil) {
+    g_simdEnabled = [simdFlag boolValue];
+  }
+  
+  NSNumber* perfLogFlag = arguments[@"performanceLogging"];
+  if (perfLogFlag != nil) {
+    g_performanceLogging = [perfLogFlag boolValue];
+  }
+  
   // ROI fraction (0..1)
   NSNumber* roiNum = arguments[@"roi"];
   double roiIn = roiNum != nil ? roiNum.doubleValue : 0.4;
@@ -89,26 +178,64 @@ static double dcMean = NAN;
     const size_t xStep = (size_t)step, yStep = (size_t)step;
     size_t patchW = MAX((size_t)1, roiW / (size_t)grid);
     size_t patchH = MAX((size_t)1, roiH / (size_t)grid);
+    
     for (int gy = 0; gy < grid; ++gy) {
       for (int gx = 0; gx < grid; ++gx) {
         size_t px0 = startX + (size_t)gx * patchW;
         size_t py0 = startY + (size_t)gy * patchH;
         size_t px1 = (gx == grid - 1) ? (startX + roiW) : (px0 + patchW);
         size_t py1 = (gy == grid - 1) ? (startY + roiH) : (py0 + patchH);
-        unsigned long long sumR = 0, sumG = 0, sumB = 0; unsigned long long cnt = 0;
-        for (size_t y = py0; y < py1; y += yStep) {
-          uint8_t* row = base + y * bytesPerRow;
-          for (size_t x = px0; x < px1; x += xStep) {
-            uint8_t b = row[x * 4 + 0];
-            uint8_t g = row[x * 4 + 1];
-            uint8_t r = row[x * 4 + 2];
-            sumR += r; sumG += g; sumB += b; cnt++;
+        
+        double value = 0.0;
+        double Rm = 0.0, Gm = 0.0, Bm = 0.0;
+        
+        if (g_simdEnabled) {
+          // Use SIMD optimization for green channel
+          Gm = processBGRARoiWithSIMD(base, bytesPerRow, px0, py0, px1, py1, xStep, yStep, channel);
+          
+          // For red and luma, we still need scalar processing
+          if ([channel isEqualToString:@"red"] || [channel isEqualToString:@"luma"]) {
+            unsigned long long sumR = 0, sumG = 0, sumB = 0;
+            unsigned long long cnt = 0;
+            for (size_t y = py0; y < py1; y += yStep) {
+              uint8_t* row = base + y * bytesPerRow;
+              for (size_t x = px0; x < px1; x += xStep) {
+                uint8_t b = row[x * 4 + 0];
+                uint8_t g = row[x * 4 + 1];
+                uint8_t r = row[x * 4 + 2];
+                sumR += r; sumG += g; sumB += b; cnt++;
+              }
+            }
+            if (cnt > 0) {
+              Rm = (double)sumR / (double)cnt;
+              Gm = (double)sumG / (double)cnt;
+              Bm = (double)sumB / (double)cnt;
+            }
+          }
+        } else {
+          // Scalar fallback
+          unsigned long long sumR = 0, sumG = 0, sumB = 0;
+          unsigned long long cnt = 0;
+          for (size_t y = py0; y < py1; y += yStep) {
+            uint8_t* row = base + y * bytesPerRow;
+            for (size_t x = px0; x < px1; x += xStep) {
+              uint8_t b = row[x * 4 + 0];
+              uint8_t g = row[x * 4 + 1];
+              uint8_t r = row[x * 4 + 2];
+              sumR += r; sumG += g; sumB += b; cnt++;
+            }
+          }
+          if (cnt > 0) {
+            Rm = (double)sumR / (double)cnt;
+            Gm = (double)sumG / (double)cnt;
+            Bm = (double)sumB / (double)cnt;
           }
         }
+        
         if (cnt == 0) continue;
-        double Rm = (double)sumR / (double)cnt; double Gm = (double)sumG / (double)cnt; double Bm = (double)sumB / (double)cnt;
+        
         double Ym = 0.114 * Bm + 0.587 * Gm + 0.299 * Rm;
-        double value = ([channel isEqualToString:@"red"]) ? Rm : ([channel isEqualToString:@"luma"]) ? Ym : Gm;
+        value = ([channel isEqualToString:@"red"]) ? Rm : ([channel isEqualToString:@"luma"]) ? Ym : Gm;
         if (value < 0.0) value = 0.0; if (value > 255.0) value = 255.0;
         // exposure score from luma
         double expScore = 1.0;
@@ -441,6 +568,41 @@ static double dcMean = NAN;
   }
 
   double pushSample = isfinite(processedSample) ? processedSample : NAN;
+
+  // Performance measurement and logging
+  CFTimeInterval endTime = CACurrentMediaTime();
+  double frameTimeMs = (endTime - startTime) * 1000.0;
+  
+  // Store frame time for p50/p95 calculation
+  g_frameTimes[g_frameTimeIndex] = frameTimeMs;
+  g_frameTimeIndex = (g_frameTimeIndex + 1) % 300;
+  if (g_frameTimeCount < 300) g_frameTimeCount++;
+  
+  // Log performance metrics every 100 frames when enabled
+  if (g_performanceLogging && g_frameTimeCount > 0 && g_frameTimeCount % 100 == 0) {
+    // Calculate p50 and p95
+    double sortedTimes[300];
+    memcpy(sortedTimes, g_frameTimes, g_frameTimeCount * sizeof(double));
+    
+    // Simple bubble sort for small arrays
+    for (int i = 0; i < g_frameTimeCount - 1; i++) {
+      for (int j = 0; j < g_frameTimeCount - i - 1; j++) {
+        if (sortedTimes[j] > sortedTimes[j + 1]) {
+          double temp = sortedTimes[j];
+          sortedTimes[j] = sortedTimes[j + 1];
+          sortedTimes[j + 1] = temp;
+        }
+      }
+    }
+    
+    int p50Index = (int)(g_frameTimeCount * 0.5);
+    int p95Index = (int)(g_frameTimeCount * 0.95);
+    double p50 = sortedTimes[p50Index];
+    double p95 = sortedTimes[p95Index];
+    
+    NSLog(@"📊 PPGMeanPlugin Performance: SIMD=%@, Frames=%d, P50=%.2fms, P95=%.2fms", 
+          g_simdEnabled ? @"ON" : @"OFF", g_frameTimeCount, p50, p95);
+  }
 
   CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 

@@ -8,7 +8,6 @@ import type {
 } from '../types/PPGTypes';
 import {PPG_CONFIG} from './PPGConfig';
 
-
 export type AnalyzerTuningOptions = {
   pHalfOverFundThresholdSoft: number;
   refractoryMs: number;
@@ -52,6 +51,15 @@ type AnalyzerOptions = {
 
 type PendingSample = {value: number; timestampMs: number};
 
+export type AnalyzerTickSummary = {
+  pushed: number;
+  pendingSamples: number;
+  reservoirReady: boolean;
+  polled: boolean;
+  emittedFrame: boolean;
+  droppedSamples?: number;
+};
+
 // Note: This class is not designed to be thread-safe.
 // All public methods should be called from the same thread (the JS thread).
 export class PPGAnalyzer {
@@ -67,11 +75,20 @@ export class PPGAnalyzer {
   private shouldAutoRestart = false;
 
   private pendingSamples: PendingSample[] = [];
-  private readonly sampleBuffer = new RingBuffer<PPGSample>(PPG_CONFIG.ringBufferSize);
-  private timerId: NodeJS.Timeout | null = null;
+  private readonly sampleBuffer = new RingBuffer<PPGSample>(
+    PPG_CONFIG.ringBufferSize,
+  );
   private totalSamplesPushed = 0;
   private reservoirReady = false;
   private hasLoggedReservoirWait = false;
+  private lastTickSummary: AnalyzerTickSummary = {
+    pushed: 0,
+    emittedFrame: false,
+    reservoirReady: false,
+    polled: false,
+    pendingSamples: 0,
+  };
+  private isProcessingTick = false;
 
   constructor(options: AnalyzerOptions) {
     this.onStateChangeCb = options.onStateChange;
@@ -83,13 +100,19 @@ export class PPGAnalyzer {
     return {...this.tuningOptions};
   }
 
-  public async configure(partial: Partial<AnalyzerTuningOptions>): Promise<void> {
-    const sanitizedEntries = Object.entries(partial).filter(([, value]) => value !== undefined);
+  public async configure(
+    partial: Partial<AnalyzerTuningOptions>,
+  ): Promise<void> {
+    const sanitizedEntries = Object.entries(partial).filter(
+      ([, value]) => value !== undefined,
+    );
     if (sanitizedEntries.length === 0) {
       return;
     }
 
-    const sanitized = Object.fromEntries(sanitizedEntries) as Partial<AnalyzerTuningOptions>;
+    const sanitized = Object.fromEntries(
+      sanitizedEntries,
+    ) as Partial<AnalyzerTuningOptions>;
     this.tuningOptions = {...this.tuningOptions, ...sanitized};
 
     if (this.state === 'running') {
@@ -106,15 +129,20 @@ export class PPGAnalyzer {
 
   private buildWrapperOptions(): Partial<AnalyzerTuningOptions> {
     return Object.fromEntries(
-      Object.entries(this.tuningOptions).filter(([, value]) => value !== undefined),
+      Object.entries(this.tuningOptions).filter(
+        ([, value]) => value !== undefined,
+      ),
     ) as Partial<AnalyzerTuningOptions>;
   }
 
   private async initializeWrapper(): Promise<void> {
     const wrapper = new HeartPyWrapper();
-    const snrTauSec = this.tuningOptions.snrTauSec ?? DEFAULT_ANALYZER_OPTIONS.snrTauSec ?? 1.0;
+    const snrTauSec =
+      this.tuningOptions.snrTauSec ?? DEFAULT_ANALYZER_OPTIONS.snrTauSec ?? 1.0;
     const snrActiveTauSec =
-      this.tuningOptions.snrActiveTauSec ?? DEFAULT_ANALYZER_OPTIONS.snrActiveTauSec ?? 1.0;
+      this.tuningOptions.snrActiveTauSec ??
+      DEFAULT_ANALYZER_OPTIONS.snrActiveTauSec ??
+      1.0;
 
     const createOptions = {
       // Known-good peak detection parameters
@@ -219,11 +247,6 @@ export class PPGAnalyzer {
 
       await this.initializeWrapper();
 
-      this.timerId = setInterval(
-        () => this.tick(),
-        PPG_CONFIG.uiUpdateIntervalMs,
-      );
-
       this.setState('running');
       console.log('[PPGAnalyzer] Started successfully');
     } catch (e) {
@@ -236,15 +259,14 @@ export class PPGAnalyzer {
     if (this.state === 'idle') {
       return;
     }
-    if (this.timerId) {
-      clearInterval(this.timerId);
-      this.timerId = null;
-    }
     if (this.wrapper) {
       try {
         await this.wrapper.destroy();
       } catch (error) {
-        console.warn('[PPGAnalyzer] Failed to destroy wrapper during stop', error);
+        console.warn(
+          '[PPGAnalyzer] Failed to destroy wrapper during stop',
+          error,
+        );
       }
     }
     this.wrapper = null;
@@ -262,89 +284,143 @@ export class PPGAnalyzer {
     await this.performStop();
   }
 
-  private async tick() {
+  public getLastTickSummary(): AnalyzerTickSummary {
+    return this.lastTickSummary;
+  }
+
+  public async processTick(): Promise<AnalyzerTickSummary> {
+    if (this.isProcessingTick) {
+      return this.lastTickSummary;
+    }
+
     if (this.state !== 'running' || !this.wrapper) {
-      return;
+      this.lastTickSummary = {
+        pushed: 0,
+        emittedFrame: false,
+        reservoirReady: this.reservoirReady,
+        polled: false,
+        pendingSamples: this.pendingSamples.length,
+      };
+      return this.lastTickSummary;
     }
 
-    // 1. Flush pending samples to C++ when we have a meaningful batch ready
-    const BATCH_SIZE = 30; // ≈1 second of data at 30 FPS sample cadence
+    this.isProcessingTick = true;
+    const summary: AnalyzerTickSummary = {
+      pushed: 0,
+      emittedFrame: false,
+      reservoirReady: this.reservoirReady,
+      polled: false,
+      pendingSamples: this.pendingSamples.length,
+    };
 
-    if (this.pendingSamples.length < BATCH_SIZE) {
-      // Not enough signal yet—wait until we can ship a full batch downstream
-      return;
-    }
+    try {
+      const BATCH_SIZE = 30; // ≈1 second of data at 30 FPS sample cadence
+      const MAX_PENDING_BATCHES = 6; // allow limited backlog before enforcing decimation
+      const maxPendingSamples = BATCH_SIZE * MAX_PENDING_BATCHES;
 
-    const samplesToProcess = this.pendingSamples.splice(0, BATCH_SIZE); // Only forward a full batch
-    const values = samplesToProcess.map(s => s.value);
-    const timestamps = samplesToProcess.map(s => s.timestampMs / 1000.0);
-    await this.wrapper.pushWithTimestamps(values, timestamps);
+      if (this.pendingSamples.length > maxPendingSamples) {
+        const dropCount = this.pendingSamples.length - maxPendingSamples;
+        this.pendingSamples.splice(0, dropCount);
+        summary.droppedSamples = dropCount;
+        summary.pendingSamples = this.pendingSamples.length;
+        if (PPG_CONFIG.debug.enableSchedulerLogging) {
+          console.log(
+            '[PPGAnalyzer] Dropping pending samples to relieve back-pressure',
+            {
+              dropCount,
+              retained: this.pendingSamples.length,
+            },
+          );
+        }
+      }
+      if (this.pendingSamples.length < BATCH_SIZE) {
+        this.lastTickSummary = summary;
+        return summary;
+      }
 
-    this.totalSamplesPushed += values.length;
+      const samplesToProcess = this.pendingSamples.splice(0, BATCH_SIZE);
+      const values = samplesToProcess.map(s => s.value);
+      const timestamps = samplesToProcess.map(s => s.timestampMs / 1000.0);
 
-    if (!this.reservoirReady) {
-      const reservoirSamplesRequired = Math.max(
-        PPG_CONFIG.analysisWindow,
-        Math.ceil(PPG_CONFIG.minSamplesBeforePollSec * this.sampleRate),
-      );
+      await this.wrapper.pushWithTimestamps(values, timestamps);
+      this.totalSamplesPushed += values.length;
+      summary.pushed = values.length;
+      summary.pendingSamples = this.pendingSamples.length;
 
-      if (this.totalSamplesPushed < reservoirSamplesRequired) {
-        if (!this.hasLoggedReservoirWait && PPG_CONFIG.debug.enabled) {
-          console.log('[PPGAnalyzer] Waiting for reservoir warm-up', {
-            pushedSamples: this.totalSamplesPushed,
-            reservoirSamplesRequired,
+      if (!this.reservoirReady) {
+        const reservoirSamplesRequired = Math.max(
+          PPG_CONFIG.analysisWindow,
+          Math.ceil(PPG_CONFIG.minSamplesBeforePollSec * this.sampleRate),
+        );
+
+        if (this.totalSamplesPushed < reservoirSamplesRequired) {
+          if (!this.hasLoggedReservoirWait && PPG_CONFIG.debug.enabled) {
+            console.log('[PPGAnalyzer] Waiting for reservoir warm-up', {
+              pushedSamples: this.totalSamplesPushed,
+              reservoirSamplesRequired,
+            });
+          }
+          this.hasLoggedReservoirWait = true;
+          this.lastTickSummary = summary;
+          return summary;
+        }
+
+        this.reservoirReady = true;
+        summary.reservoirReady = true;
+        this.hasLoggedReservoirWait = false;
+        if (PPG_CONFIG.debug.enabled) {
+          console.log(
+            '[PPGAnalyzer] Reservoir ready; enabling native polling',
+            {
+              pushedSamples: this.totalSamplesPushed,
+            },
+          );
+        }
+      }
+
+      const analysisResult = await this.wrapper.poll();
+      summary.polled = true;
+
+      if (analysisResult && analysisResult.metrics) {
+        const {
+          metrics,
+          waveform_values = [],
+          waveform_timestamps = [],
+        } = analysisResult;
+
+        const sampleCount = Math.min(
+          waveform_values.length,
+          waveform_timestamps.length,
+        );
+
+        const waveformSnapshot = Array.from(
+          {length: sampleCount},
+          (_, index) => ({
+            value: waveform_values[index],
+            timestamp: Math.round(waveform_timestamps[index] * 1000),
+          }),
+        );
+
+        const newFrame: PPGAnalysisFrame = {
+          metrics,
+          waveform: waveformSnapshot,
+        };
+
+        this.onFrameCb(newFrame);
+        summary.emittedFrame = true;
+
+        if (metrics.bpm) {
+          this.onHeartRateUpdateCb({
+            bpm: metrics.bpm,
+            confidence: metrics.confidence ?? metrics.quality?.confidence ?? 0,
           });
         }
-        this.hasLoggedReservoirWait = true;
-        return;
       }
 
-      this.reservoirReady = true;
-      this.hasLoggedReservoirWait = false;
-      if (PPG_CONFIG.debug.enabled) {
-        console.log('[PPGAnalyzer] Reservoir ready; enabling native polling', {
-          pushedSamples: this.totalSamplesPushed,
-        });
-      }
-    }
-
-    // 2. Poll for a new analysis frame (after successfully pushing a full batch)
-    const analysisResult = await this.wrapper.poll();
-
-    // 3. If a new, complete frame is returned, pass it to the UI
-    if (analysisResult && analysisResult.metrics) {
-      // The result from C++ is the new source of truth.
-      // It contains the metrics AND the exact waveform snapshot used for the analysis.
-      const {
-        metrics,
-        waveform_values = [],
-        waveform_timestamps = [],
-      } = analysisResult;
-
-      // Combine the synchronized waveform data into the format the UI expects
-      const sampleCount = Math.min(
-        waveform_values.length,
-        waveform_timestamps.length,
-      );
-
-      const waveformSnapshot = Array.from({length: sampleCount}, (_, index) => ({
-        value: waveform_values[index],
-        timestamp: Math.round(waveform_timestamps[index] * 1000),
-      }));
-
-      const newFrame: PPGAnalysisFrame = {
-        metrics,
-        waveform: waveformSnapshot,
-      };
-
-      this.onFrameCb(newFrame);
-
-      if (metrics.bpm) {
-        this.onHeartRateUpdateCb({
-          bpm: metrics.bpm,
-          confidence: metrics.confidence ?? metrics.quality?.confidence ?? 0,
-        });
-      }
+      this.lastTickSummary = summary;
+      return summary;
+    } finally {
+      this.isProcessingTick = false;
     }
   }
 

@@ -1,0 +1,154 @@
+import React, {useCallback, useMemo, useState} from 'react';
+import {LayoutChangeEvent, StyleSheet, View} from 'react-native';
+import {Canvas, Path, Skia} from '@shopify/react-native-skia';
+
+type WaveformPoint = {
+  readonly value: number;
+  readonly timestamp: number;
+};
+
+type Props = {
+  readonly points: ReadonlyArray<WaveformPoint>;
+  readonly peaks?: ReadonlySet<number>;
+  readonly strokeColor?: string;
+  readonly peakColor?: string;
+  readonly strokeWidth?: number;
+};
+
+const PADDING_Y = 6;
+const PEAK_RADIUS = 3;
+
+const createWavePath = (
+  points: ReadonlyArray<WaveformPoint>,
+  width: number,
+  height: number,
+) => {
+  const path = Skia.Path.Make();
+  if (points.length === 0 || width <= 0 || height <= 0) {
+    return path;
+  }
+
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < points.length; i++) {
+    const v = points[i].value;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return path;
+  }
+  const span = max - min || 1;
+  const availableHeight = Math.max(1, height - PADDING_Y * 2);
+  const stepX = points.length === 1 ? 0 : width / (points.length - 1);
+
+  for (let i = 0; i < points.length; i++) {
+    const {value} = points[i];
+    const norm = (value - min) / span;
+    const x = stepX * i;
+    const y = height - PADDING_Y - norm * availableHeight;
+    if (i === 0) {
+      path.moveTo(x, y);
+    } else {
+      path.lineTo(x, y);
+    }
+  }
+  return path;
+};
+
+const createPeakPath = (
+  points: ReadonlyArray<WaveformPoint>,
+  peaks: ReadonlySet<number> | undefined,
+  width: number,
+  height: number,
+) => {
+  if (!peaks || peaks.size === 0 || points.length === 0) {
+    return null;
+  }
+  const path = Skia.Path.Make();
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < points.length; i++) {
+    const v = points[i].value;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return null;
+  }
+  const span = max - min || 1;
+  const availableHeight = Math.max(1, height - PADDING_Y * 2);
+  const stepX = points.length === 1 ? 0 : width / (points.length - 1);
+
+  for (let i = 0; i < points.length; i++) {
+    const point = points[i];
+    if (!peaks.has(point.timestamp)) {
+      continue;
+    }
+    const norm = (point.value - min) / span;
+    const x = stepX * i;
+    const y = height - PADDING_Y - norm * availableHeight;
+    path.addCircle(x, y, PEAK_RADIUS);
+  }
+  return path;
+};
+
+export function SkiaWaveform({
+  points,
+  peaks,
+  strokeColor = '#39d353',
+  peakColor = '#F44336',
+  strokeWidth = 2,
+}: Props): JSX.Element {
+  const [layout, setLayout] = useState({width: 0, height: 0});
+
+  const onLayout = useCallback((event: LayoutChangeEvent) => {
+    const {width, height} = event.nativeEvent.layout;
+    setLayout(prev => {
+      if (prev.width === width && prev.height === height) {
+        return prev;
+      }
+      return {width, height};
+    });
+  }, []);
+
+  const waveformPath = useMemo(
+    () => createWavePath(points, layout.width, layout.height),
+    [points, layout.height, layout.width],
+  );
+
+  const peakPath = useMemo(
+    () => createPeakPath(points, peaks, layout.width, layout.height),
+    [points, peaks, layout.height, layout.width],
+  );
+
+  const shouldRender = layout.width > 0 && layout.height > 0;
+
+  return (
+    <View style={styles.container} onLayout={onLayout}>
+      {shouldRender ? (
+        <Canvas style={StyleSheet.absoluteFill}>
+          <Path
+            path={waveformPath}
+            style="stroke"
+            color={strokeColor}
+            strokeWidth={strokeWidth}
+          />
+          {peakPath ? (
+            <Path path={peakPath} color={peakColor} style="fill" />
+          ) : null}
+        </Canvas>
+      ) : null}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+});
+
+export default SkiaWaveform;

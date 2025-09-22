@@ -204,6 +204,30 @@ export async function analyzeAsync(signal: number[] | Float64Array, fs: number, 
 	return Native.analyzeAsync(arr, fs, options ?? {});
 }
 
+export function analyzeTyped(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): HeartPyResult {
+	const {NativeModules} = require('react-native');
+	const Native: any = NativeModules?.HeartPyModule;
+	if (!Native?.analyzeTyped) {
+		throw new Error('HeartPyModule.analyzeTyped not available');
+	}
+	const arr = (signal instanceof Float64Array ? Array.from(signal) : signal) as number[];
+	return Native.analyzeTyped(arr, fs, options ?? {});
+}
+
+export async function analyzeAsyncTyped(
+	signal: number[] | Float64Array,
+	fs: number,
+	options?: HeartPyOptions,
+): Promise<HeartPyResult> {
+	const {NativeModules} = require('react-native');
+	const Native: any = NativeModules?.HeartPyModule;
+	if (!Native?.analyzeAsyncTyped) {
+		throw new Error('HeartPyModule.analyzeAsyncTyped not available');
+	}
+	const arr = (signal instanceof Float64Array ? Array.from(signal) : signal) as number[];
+	return Native.analyzeAsyncTyped(arr, fs, options ?? {});
+}
+
 export async function analyzeSegmentwiseAsync(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): Promise<HeartPyResult> {
 	const { NativeModules } = require('react-native');
 	const Native: any = NativeModules?.HeartPyModule;

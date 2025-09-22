@@ -183,6 +183,8 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
       roi: PPG_CONFIG.roiBoxPct,
       channel: PPG_CONFIG.ppgChannel,
       torch: requireTorch,
+      simdEnabled: PPG_CONFIG.camera.simdEnabled,
+      performanceLogging: PPG_CONFIG.camera.performanceLogging,
     }),
     [requireTorch],
   );

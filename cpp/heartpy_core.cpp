@@ -10,6 +10,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdarg>
+#include <mutex>
+#include <unordered_map>
 #if defined(__ANDROID__)
 #include <android/log.h>
 #endif
@@ -71,6 +73,72 @@ static void logAnalyze(const char* fmt, ...) {
 #endif
     va_end(args);
 }
+
+#if defined(USE_ACCELERATE_FFT)
+class FFTSetupCache {
+public:
+    FFTSetupD acquire(int nfft) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = cache_.find(nfft);
+        if (it != cache_.end()) {
+            return it->second;
+        }
+        FFTSetupD setup = vDSP_create_fftsetupD(
+            static_cast<vDSP_Length>(std::log2(nfft)),
+            kFFTRadix2);
+        cache_[nfft] = setup;
+        logWelchGuard("Created FFTSetupD cache entry (nfft=%d)", nfft);
+        return setup;
+    }
+
+    ~FFTSetupCache() {
+        for (auto& entry : cache_) {
+            if (entry.second) {
+                vDSP_destroy_fftsetupD(entry.second);
+            }
+        }
+    }
+
+private:
+    std::mutex mutex_;
+    std::unordered_map<int, FFTSetupD> cache_;
+};
+
+static FFTSetupCache& getFFTSetupCache() {
+    static FFTSetupCache cache;
+    return cache;
+}
+#elif defined(USE_KISSFFT)
+class KissFftCache {
+public:
+    kiss_fftr_cfg acquire(int nfft) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto [it, inserted] = cache_.emplace(nfft, nullptr);
+        if (inserted || it->second == nullptr) {
+            it->second = kiss_fftr_alloc(nfft, 0, nullptr, nullptr);
+            logWelchGuard("Created kiss_fftr_cfg cache entry (nfft=%d)", nfft);
+        }
+        return it->second;
+    }
+
+    ~KissFftCache() {
+        for (auto& entry : cache_) {
+            if (entry.second) {
+                kiss_fftr_free(entry.second);
+            }
+        }
+    }
+
+private:
+    std::mutex mutex_;
+    std::unordered_map<int, kiss_fftr_cfg> cache_;
+};
+
+static KissFftCache& getKissFftCache() {
+    static KissFftCache cache;
+    return cache;
+}
+#endif
 
 // fwd decl
 static std::vector<int> quotientFilterMask(const std::vector<double>& rr, const std::vector<int>& base_mask, int iterations = 2);
@@ -352,6 +420,14 @@ PSDResult welchPSD(const std::vector<double>& x, double fs, int nfft, double ove
         logWelchGuard("Adjusted Welch params: nfft %d -> %d, overlap %.3f -> %.3f, nseg=%d, n=%d", originalNfft, workingNfft, originalOverlap, workingOverlap, nseg, n);
     }
 
+    // Enforce a lower bound on usable nfft for PSD stability
+    constexpr int kWelchMinimumUsableNfft = 64;
+    if (workingNfft < kWelchMinimumUsableNfft) {
+        g_welchGuardFailureCount.fetch_add(1);
+        logWelchGuard("Rejecting Welch params: nfft=%d < %d (n=%d)", workingNfft, kWelchMinimumUsableNfft, n);
+        return {{}, {}};
+    }
+
     nfft = workingNfft;
     overlap = workingOverlap;
 
@@ -374,9 +450,7 @@ PSDResult welchPSD(const std::vector<double>& x, double fs, int nfft, double ove
     if (useFFT) {
 #ifdef USE_ACCELERATE_FFT
         // Use Accelerate vDSP double-precision split-complex FFT if available
-        #include <TargetConditionals.h>
-        #include <Accelerate/Accelerate.h>
-        FFTSetupD setup = vDSP_create_fftsetupD(static_cast<vDSP_Length>(std::log2(nfft)), kFFTRadix2);
+        FFTSetupD setup = getFFTSetupCache().acquire(nfft);
         std::vector<double> real(nfft), imag(nfft, 0.0);
         DSPDoubleSplitComplex split{real.data(), imag.data()};
         for (int s = 0; s < nseg; ++s) {
@@ -404,9 +478,8 @@ PSDResult welchPSD(const std::vector<double>& x, double fs, int nfft, double ove
                 P[k] += Pseg;
             }
         }
-        vDSP_destroy_fftsetupD(setup);
 #elif defined(USE_KISSFFT)
-        kiss_fftr_cfg cfg = kiss_fftr_alloc(nfft, 0, NULL, NULL);
+        kiss_fftr_cfg cfg = getKissFftCache().acquire(nfft);
         std::vector<float> in(nfft);
         std::vector<kiss_fft_cpx> out(kmax);
         for (int s = 0; s < nseg; ++s) {
@@ -446,7 +519,6 @@ PSDResult welchPSD(const std::vector<double>& x, double fs, int nfft, double ove
                 P[k] += Pseg;
             }
         }
-        kiss_fftr_free(cfg);
 #else
         std::vector<std::complex<double>> buf(nfft);
         for (int s = 0; s < nseg; ++s) {

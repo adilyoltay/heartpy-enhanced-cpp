@@ -4,36 +4,76 @@ import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import Sound from 'react-native-sound';
 import {PPG_CONFIG} from '../core/PPGConfig';
 import type {PPGAnalysisFrame, PPGState} from '../types/PPGTypes';
+import SkiaWaveform from './SkiaWaveform';
 
 const HEARTBEAT_SOUND = require('../../assets/sounds/heartbeat.wav');
 
 // Bu component artık doğrudan C++'tan gelen senkronize edilmiş
 // dalga formu snapshot'ını render eder.
+type Props = {
+  data: PPGAnalysisFrame; // Gelen veri artık tam bir analiz çerçevesi
+  state: PPGState;
+  onStart: () => void;
+  onStop: () => void;
+  snrMetrics?: {
+    nativeSnrCount: number;
+    fallbackSnrCount: number;
+    invalidSnrCount: number;
+    snrHistory: number[];
+    snrThresholdCrossings: {
+      poor: number;
+      ui: number;
+      haptic: number;
+      reliable: number;
+    };
+  }; // SNR debug metrics (optional)
+};
 
-  type Props = {
-    data: PPGAnalysisFrame; // Gelen veri artık tam bir analiz çerçevesi
-    state: PPGState;
-    onStart: () => void;
-    onStop: () => void;
-    snrMetrics?: {
-      nativeSnrCount: number;
-      fallbackSnrCount: number;
-      invalidSnrCount: number;
-      snrHistory: number[];
-      snrThresholdCrossings: {
-        poor: number;
-        ui: number;
-        haptic: number;
-        reliable: number;
-      };
-    }; // SNR debug metrics (optional)
-  };
+const MAX_WAVEFORM_POINTS = 240;
 
-const MAX_WAVEFORM_BARS = 120;
+const MetricCard = React.memo(
+  ({label, value}: {label: string; value: string}) => (
+    <View style={styles.metricBox}>
+      <Text style={styles.metricLabel}>{label}</Text>
+      <Text style={styles.metricValue}>{value}</Text>
+    </View>
+  ),
+  (prev, next) => prev.label === next.label && prev.value === next.value,
+);
 
-export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): JSX.Element {
+const PPGDisplayComponent = ({
+  data,
+  state,
+  onStart,
+  onStop,
+  snrMetrics,
+}: Props): JSX.Element => {
   const {metrics, waveform} = data;
-  const bpmDisplay = metrics?.bpm ? metrics.bpm.toFixed(1) : '--';
+
+  const renderStatsRef = useRef({
+    count: 0,
+    lastLoggedCount: 0,
+    lastLogTs: Date.now(),
+  });
+  renderStatsRef.current.count += 1;
+
+  useEffect(() => {
+    if (!PPG_CONFIG.debug.enabled) {
+      return;
+    }
+    const now = Date.now();
+    const elapsed = now - renderStatsRef.current.lastLogTs;
+    if (elapsed >= 1_000) {
+      const rendersSince =
+        renderStatsRef.current.count - renderStatsRef.current.lastLoggedCount;
+      console.log('[PPGDisplay] Render cadence', {
+        rendersSince,
+        elapsedMs: elapsed,
+      });
+      renderStatsRef.current.lastLoggedCount = renderStatsRef.current.count;
+      renderStatsRef.current.lastLogTs = now;
+    }
+  });
 
   // --- GÜNCEL HAPTIC MANTIĞI ---
   const lastHapticPeakTsRef = useRef<number>(0);
@@ -50,7 +90,7 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
 
   // Heartbeat sound'u yükle
   useEffect(() => {
-    const sound = new Sound(HEARTBEAT_SOUND, undefined, (error) => {
+    const sound = new Sound(HEARTBEAT_SOUND, undefined, error => {
       if (error) {
         console.warn('[PPGDisplay] Heartbeat sound yüklenemedi', error);
         setAudioLoaded(false);
@@ -93,14 +133,21 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
       warmupActive?: boolean;
       sampleCount?: number | null;
     };
-    const sanitizedSnrDb = typeof snrDebug?.sanitizedSnrDb === 'number'
-      ? snrDebug.sanitizedSnrDb
-      : (metrics.snrDb ?? -10);
-    const originalSnrDb = typeof snrDebug?.originalSnrDb === 'number' ? snrDebug.originalSnrDb : null;
+    const sanitizedSnrDb =
+      typeof snrDebug?.sanitizedSnrDb === 'number'
+        ? snrDebug.sanitizedSnrDb
+        : (metrics.snrDb ?? -10);
+    const originalSnrDb =
+      typeof snrDebug?.originalSnrDb === 'number'
+        ? snrDebug.originalSnrDb
+        : null;
     const snrFallbackUsed = !!snrDebug?.isFallbackUsed;
 
-    const resolvedSignalQuality = (metrics?.signalQuality ?? metrics?.quality?.signalQuality ?? 'unknown') as string;
-    const confidenceOk = (metrics.confidence ?? 0) >= PPG_CONFIG.hapticMinConfidence;
+    const resolvedSignalQuality = (metrics?.signalQuality ??
+      metrics?.quality?.signalQuality ??
+      'unknown') as string;
+    const confidenceOk =
+      (metrics.confidence ?? 0) >= PPG_CONFIG.hapticMinConfidence;
     const snrOk = sanitizedSnrDb > PPG_CONFIG.snrDbThresholdHaptic;
     const qualityOk = resolvedSignalQuality === 'good';
     const isReliableForHaptic = confidenceOk && snrOk && qualityOk;
@@ -198,26 +245,30 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
       return;
     }
 
-    console.log('[PPGDisplay] HAPTIC TRIGGERED for peak timestamp:', latestPeakTs, {
-      pollId,
-      pollTimestamp,
-      pollToTriggerMs,
-      confidence: metrics.confidence,
-      snrDb: sanitizedSnrDb,
-      originalSnrDb,
-      snrFallbackUsed,
-      snrFallbackRatioPct: snrDebug.fallbackRatioPct,
-      snrFallbackReason: snrDebug.fallbackReason,
-      f0Hz: snrDebug.f0Hz,
-      hardFallbackActive: snrDebug.hardFallbackActive,
-      warmupActive: snrDebug.warmupActive,
-      snrSampleCount: snrDebug.sampleCount,
-      signalQuality: resolvedSignalQuality,
-      timeSinceLast: timeSinceLastTrigger,
-      debounceMs: MIN_INTERVAL_MS,
-      peakDeltaMs,
-      deviceNow: now,
-    });
+    console.log(
+      '[PPGDisplay] HAPTIC TRIGGERED for peak timestamp:',
+      latestPeakTs,
+      {
+        pollId,
+        pollTimestamp,
+        pollToTriggerMs,
+        confidence: metrics.confidence,
+        snrDb: sanitizedSnrDb,
+        originalSnrDb,
+        snrFallbackUsed,
+        snrFallbackRatioPct: snrDebug.fallbackRatioPct,
+        snrFallbackReason: snrDebug.fallbackReason,
+        f0Hz: snrDebug.f0Hz,
+        hardFallbackActive: snrDebug.hardFallbackActive,
+        warmupActive: snrDebug.warmupActive,
+        snrSampleCount: snrDebug.sampleCount,
+        signalQuality: resolvedSignalQuality,
+        timeSinceLast: timeSinceLastTrigger,
+        debounceMs: MIN_INTERVAL_MS,
+        peakDeltaMs,
+        deviceNow: now,
+      },
+    );
 
     // Haptic feedback
     console.log('[PPGDisplay] ReactNativeHapticFeedback.trigger', {
@@ -237,7 +288,7 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
         duration: heartSound.getDuration ? heartSound.getDuration() : undefined,
       });
       heartSound.stop(() => {
-        heartSound.play((success) => {
+        heartSound.play(success => {
           if (success) {
             console.log('[PPGDisplay] Heartbeat sound çalındı');
           } else {
@@ -264,90 +315,86 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
   }, [metrics]);
 
   const displayWaveform = useMemo(() => {
-    if (!waveform || waveform.length <= MAX_WAVEFORM_BARS) {
+    if (!waveform || waveform.length <= MAX_WAVEFORM_POINTS) {
       return waveform;
     }
-    const stride = Math.ceil(waveform.length / MAX_WAVEFORM_BARS);
+    const stride = Math.ceil(waveform.length / MAX_WAVEFORM_POINTS);
     const sampled: typeof waveform = [] as typeof waveform;
     for (let i = 0; i < waveform.length; i += stride) {
       sampled.push(waveform[i]);
-      if (sampled.length >= MAX_WAVEFORM_BARS) {
+      if (sampled.length >= MAX_WAVEFORM_POINTS) {
         break;
       }
     }
     return sampled;
   }, [waveform]);
 
-  // Dalga formu verisindeki min/max değerlerini hesapla
-  const values = displayWaveform.map(i => i.value);
-  const min = values.length ? Math.min(...values) : 0;
-  const max = values.length ? Math.max(...values) : 0;
-  const span = max - min || 1;
+  const waveformPoints = displayWaveform ?? [];
+
+  useEffect(() => {
+    if (PPG_CONFIG.debug.enableSchedulerLogging) {
+      console.log('[PPGDisplay] Waveform sample count', {
+        points: waveformPoints.length,
+      });
+    }
+  }, [waveformPoints.length]);
+
+  const metricsViewModel = useMemo(() => {
+    const bpm = metrics?.bpm;
+    const snr = metrics?.snrDb ?? metrics?.quality?.snrDb;
+    const confidence = metrics?.confidence ?? metrics?.quality?.confidence;
+    return {
+      bpm: bpm != null ? bpm.toFixed(1) : '--',
+      snr: snr != null ? snr.toFixed(2) : '--',
+      confidence: confidence != null ? confidence.toFixed(2) : '--',
+    };
+  }, [
+    metrics?.bpm,
+    metrics?.confidence,
+    metrics?.quality?.confidence,
+    metrics?.quality?.snrDb,
+    metrics?.snrDb,
+  ]);
 
   return (
     <View style={styles.container}>
-        <View style={styles.metricsRow}>
-          <Metric label="BPM" value={bpmDisplay} />
-          <Metric
-            label="SNR (dB)"
-            value={metrics?.snrDb?.toFixed(2) ?? '--'}
-          />
-          <Metric
-            label="Confidence"
-            value={metrics?.confidence?.toFixed(2) ?? '--'}
-          />
-        </View>
+      <View style={styles.metricsRow}>
+        <MetricCard label="BPM" value={metricsViewModel.bpm} />
+        <MetricCard label="SNR (dB)" value={metricsViewModel.snr} />
+        <MetricCard label="Confidence" value={metricsViewModel.confidence} />
+      </View>
 
-        {/* SNR Debug Metrics (only in debug mode) */}
-        {__DEV__ && snrMetrics && (
-          <View style={styles.debugMetricsContainer}>
-            <Text style={styles.debugTitle}>SNR Debug Metrics</Text>
-            <View style={styles.debugMetricsRow}>
-              <Metric
-                label="Native"
-                value={snrMetrics.nativeSnrCount.toString()}
-              />
-              <Metric
-                label="Fallback"
-                value={`${snrMetrics.fallbackSnrCount} (${snrMetrics.nativeSnrCount > 0 ? ((snrMetrics.fallbackSnrCount / (snrMetrics.nativeSnrCount + snrMetrics.fallbackSnrCount)) * 100).toFixed(1) : 0}%)`}
-              />
-              <Metric
-                label="Invalid"
-                value={snrMetrics.invalidSnrCount.toString()}
-              />
-            </View>
-            <View style={styles.thresholdMetricsRow}>
-              <Text style={styles.thresholdText}>
-                Thresholds: Poor({snrMetrics.snrThresholdCrossings.poor}) |
-                UI({snrMetrics.snrThresholdCrossings.ui}) |
-                Haptic({snrMetrics.snrThresholdCrossings.haptic}) |
-                Reliable({snrMetrics.snrThresholdCrossings.reliable})
-              </Text>
-            </View>
+      {/* SNR Debug Metrics (only in debug mode) */}
+      {__DEV__ && snrMetrics && (
+        <View style={styles.debugMetricsContainer}>
+          <Text style={styles.debugTitle}>SNR Debug Metrics</Text>
+          <View style={styles.debugMetricsRow}>
+            <MetricCard
+              label="Native"
+              value={snrMetrics.nativeSnrCount.toString()}
+            />
+            <MetricCard
+              label="Fallback"
+              value={`${snrMetrics.fallbackSnrCount} (${snrMetrics.nativeSnrCount > 0 ? ((snrMetrics.fallbackSnrCount / (snrMetrics.nativeSnrCount + snrMetrics.fallbackSnrCount)) * 100).toFixed(1) : 0}%)`}
+            />
+            <MetricCard
+              label="Invalid"
+              value={snrMetrics.invalidSnrCount.toString()}
+            />
           </View>
-        )}
+          <View style={styles.thresholdMetricsRow}>
+            <Text style={styles.thresholdText}>
+              Thresholds: Poor({snrMetrics.snrThresholdCrossings.poor}) | UI(
+              {snrMetrics.snrThresholdCrossings.ui}) | Haptic(
+              {snrMetrics.snrThresholdCrossings.haptic}) | Reliable(
+              {snrMetrics.snrThresholdCrossings.reliable})
+            </Text>
+          </View>
+        </View>
+      )}
 
       <View style={styles.waveform}>
-        {/*
-          Doğrudan C++'tan gelen senkronize dalga formunu render et.
-          Artık .slice() işlemine gerek yok.
-        */}
-        {displayWaveform.map((item, index) => {
-          // Bu bar'ın zaman damgası, tepe noktası set'inde var mı?
-          const isPickPoint = peakTimestampSet.has(item.timestamp);
-          const height = ((item.value - min) / span) * 100 + 2;
-
-          return (
-            <View
-              key={index} // index burada key olarak güvenli çünkü dizi her render'da yeniden yaratılıyor
-              style={[
-                styles.waveformBar,
-                {height},
-                isPickPoint && styles.waveformBarPick,
-              ]}
-            />
-          );
-        })}
+        <SkiaWaveform points={waveformPoints} peaks={peakTimestampSet} />
       </View>
 
       <View style={styles.controls}>
@@ -374,77 +421,64 @@ export function PPGDisplay({data, state, onStart, onStop, snrMetrics}: Props): J
       </View>
     </View>
   );
-}
+};
 
-function Metric({label, value}: {label: string; value: string}) {
-  return (
-    <View style={styles.metricBox}>
-      <Text style={styles.metricLabel}>{label}</Text>
-      <Text style={styles.metricValue}>{value}</Text>
-    </View>
-  );
-}
+export const PPGDisplay = React.memo(PPGDisplayComponent);
 
-  const styles = StyleSheet.create({
-    container: {gap: 16, flex: 1, justifyContent: 'center'},
-    metricsRow: {flexDirection: 'row', justifyContent: 'space-around'},
-    metricBox: {
-      padding: 12,
-      borderRadius: 12,
-      backgroundColor: '#111',
-      alignItems: 'center',
-      minWidth: 80,
-    },
-    metricLabel: {color: '#ccc', fontSize: 12, marginBottom: 4},
-    metricValue: {color: '#fff', fontSize: 28, fontWeight: '600'},
-    waveform: {
-      height: 120,
-      borderRadius: 12,
-      backgroundColor: '#1d1d1d',
-      flexDirection: 'row',
-      alignItems: 'flex-end',
-      paddingHorizontal: 4,
-      overflow: 'hidden',
-    },
-    waveformBar: {
-      width: 2,
-      backgroundColor: '#39d353',
-      borderRadius: 1,
-      marginRight: 1,
-    },
-    waveformBarPick: {backgroundColor: '#F44336'},
-    controls: {flexDirection: 'row', gap: 12},
-    button: {flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center'},
-    buttonText: {color: '#fff', fontSize: 16, fontWeight: '600'},
-    startButton: {backgroundColor: '#4caf50'},
-    stopButton: {backgroundColor: '#f44336'},
-    buttonDisabled: {opacity: 0.4},
-    // Debug styles
-    debugMetricsContainer: {
-      padding: 12,
-      borderRadius: 8,
-      backgroundColor: '#1a1a1a',
-      marginTop: 8,
-    },
-    debugTitle: {
-      color: '#fff',
-      fontSize: 14,
-      fontWeight: '600',
-      marginBottom: 8,
-      textAlign: 'center',
-    },
-    debugMetricsRow: {
-      flexDirection: 'row',
-      justifyContent: 'space-around',
-      marginBottom: 4,
-    },
-    thresholdMetricsRow: {
-      marginTop: 4,
-    },
-    thresholdText: {
-      color: '#888',
-      fontSize: 10,
-      textAlign: 'center',
-      flexWrap: 'wrap',
-    },
-  });
+const styles = StyleSheet.create({
+  container: {gap: 16, flex: 1, justifyContent: 'center'},
+  metricsRow: {flexDirection: 'row', justifyContent: 'space-around'},
+  metricBox: {
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#111',
+    alignItems: 'center',
+    minWidth: 80,
+  },
+  metricLabel: {color: '#ccc', fontSize: 12, marginBottom: 4},
+  metricValue: {color: '#fff', fontSize: 28, fontWeight: '600'},
+  waveform: {
+    height: 120,
+    borderRadius: 12,
+    backgroundColor: '#1d1d1d',
+    overflow: 'hidden',
+  },
+  controls: {flexDirection: 'row', gap: 12},
+  button: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  buttonText: {color: '#fff', fontSize: 16, fontWeight: '600'},
+  startButton: {backgroundColor: '#4caf50'},
+  stopButton: {backgroundColor: '#f44336'},
+  buttonDisabled: {opacity: 0.4},
+  debugMetricsContainer: {
+    padding: 12,
+    borderRadius: 8,
+    backgroundColor: '#1a1a1a',
+    marginTop: 8,
+  },
+  debugTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  debugMetricsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginBottom: 4,
+  },
+  thresholdMetricsRow: {
+    marginTop: 4,
+  },
+  thresholdText: {
+    color: '#888',
+    fontSize: 10,
+    textAlign: 'center',
+    flexWrap: 'wrap',
+  },
+});

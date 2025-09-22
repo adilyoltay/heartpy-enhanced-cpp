@@ -158,6 +158,8 @@ private:
     std::vector<double> m_timestamps;
     std::vector<float> filt_;
     std::vector<float> displayBuf_; // downsampled view for UI
+    std::vector<double> pollWindowBuffer_;
+    std::vector<double> pollTimestampBuffer_;
     std::vector<SBiquad> bq_;
     std::vector<SBiquadD> bqD_;
     // Optional ring storage (when opt_.useRingBuffer == true)

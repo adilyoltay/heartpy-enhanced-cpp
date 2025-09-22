@@ -120,6 +120,100 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
     private static native void installJSIHybrid(long runtimePtr);
     private static native void setZeroCopyEnabledNative(boolean enabled);
     private static native long[] getJSIStatsNative();
+    private static native HeartMetricsTyped analyzeNativeTyped(
+            double[] signal, double fs,
+            double lowHz, double highHz, int order,
+            int nfft, double overlap, double welchWsizeSec,
+            double refractoryMs, double thresholdScale, double bpmMin, double bpmMax,
+            boolean interpClipping, double clippingThreshold,
+            boolean hampelCorrect, int hampelWindow, double hampelThreshold,
+            boolean removeBaselineWander, boolean enhancePeaks,
+            boolean highPrecision, double highPrecisionFs,
+            boolean rejectSegmentwise, double segmentRejectThreshold, int segmentRejectMaxRejects, int segmentRejectWindowBeats, double segmentRejectOverlap,
+            boolean cleanRR, int cleanMethod,
+            double segmentWidth, double segmentOverlap, double segmentMinSize, boolean replaceOutliers,
+            double rrSplineS, double rrSplineTargetSse, double rrSplineSmooth,
+            boolean breathingAsBpm,
+            int sdsdMode,
+            int poincareMode,
+            boolean pnnAsPercent,
+            double snrTauSec, double snrActiveTauSec,
+            boolean adaptivePsd,
+            boolean thresholdRR,
+            boolean calcFreq,
+            int filterMode
+    );
+
+    static final class QualityTyped {
+        QualityTyped() {}
+        double totalBeats;
+        double rejectedBeats;
+        double rejectionRate;
+        boolean goodQuality;
+        double snrDb;
+        double confidence;
+        double f0Hz;
+        double maPercActive;
+        double doublingFlag;
+        double softDoublingFlag;
+        double doublingHintFlag;
+        double hardFallbackActive;
+        double rrFallbackModeActive;
+        double snrWarmupActive;
+        double snrSampleCount;
+        double refractoryMsActive;
+        double minRRBoundMs;
+        double pairFrac;
+        double rrShortFrac;
+        double rrLongMs;
+        double pHalfOverFund;
+        String qualityWarning;
+    }
+
+    static final class BinarySegmentTyped {
+        BinarySegmentTyped() {}
+        int index;
+        int startBeat;
+        int endBeat;
+        int totalBeats;
+        int rejectedBeats;
+        boolean accepted;
+    }
+
+    static final class HeartMetricsTyped {
+        HeartMetricsTyped() {}
+        double bpm;
+        double sdnn;
+        double rmssd;
+        double sdsd;
+        double pnn20;
+        double pnn50;
+        double nn20;
+        double nn50;
+        double mad;
+        double sd1;
+        double sd2;
+        double sd1sd2Ratio;
+        double ellipseArea;
+        double vlf;
+        double lf;
+        double hf;
+        double lfhf;
+        double totalPower;
+        double lfNorm;
+        double hfNorm;
+        double breathingRate;
+        double[] ibiMs;
+        double[] rrList;
+        int[] peakList;
+        int[] peakListRaw;
+        int[] binaryPeakMask;
+        double[] peakTimestamps;
+        double[] waveform_values;
+        double[] waveform_timestamps;
+        BinarySegmentTyped[] binarySegments;
+        QualityTyped quality;
+    }
 
     // ---------- Step 0: Risk mitigation flags & profiling ----------
     private static volatile boolean CFG_JSI_ENABLED = true;
@@ -380,6 +474,136 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         return out;
     }
 
+    private static com.facebook.react.bridge.WritableArray doublesToWritable(double[] values) {
+        com.facebook.react.bridge.WritableArray out = com.facebook.react.bridge.Arguments.createArray();
+        if (values != null) {
+            for (double v : values) {
+                out.pushDouble(v);
+            }
+        }
+        return out;
+    }
+
+    private static com.facebook.react.bridge.WritableArray intsToWritable(int[] values) {
+        com.facebook.react.bridge.WritableArray out = com.facebook.react.bridge.Arguments.createArray();
+        if (values != null) {
+            for (int v : values) {
+                out.pushInt(v);
+            }
+        }
+        return out;
+    }
+
+    private static com.facebook.react.bridge.WritableArray binarySegmentsToWritable(BinarySegmentTyped[] segments) {
+        com.facebook.react.bridge.WritableArray out = com.facebook.react.bridge.Arguments.createArray();
+        if (segments != null) {
+            for (BinarySegmentTyped seg : segments) {
+                if (seg == null) continue;
+                com.facebook.react.bridge.WritableMap item = com.facebook.react.bridge.Arguments.createMap();
+                item.putInt("index", seg.index);
+                item.putInt("startBeat", seg.startBeat);
+                item.putInt("endBeat", seg.endBeat);
+                item.putInt("totalBeats", seg.totalBeats);
+                item.putInt("rejectedBeats", seg.rejectedBeats);
+                item.putBoolean("accepted", seg.accepted);
+                out.pushMap(item);
+            }
+        }
+        return out;
+    }
+
+    private static com.facebook.react.bridge.WritableMap qualityToWritable(QualityTyped quality) {
+        com.facebook.react.bridge.WritableMap map = com.facebook.react.bridge.Arguments.createMap();
+        if (quality == null) {
+            map.putDouble("totalBeats", 0.0);
+            map.putDouble("rejectedBeats", 0.0);
+            map.putDouble("rejectionRate", 0.0);
+            map.putBoolean("goodQuality", true);
+            map.putDouble("snrDb", 0.0);
+            map.putDouble("confidence", 0.0);
+            map.putDouble("f0Hz", 0.0);
+            map.putDouble("maPercActive", 0.0);
+            map.putDouble("doublingFlag", 0.0);
+            map.putDouble("softDoublingFlag", 0.0);
+            map.putDouble("doublingHintFlag", 0.0);
+            map.putDouble("hardFallbackActive", 0.0);
+            map.putDouble("rrFallbackModeActive", 0.0);
+            map.putDouble("snrWarmupActive", 0.0);
+            map.putDouble("snrSampleCount", 0.0);
+            map.putDouble("refractoryMsActive", 0.0);
+            map.putDouble("minRRBoundMs", 0.0);
+            map.putDouble("pairFrac", 0.0);
+            map.putDouble("rrShortFrac", 0.0);
+            map.putDouble("rrLongMs", 0.0);
+            map.putDouble("pHalfOverFund", 0.0);
+            return map;
+        }
+        map.putDouble("totalBeats", quality.totalBeats);
+        map.putDouble("rejectedBeats", quality.rejectedBeats);
+        map.putDouble("rejectionRate", quality.rejectionRate);
+        map.putBoolean("goodQuality", quality.goodQuality);
+        map.putDouble("snrDb", quality.snrDb);
+        map.putDouble("confidence", quality.confidence);
+        map.putDouble("f0Hz", quality.f0Hz);
+        map.putDouble("maPercActive", quality.maPercActive);
+        map.putDouble("doublingFlag", quality.doublingFlag);
+        map.putDouble("softDoublingFlag", quality.softDoublingFlag);
+        map.putDouble("doublingHintFlag", quality.doublingHintFlag);
+        map.putDouble("hardFallbackActive", quality.hardFallbackActive);
+        map.putDouble("rrFallbackModeActive", quality.rrFallbackModeActive);
+        map.putDouble("snrWarmupActive", quality.snrWarmupActive);
+        map.putDouble("snrSampleCount", quality.snrSampleCount);
+        map.putDouble("refractoryMsActive", quality.refractoryMsActive);
+        map.putDouble("minRRBoundMs", quality.minRRBoundMs);
+        map.putDouble("pairFrac", quality.pairFrac);
+        map.putDouble("rrShortFrac", quality.rrShortFrac);
+        map.putDouble("rrLongMs", quality.rrLongMs);
+        map.putDouble("pHalfOverFund", quality.pHalfOverFund);
+        if (quality.qualityWarning != null && !quality.qualityWarning.isEmpty()) {
+            map.putString("qualityWarning", quality.qualityWarning);
+        }
+        return map;
+    }
+
+    private static com.facebook.react.bridge.WritableMap typedToWritableMap(HeartMetricsTyped metrics) {
+        if (metrics == null) {
+            return com.facebook.react.bridge.Arguments.createMap();
+        }
+        com.facebook.react.bridge.WritableMap map = com.facebook.react.bridge.Arguments.createMap();
+        map.putDouble("bpm", metrics.bpm);
+        map.putDouble("sdnn", metrics.sdnn);
+        map.putDouble("rmssd", metrics.rmssd);
+        map.putDouble("sdsd", metrics.sdsd);
+        map.putDouble("pnn20", metrics.pnn20);
+        map.putDouble("pnn50", metrics.pnn50);
+        map.putDouble("nn20", metrics.nn20);
+        map.putDouble("nn50", metrics.nn50);
+        map.putDouble("mad", metrics.mad);
+        map.putDouble("sd1", metrics.sd1);
+        map.putDouble("sd2", metrics.sd2);
+        map.putDouble("sd1sd2Ratio", metrics.sd1sd2Ratio);
+        map.putDouble("ellipseArea", metrics.ellipseArea);
+        map.putDouble("vlf", metrics.vlf);
+        map.putDouble("lf", metrics.lf);
+        map.putDouble("hf", metrics.hf);
+        map.putDouble("lfhf", metrics.lfhf);
+        map.putDouble("totalPower", metrics.totalPower);
+        map.putDouble("lfNorm", metrics.lfNorm);
+        map.putDouble("hfNorm", metrics.hfNorm);
+        map.putDouble("breathingRate", metrics.breathingRate);
+        map.putArray("ibiMs", doublesToWritable(metrics.ibiMs));
+        map.putArray("rrList", doublesToWritable(metrics.rrList));
+        map.putArray("peakList", intsToWritable(metrics.peakList));
+        map.putArray("peakListRaw", intsToWritable(metrics.peakListRaw));
+        map.putArray("binaryPeakMask", intsToWritable(metrics.binaryPeakMask));
+        map.putArray("peakTimestamps", doublesToWritable(metrics.peakTimestamps));
+        map.putArray("waveform_values", doublesToWritable(metrics.waveform_values));
+        map.putArray("waveform_timestamps", doublesToWritable(metrics.waveform_timestamps));
+        map.putMap("quality", qualityToWritable(metrics.quality));
+        map.putArray("binarySegments", binarySegmentsToWritable(metrics.binarySegments));
+        return map;
+    }
+
     private static class Opts {
         double lowHz=0.5, highHz=5.0; int order=2; int nfft=256; double overlap=0.5; double wsizeSec=240.0;
         double refractoryMs=250.0, thresholdScale=0.5, bpmMin=40.0, bpmMax=180.0;
@@ -498,6 +722,69 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
         if (options.hasKey("snrActiveTauSec")) o.snrActiveTauSec = options.getDouble("snrActiveTauSec");
         if (options.hasKey("adaptivePsd")) o.adaptivePsd = options.getBoolean("adaptivePsd");
         return o;
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableMap analyzeTyped(double[] signal, double fs,
+                                                              com.facebook.react.bridge.ReadableMap options) {
+        Opts o = parseOptions(options);
+        HeartMetricsTyped metrics = analyzeNativeTyped(signal, fs,
+                o.lowHz, o.highHz, o.order,
+                o.nfft, o.overlap, o.wsizeSec,
+                o.refractoryMs, o.thresholdScale, o.bpmMin, o.bpmMax,
+                o.interpClipping, o.clippingThreshold,
+                o.hampelCorrect, o.hampelWindow, o.hampelThreshold,
+                o.removeBaselineWander, o.enhancePeaks,
+                o.highPrecision, o.highPrecisionFs,
+                o.rejectSegmentwise, o.segmentRejectThreshold, o.segmentRejectMaxRejects, o.segmentRejectWindowBeats, o.segmentRejectOverlap,
+                o.cleanRR, o.cleanMethod,
+                o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
+                o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
+                o.breathingAsBpm,
+                o.sdsdMode,
+                o.poincareMode,
+                o.pnnAsPercent,
+                o.snrTauSec, o.snrActiveTauSec,
+                o.adaptivePsd,
+                o.thresholdRR,
+                o.calcFreq,
+                o.filterMode);
+        return typedToWritableMap(metrics);
+    }
+
+    @ReactMethod
+    public void analyzeAsyncTyped(double[] signal, double fs,
+                                  com.facebook.react.bridge.ReadableMap options,
+                                  com.facebook.react.bridge.Promise promise) {
+        new Thread(() -> {
+            try {
+                Opts o = parseOptions(options);
+                HeartMetricsTyped metrics = analyzeNativeTyped(signal, fs,
+                        o.lowHz, o.highHz, o.order,
+                        o.nfft, o.overlap, o.wsizeSec,
+                        o.refractoryMs, o.thresholdScale, o.bpmMin, o.bpmMax,
+                        o.interpClipping, o.clippingThreshold,
+                        o.hampelCorrect, o.hampelWindow, o.hampelThreshold,
+                        o.removeBaselineWander, o.enhancePeaks,
+                        o.highPrecision, o.highPrecisionFs,
+                        o.rejectSegmentwise, o.segmentRejectThreshold, o.segmentRejectMaxRejects, o.segmentRejectWindowBeats, o.segmentRejectOverlap,
+                        o.cleanRR, o.cleanMethod,
+                        o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
+                        o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
+                        o.breathingAsBpm,
+                        o.sdsdMode,
+                        o.poincareMode,
+                        o.pnnAsPercent,
+                        o.snrTauSec, o.snrActiveTauSec,
+                        o.adaptivePsd,
+                        o.thresholdRR,
+                        o.calcFreq,
+                        o.filterMode);
+                promise.resolve(typedToWritableMap(metrics));
+            } catch (Exception e) {
+                promise.reject("analyzeTyped_error", e);
+            }
+        }).start();
     }
 
     @ReactMethod(isBlockingSynchronousMethod = true)

@@ -825,11 +825,19 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
     }
     lastEmitTime_ = lastTs_;
 
-    // Step 1: copy the signal and timestamp windows in sync
-    std::vector<double> win(filt_.begin(), filt_.end());
-    std::vector<double> ts_win(m_timestamps.begin(), m_timestamps.end());
+    // Step 1: copy the signal and timestamp windows in sync into reusable buffers
+    if (pollWindowBuffer_.capacity() < filt_.size()) {
+        pollWindowBuffer_.reserve(filt_.size());
+    }
+    if (pollTimestampBuffer_.capacity() < m_timestamps.size()) {
+        pollTimestampBuffer_.reserve(m_timestamps.size());
+    }
+    pollWindowBuffer_.assign(filt_.begin(), filt_.end());
+    pollTimestampBuffer_.assign(m_timestamps.begin(), m_timestamps.end());
 
-    assert(win.size() == ts_win.size() && "Signal and timestamp buffers must be in sync");
+    assert(
+        pollWindowBuffer_.size() == pollTimestampBuffer_.size() &&
+        "Signal and timestamp buffers must be in sync");
 
     double fsEff = (effectiveFs_ > 1e-6 ? effectiveFs_ : fs_);
 
@@ -837,19 +845,21 @@ bool RealtimeAnalyzer::poll(HeartMetrics& out) {
 
     // Step 2: analyze the signal window
     Options o = opt_;
-    out = analyzeSignal(win, fsEff, o);
+    out = analyzeSignal(pollWindowBuffer_, fsEff, o);
 
     // Capture the analyzed waveform snapshot for downstream consumers
-    out.waveform_values = win;
-    out.waveform_timestamps = ts_win;
+    out.waveform_values = pollWindowBuffer_;
+    out.waveform_timestamps = pollTimestampBuffer_;
 
     // Step 3: map peak indices directly to timestamps from the synchronized window
     out.peakTimestamps.clear();
     if (!out.peakList.empty()) {
         out.peakTimestamps.reserve(out.peakList.size());
         for (int peak_index : out.peakList) {
-            if (peak_index >= 0 && static_cast<size_t>(peak_index) < ts_win.size()) {
-                out.peakTimestamps.push_back(ts_win[static_cast<size_t>(peak_index)]);
+            if (peak_index >= 0 &&
+                static_cast<size_t>(peak_index) < pollTimestampBuffer_.size()) {
+                out.peakTimestamps.push_back(
+                    pollTimestampBuffer_[static_cast<size_t>(peak_index)]);
             }
         }
     }
