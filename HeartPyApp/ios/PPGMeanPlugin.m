@@ -188,6 +188,7 @@ static double dcMean = NAN;
         
         double value = 0.0;
         double Rm = 0.0, Gm = 0.0, Bm = 0.0;
+        unsigned long long cnt = 0;
         
         if (g_simdEnabled) {
           // Use SIMD optimization for green channel
@@ -196,7 +197,7 @@ static double dcMean = NAN;
           // For red and luma, we still need scalar processing
           if ([channel isEqualToString:@"red"] || [channel isEqualToString:@"luma"]) {
             unsigned long long sumR = 0, sumG = 0, sumB = 0;
-            unsigned long long cnt = 0;
+            cnt = 0;
             for (size_t y = py0; y < py1; y += yStep) {
               uint8_t* row = base + y * bytesPerRow;
               for (size_t x = px0; x < px1; x += xStep) {
@@ -211,11 +212,14 @@ static double dcMean = NAN;
               Gm = (double)sumG / (double)cnt;
               Bm = (double)sumB / (double)cnt;
             }
+          } else {
+            // For green channel, calculate count for SIMD result
+            cnt = ((px1 - px0) / xStep) * ((py1 - py0) / yStep);
           }
         } else {
           // Scalar fallback
           unsigned long long sumR = 0, sumG = 0, sumB = 0;
-          unsigned long long cnt = 0;
+          cnt = 0;
           for (size_t y = py0; y < py1; y += yStep) {
             uint8_t* row = base + y * bytesPerRow;
             for (size_t x = px0; x < px1; x += xStep) {
