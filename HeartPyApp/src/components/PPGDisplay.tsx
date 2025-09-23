@@ -1,12 +1,22 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
-import {StyleSheet, Text, TouchableOpacity, View} from 'react-native';
+import {
+  Animated,
+  Easing,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
-import Sound from 'react-native-sound';
 import {PPG_CONFIG} from '../core/PPGConfig';
 import type {PPGAnalysisFrame, PPGState} from '../types/PPGTypes';
 import SkiaWaveform from './SkiaWaveform';
+import {COLORS, getBpmColor, getConfidenceColor} from '../styles/colors';
+import {TYPOGRAPHY, TEXT_STYLES} from '../styles/typography';
+import {SPACING, LAYOUT} from '../styles/spacing';
 
-const HEARTBEAT_SOUND = require('../../assets/sounds/heartbeat.wav');
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
 
 // Bu component artık doğrudan C++'tan gelen senkronize edilmiş
 // dalga formu snapshot'ını render eder.
@@ -15,30 +25,37 @@ type Props = {
   state: PPGState;
   onStart: () => void;
   onStop: () => void;
-  snrMetrics?: {
-    nativeSnrCount: number;
-    fallbackSnrCount: number;
-    invalidSnrCount: number;
-    snrHistory: number[];
-    snrThresholdCrossings: {
-      poor: number;
-      ui: number;
-      haptic: number;
-      reliable: number;
-    };
-  }; // SNR debug metrics (optional)
 };
 
 const MAX_WAVEFORM_POINTS = 240;
 
-const MetricCard = React.memo(
-  ({label, value}: {label: string; value: string}) => (
-    <View style={styles.metricBox}>
-      <Text style={styles.metricLabel}>{label}</Text>
-      <Text style={styles.metricValue}>{value}</Text>
-    </View>
-  ),
-  (prev, next) => prev.label === next.label && prev.value === next.value,
+// Minimalist Metric Card - sade ve sakin
+type MinimalMetricCardProps = {
+  label: string;
+  value: string;
+  valueColor?: string;
+};
+
+const MinimalMetricCard = React.memo(
+  ({label, value, valueColor}: MinimalMetricCardProps) => {
+    const isConfidence = label === 'Confidence';
+    const valueStyle = isConfidence
+      ? styles.minimalConfidenceValue
+      : styles.minimalBpmValue;
+
+    return (
+      <View style={styles.minimalMetricCard}>
+        <Text style={styles.minimalMetricLabel}>{label}</Text>
+        <Text style={[valueStyle, {color: valueColor || COLORS.text}]}>
+          {value}
+        </Text>
+      </View>
+    );
+  },
+  (prev, next) =>
+    prev.label === next.label &&
+    prev.value === next.value &&
+    prev.valueColor === next.valueColor,
 );
 
 const PPGDisplayComponent = ({
@@ -46,9 +63,10 @@ const PPGDisplayComponent = ({
   state,
   onStart,
   onStop,
-  snrMetrics,
 }: Props): JSX.Element => {
-  const {metrics, waveform} = data;
+  const {metrics, waveform, warmupProgress} = data;
+  const isIdle = state === 'idle';
+  const isStarting = state === 'starting';
 
   const renderStatsRef = useRef({
     count: 0,
@@ -78,37 +96,20 @@ const PPGDisplayComponent = ({
   // --- GÜNCEL HAPTIC MANTIĞI ---
   const lastHapticPeakTsRef = useRef<number>(0);
   const lastHapticTimeRef = useRef<number>(0);
-  const heartSoundRef = useRef<Sound | null>(null);
-  const [audioLoaded, setAudioLoaded] = useState(false);
 
-  useEffect(() => {
-    if (!PPG_CONFIG.debug.enabled) {
-      return;
-    }
-    console.log('[PPGDisplay] Audio loaded state', {audioLoaded});
-  }, [audioLoaded]);
-
-  // Heartbeat sound'u yükle
-  useEffect(() => {
-    const sound = new Sound(HEARTBEAT_SOUND, undefined, error => {
-      if (error) {
-        console.warn('[PPGDisplay] Heartbeat sound yüklenemedi', error);
-        setAudioLoaded(false);
-      } else {
-        console.log('[PPGDisplay] Heartbeat sound başarıyla yüklendi', {
-          soundPath: HEARTBEAT_SOUND,
-        });
-        setAudioLoaded(true);
-      }
-    });
-    heartSoundRef.current = sound;
-
-    return () => {
-      heartSoundRef.current?.release();
-      heartSoundRef.current = null;
-      setAudioLoaded(false);
-    };
-  }, []);
+  const collapseThreshold = PPG_CONFIG.ui?.confidenceCollapseThreshold ?? 0.95;
+  const collapseEnabled =
+    Boolean(PPG_CONFIG.ui?.progressiveDisclosure) &&
+    collapseThreshold > 0 &&
+    collapseThreshold < 1;
+  const collapseHysteresis = 0.02;
+  const stabilityPolls = 3;
+  const stabilityMs = 3_000;
+  const reopenCooldownMs = 500;
+  const [isConfidenceCollapsed, setIsConfidenceCollapsed] = useState(false);
+  const stableSinceRef = useRef<number | null>(null);
+  const consecutiveGoodRef = useRef(0);
+  const lastDecisionRef = useRef(0);
 
   useEffect(() => {
     if (
@@ -121,7 +122,7 @@ const PPGDisplayComponent = ({
 
     const pollId = metrics?.pollId ?? null;
     const pollTimestamp = metrics?.pollTimestamp ?? null;
-    const verboseLogging = PPG_CONFIG.debug.enableDetailedSnrLogging === true;
+    const verboseLogging = Boolean(PPG_CONFIG.debug.enableDetailedSnrLogging);
     const snrDebug = (metrics?.snrDebug ?? {}) as {
       originalSnrDb?: number | null;
       sanitizedSnrDb?: number;
@@ -136,7 +137,7 @@ const PPGDisplayComponent = ({
     const sanitizedSnrDb =
       typeof snrDebug?.sanitizedSnrDb === 'number'
         ? snrDebug.sanitizedSnrDb
-        : (metrics.snrDb ?? -10);
+        : metrics.snrDb ?? -10;
     const originalSnrDb =
       typeof snrDebug?.originalSnrDb === 'number'
         ? snrDebug.originalSnrDb
@@ -280,30 +281,6 @@ const PPGDisplayComponent = ({
       ignoreAndroidSystemSettings: true,
     });
 
-    // Heartbeat sound çal
-    const heartSound = heartSoundRef.current;
-    if (heartSound && heartSound.isLoaded()) {
-      console.log('[PPGDisplay] Heartbeat sound playback attempt', {
-        audioLoaded,
-        duration: heartSound.getDuration ? heartSound.getDuration() : undefined,
-      });
-      heartSound.stop(() => {
-        heartSound.play(success => {
-          if (success) {
-            console.log('[PPGDisplay] Heartbeat sound çalındı');
-          } else {
-            console.warn('[PPGDisplay] Heartbeat sound çalınamadı');
-          }
-        });
-      });
-    } else {
-      console.warn('[PPGDisplay] Heartbeat sound ready değil', {
-        hasSoundInstance: !!heartSound,
-        isLoaded: heartSound ? heartSound.isLoaded() : false,
-        audioLoadedState: audioLoaded,
-      });
-    }
-
     lastHapticPeakTsRef.current = latestPeakTs;
     lastHapticTimeRef.current = now;
   }, [metrics, state]);
@@ -311,7 +288,7 @@ const PPGDisplayComponent = ({
   // --- GÜNCEL ve BASİTLEŞTİRİLMİŞ MARKER MANTIĞI ---
   const peakTimestampSet = useMemo(() => {
     // Gelen metriklerdeki tepe noktası zaman damgalarını bir Set'e koy
-    return new Set(metrics?.peakTimestamps || []);
+    return new Set<number>(metrics?.peakTimestamps || []);
   }, [metrics]);
 
   const displayWaveform = useMemo(() => {
@@ -319,7 +296,7 @@ const PPGDisplayComponent = ({
       return waveform;
     }
     const stride = Math.ceil(waveform.length / MAX_WAVEFORM_POINTS);
-    const sampled: typeof waveform = [] as typeof waveform;
+    const sampled: Array<{value: number; timestamp: number}> = [];
     for (let i = 0; i < waveform.length; i += stride) {
       sampled.push(waveform[i]);
       if (sampled.length >= MAX_WAVEFORM_POINTS) {
@@ -340,13 +317,23 @@ const PPGDisplayComponent = ({
   }, [waveformPoints.length]);
 
   const metricsViewModel = useMemo(() => {
-    const bpm = metrics?.bpm;
-    const snr = metrics?.snrDb ?? metrics?.quality?.snrDb;
-    const confidence = metrics?.confidence ?? metrics?.quality?.confidence;
+    const bpmRaw = metrics?.bpm;
+    const snrRaw = metrics?.snrDb ?? metrics?.quality?.snrDb;
+    const confidenceRaw = metrics?.confidence ?? metrics?.quality?.confidence;
+    const bpmNumber = isFiniteNumber(bpmRaw) ? bpmRaw : undefined;
+    const snrNumber = isFiniteNumber(snrRaw) ? snrRaw : undefined;
+    const confidenceNumber = isFiniteNumber(confidenceRaw)
+      ? confidenceRaw
+      : undefined;
+
     return {
-      bpm: bpm != null ? bpm.toFixed(1) : '--',
-      snr: snr != null ? snr.toFixed(2) : '--',
-      confidence: confidence != null ? confidence.toFixed(2) : '--',
+      bpmNumber,
+      snrNumber,
+      confidenceNumber,
+      bpmText: bpmNumber !== undefined ? bpmNumber.toFixed(1) : '--',
+      snrText: snrNumber !== undefined ? snrNumber.toFixed(2) : '--',
+      confidenceText:
+        confidenceNumber !== undefined ? confidenceNumber.toFixed(2) : '--',
     };
   }, [
     metrics?.bpm,
@@ -356,67 +343,275 @@ const PPGDisplayComponent = ({
     metrics?.snrDb,
   ]);
 
+  useEffect(() => {
+    if (!collapseEnabled) {
+      if (isConfidenceCollapsed) {
+        setIsConfidenceCollapsed(false);
+      }
+      stableSinceRef.current = null;
+      consecutiveGoodRef.current = 0;
+      return;
+    }
+
+    const confidence = metricsViewModel.confidenceNumber;
+    const snr = metricsViewModel.snrNumber;
+    const signalQuality =
+      metrics?.signalQuality ?? metrics?.quality?.signalQuality ?? 'unknown';
+
+    const goodQuality =
+      state === 'running' &&
+      signalQuality === 'good' &&
+      isFiniteNumber(confidence) &&
+      isFiniteNumber(snr) &&
+      snr >= (PPG_CONFIG.snrDbThresholdUI ?? -Infinity);
+
+    if (!goodQuality || !isFiniteNumber(confidence) || !isFiniteNumber(snr)) {
+      consecutiveGoodRef.current = 0;
+      stableSinceRef.current = null;
+      if (isConfidenceCollapsed) {
+        setIsConfidenceCollapsed(false);
+        lastDecisionRef.current = Date.now();
+      }
+      return;
+    }
+
+    const now = Date.now();
+    const upper = collapseThreshold;
+    const lower = collapseThreshold - collapseHysteresis;
+    const lastDecisionAgo = now - lastDecisionRef.current;
+
+    if (confidence >= upper) {
+      consecutiveGoodRef.current += 1;
+      if (stableSinceRef.current == null) {
+        stableSinceRef.current = now;
+      }
+      const stableDuration = now - stableSinceRef.current;
+      if (
+        !isConfidenceCollapsed &&
+        (consecutiveGoodRef.current >= stabilityPolls ||
+          stableDuration >= stabilityMs)
+      ) {
+        setIsConfidenceCollapsed(true);
+        lastDecisionRef.current = now;
+      }
+    } else if (confidence <= lower) {
+      consecutiveGoodRef.current = 0;
+      stableSinceRef.current = null;
+      if (isConfidenceCollapsed && lastDecisionAgo >= reopenCooldownMs) {
+        setIsConfidenceCollapsed(false);
+        lastDecisionRef.current = now;
+      }
+    }
+  }, [
+    collapseEnabled,
+    collapseThreshold,
+    metrics?.quality?.signalQuality,
+    metrics?.signalQuality,
+    metricsViewModel.confidenceNumber,
+    metricsViewModel.snrNumber,
+    isConfidenceCollapsed,
+    state,
+  ]);
+
+  const confidencePercentText = useMemo(() => {
+    if (!isFiniteNumber(metricsViewModel.confidenceNumber)) {
+      return '--';
+    }
+    return `${(metricsViewModel.confidenceNumber * 100).toFixed(1)}%`;
+  }, [metricsViewModel.confidenceNumber]);
+
+  const showConfidenceCard = !collapseEnabled || !isConfidenceCollapsed;
+
+  const primaryMetrics = useMemo(() => {
+    const cards = [
+      {
+        key: 'bpm',
+        label: 'Heart Rate',
+        value:
+          metricsViewModel.bpmNumber !== undefined
+            ? `${metricsViewModel.bpmText} BPM`
+            : '--',
+        valueColor: getBpmColor(metricsViewModel.bpmNumber ?? 0),
+      },
+    ];
+
+    if (showConfidenceCard) {
+      cards.push({
+        key: 'confidence',
+        label: 'Confidence',
+        value: confidencePercentText,
+        valueColor: getConfidenceColor(
+          metricsViewModel.confidenceNumber ?? 0,
+        ),
+      });
+    }
+
+    return cards;
+  }, [
+    confidencePercentText,
+    metricsViewModel.bpmNumber,
+    metricsViewModel.bpmText,
+    metricsViewModel.confidenceNumber,
+    showConfidenceCard,
+  ]);
+
+  const confidenceBadgeText = showConfidenceCard ? null : confidencePercentText;
+
+  const detailMetrics = useMemo(() => {
+    const formatValue = (value: number | null | undefined, formatter: (val: number) => string) =>
+      isFiniteNumber(value) ? formatter(value) : '--';
+
+    return [
+      {key: 'snr', label: 'SNR (dB)', value: metricsViewModel.snrText},
+      {
+        key: 'sdnn',
+        label: 'SDNN',
+        value: formatValue(metrics?.sdnn, val => `${val.toFixed(0)} ms`),
+      },
+      {
+        key: 'rmssd',
+        label: 'RMSSD',
+        value: formatValue(metrics?.rmssd, val => `${val.toFixed(0)} ms`),
+      },
+      {
+        key: 'pnn50',
+        label: 'pNN50',
+        value: formatValue(metrics?.pnn50, val => `${(val * 100).toFixed(0)}%`),
+      },
+      {
+        key: 'lfhf',
+        label: 'LF/HF',
+        value: formatValue(metrics?.lfhf, val => val.toFixed(2)),
+      },
+    ];
+  }, [
+    metrics?.lfhf,
+    metrics?.pnn50,
+    metrics?.rmssd,
+    metrics?.sdnn,
+    metricsViewModel.snrText,
+  ]);
+
+  const showBreathingGuide = useMemo(() => {
+    if (!PPG_CONFIG.ui?.breathingGuide) {
+      return false;
+    }
+    if (state !== 'running') {
+      return false;
+    }
+    const confidence = metricsViewModel.confidenceNumber;
+    if (!isFiniteNumber(confidence) || confidence < 0.7) {
+      return false;
+    }
+    const snr = metricsViewModel.snrNumber;
+    if (!isFiniteNumber(snr) || snr <= (PPG_CONFIG.snrDbThresholdUI ?? -Infinity)) {
+      return false;
+    }
+    return true;
+  }, [metricsViewModel.confidenceNumber, metricsViewModel.snrNumber, state]);
+
+  const _hrvMetricsViewModel = useMemo(() => {
+    const toMs = (value?: number, decimals = 0) =>
+      isFiniteNumber(value) ? `${value.toFixed(decimals)} ms` : '--';
+    const toPercent = (value?: number) =>
+      isFiniteNumber(value) ? `${(value * 100).toFixed(1)}%` : '--';
+    const toRatio = (value?: number) =>
+      isFiniteNumber(value) ? value.toFixed(2) : '--';
+    const toBreathsPerMinute = (value?: number) =>
+      isFiniteNumber(value) ? `${(value * 60).toFixed(1)} brpm` : '--';
+
+    return [
+      {key: 'sdnn', label: 'SDNN', value: toMs(metrics?.sdnn)},
+      {key: 'rmssd', label: 'RMSSD', value: toMs(metrics?.rmssd)},
+      {key: 'sdsd', label: 'SDSD', value: toMs(metrics?.sdsd)},
+      {key: 'pnn20', label: 'pNN20', value: toPercent(metrics?.pnn20)},
+      {key: 'pnn50', label: 'pNN50', value: toPercent(metrics?.pnn50)},
+      {key: 'lfhf', label: 'LF/HF', value: toRatio(metrics?.lfhf)},
+      {
+        key: 'breathingRate',
+        label: 'Breathing Rate',
+        value: toBreathsPerMinute(metrics?.breathingRate),
+      },
+    ];
+  }, [
+    metrics?.sdnn,
+    metrics?.rmssd,
+    metrics?.sdsd,
+    metrics?.pnn20,
+    metrics?.pnn50,
+    metrics?.lfhf,
+    metrics?.breathingRate,
+  ]);
+
   return (
-    <View style={styles.container}>
-      <View style={styles.metricsRow}>
-        <MetricCard label="BPM" value={metricsViewModel.bpm} />
-        <MetricCard label="SNR (dB)" value={metricsViewModel.snr} />
-        <MetricCard label="Confidence" value={metricsViewModel.confidence} />
+    <View style={styles.minimalContainer}>
+      {/* Minimalist Metrics - sadece BPM ve Confidence */}
+      <View style={styles.minimalMetricsContainer}>
+        {primaryMetrics.map(metric => (
+          <MinimalMetricCard
+            key={metric.key}
+            label={metric.label}
+            value={metric.value}
+            valueColor={metric.valueColor}
+          />
+        ))}
+        {confidenceBadgeText ? (
+          <Text style={styles.confidenceBadge}>Confidence {confidenceBadgeText}</Text>
+        ) : null}
       </View>
 
-      {/* SNR Debug Metrics (only in debug mode) */}
-      {__DEV__ && snrMetrics && (
-        <View style={styles.debugMetricsContainer}>
-          <Text style={styles.debugTitle}>SNR Debug Metrics</Text>
-          <View style={styles.debugMetricsRow}>
-            <MetricCard
-              label="Native"
-              value={snrMetrics.nativeSnrCount.toString()}
-            />
-            <MetricCard
-              label="Fallback"
-              value={`${snrMetrics.fallbackSnrCount} (${snrMetrics.nativeSnrCount > 0 ? ((snrMetrics.fallbackSnrCount / (snrMetrics.nativeSnrCount + snrMetrics.fallbackSnrCount)) * 100).toFixed(1) : 0}%)`}
-            />
-            <MetricCard
-              label="Invalid"
-              value={snrMetrics.invalidSnrCount.toString()}
+      {/* Warm-up Progress Bar */}
+      {warmupProgress?.isWarmingUp && (
+        <View style={styles.warmupContainer}>
+          <Text style={styles.warmupText}>
+            Initializing... {warmupProgress.progress.toFixed(0)}%
+          </Text>
+          <View style={styles.warmupProgressBar}>
+            <View 
+              style={[
+                styles.warmupProgressFill, 
+                {width: `${warmupProgress.progress}%`}
+              ]} 
             />
           </View>
-          <View style={styles.thresholdMetricsRow}>
-            <Text style={styles.thresholdText}>
-              Thresholds: Poor({snrMetrics.snrThresholdCrossings.poor}) | UI(
-              {snrMetrics.snrThresholdCrossings.ui}) | Haptic(
-              {snrMetrics.snrThresholdCrossings.haptic}) | Reliable(
-              {snrMetrics.snrThresholdCrossings.reliable})
-            </Text>
-          </View>
+          <Text style={styles.warmupSubtext}>
+            {warmupProgress.samplesPushed} / {warmupProgress.samplesRequired} samples
+          </Text>
         </View>
       )}
 
-      <View style={styles.waveform}>
+      <View style={styles.detailSection}>
+        <Text style={styles.detailTitle}>Advanced Metrics</Text>
+        <View style={styles.detailMetricsGrid}>
+          {detailMetrics.map(metric => (
+            <View key={metric.key} style={styles.detailMetricCard}>
+              <Text style={styles.detailMetricLabel}>{metric.label}</Text>
+              <Text style={styles.detailMetricValue}>{metric.value}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+
+      {/* Waveform - minimal ve sakin */}
+      <View style={styles.minimalWaveform}>
         <SkiaWaveform points={waveformPoints} peaks={peakTimestampSet} />
       </View>
 
-      <View style={styles.controls}>
+      {showBreathingGuide ? <_BreathingGuide /> : null}
+
+      {/* Start/Stop Button - minimal */}
+      <View style={styles.minimalControls}>
         <TouchableOpacity
-          onPress={onStart}
-          disabled={state !== 'idle'}
+          onPress={isIdle ? onStart : onStop}
+          disabled={isStarting}
           style={[
-            styles.button,
-            styles.startButton,
-            state !== 'idle' && styles.buttonDisabled,
+            styles.minimalButton,
+            isIdle ? styles.minimalStartButton : styles.minimalStopButton,
+            isStarting && styles.minimalButtonDisabled,
           ]}>
-          <Text style={styles.buttonText}>Başlat</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          onPress={onStop}
-          disabled={state === 'idle'}
-          style={[
-            styles.button,
-            styles.stopButton,
-            state === 'idle' && styles.buttonDisabled,
-          ]}>
-          <Text style={styles.buttonText}>Durdur</Text>
+          <Text style={styles.minimalButtonText}>
+            {isIdle ? 'Start' : 'Stop'}
+          </Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -425,60 +620,262 @@ const PPGDisplayComponent = ({
 
 export const PPGDisplay = React.memo(PPGDisplayComponent);
 
+// Simple, subtle breathing guide (inhale/exhale) for relaxation
+const _BreathingGuide = () => {
+  const anim = React.useRef(new Animated.Value(0)).current;
+
+  React.useEffect(() => {
+    const loop = () => {
+      Animated.sequence([
+        Animated.timing(anim, {
+          toValue: 1,
+          duration: 4000,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(anim, {
+          toValue: 0,
+          duration: 4000,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]).start(({finished}) => {
+        if (finished) {
+          loop();
+        }
+      });
+    };
+    loop();
+  }, [anim]);
+
+  const scale = anim.interpolate({inputRange: [0, 1], outputRange: [0.9, 1.1]});
+  const opacity = anim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.3, 0.9],
+  });
+
+  return (
+    <View style={breathingStyles.breathingWrapper}>
+      <Animated.View
+        style={[breathingStyles.breathingDot, {transform: [{scale}], opacity}]}
+      />
+      <Text style={breathingStyles.breathingText}>Breathe</Text>
+    </View>
+  );
+};
+
 const styles = StyleSheet.create({
-  container: {gap: 16, flex: 1, justifyContent: 'center'},
-  metricsRow: {flexDirection: 'row', justifyContent: 'space-around'},
-  metricBox: {
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: '#111',
+  // Minimalist Container
+  minimalContainer: {
+    flex: 1,
+    padding: SPACING.md,
+    backgroundColor: COLORS.background,
+    justifyContent: 'flex-start',
     alignItems: 'center',
-    minWidth: 80,
+    paddingTop: SPACING.xxl,
   },
-  metricLabel: {color: '#ccc', fontSize: 12, marginBottom: 4},
-  metricValue: {color: '#fff', fontSize: 28, fontWeight: '600'},
-  waveform: {
-    height: 120,
-    borderRadius: 12,
-    backgroundColor: '#1d1d1d',
+
+  // Minimalist Metrics
+  minimalMetricsContainer: {
+    alignItems: 'center',
+    marginBottom: SPACING.xl,
+    width: '100%',
+    justifyContent: 'center',
+  },
+
+  confidenceBadge: {
+    marginTop: SPACING.sm,
+    ...TEXT_STYLES.secondary,
+    color: COLORS.textSecondary,
+  },
+
+  minimalMetricCard: {
+    alignItems: 'center',
+    marginBottom: SPACING.lg,
+    backgroundColor: COLORS.surface,
+    padding: SPACING.lg,
+    borderRadius: LAYOUT.borderRadius.large,
+    width: '80%',
+    maxWidth: 300,
+    ...LAYOUT.shadows.subtle,
+  },
+
+  minimalMetricLabel: {
+    ...TEXT_STYLES.label,
+    color: COLORS.textSecondary,
+    marginBottom: SPACING.sm,
+    textAlign: 'center',
+  },
+
+  minimalMetricValue: {
+    ...TEXT_STYLES.bpmValue,
+    color: COLORS.text,
+    textAlign: 'center',
+    fontWeight: TYPOGRAPHY.fontWeights.semibold,
+  },
+
+  minimalBpmValue: {
+    fontSize: TYPOGRAPHY.fontSizes.large,
+    color: COLORS.text,
+    textAlign: 'center',
+    fontWeight: TYPOGRAPHY.fontWeights.semibold,
+    lineHeight: TYPOGRAPHY.fontSizes.large * TYPOGRAPHY.lineHeights.tight,
+  },
+
+  minimalConfidenceValue: {
+    fontSize: TYPOGRAPHY.fontSizes.medium,
+    color: COLORS.text,
+    textAlign: 'center',
+    fontWeight: TYPOGRAPHY.fontWeights.medium,
+    lineHeight: TYPOGRAPHY.fontSizes.medium * TYPOGRAPHY.lineHeights.normal,
+  },
+
+  // Minimalist Waveform
+  minimalWaveform: {
+    height: 150,
+    width: '90%',
+    borderRadius: LAYOUT.borderRadius.medium,
+    backgroundColor: COLORS.surface,
+    marginBottom: SPACING.xl,
+    ...LAYOUT.shadows.subtle,
     overflow: 'hidden',
   },
-  controls: {flexDirection: 'row', gap: 12},
-  button: {
-    flex: 1,
-    paddingVertical: 14,
-    borderRadius: 12,
+
+  // Minimalist Controls
+  minimalControls: {
     alignItems: 'center',
   },
-  buttonText: {color: '#fff', fontSize: 16, fontWeight: '600'},
-  startButton: {backgroundColor: '#4caf50'},
-  stopButton: {backgroundColor: '#f44336'},
-  buttonDisabled: {opacity: 0.4},
-  debugMetricsContainer: {
-    padding: 12,
-    borderRadius: 8,
-    backgroundColor: '#1a1a1a',
-    marginTop: 8,
+
+  minimalButton: {
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md,
+    borderRadius: LAYOUT.borderRadius.large,
+    alignItems: 'center',
+    minWidth: 140,
+    ...LAYOUT.shadows.medium,
   },
-  debugTitle: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-    marginBottom: 8,
+
+  minimalStartButton: {
+    backgroundColor: COLORS.success,
+  },
+
+  minimalStopButton: {
+    backgroundColor: COLORS.error,
+  },
+
+  minimalButtonDisabled: {
+    opacity: 0.4,
+  },
+
+  minimalButtonText: {
+    ...TEXT_STYLES.label,
+    color: COLORS.textInverse,
+    fontWeight: TYPOGRAPHY.fontWeights.semibold,
+    fontSize: 18,
+  },
+
+  // Warm-up Progress Bar Styles
+  warmupContainer: {
+    marginHorizontal: SPACING.lg,
+    marginVertical: SPACING.md,
+    padding: SPACING.md,
+    backgroundColor: COLORS.surface,
+    borderRadius: LAYOUT.borderRadius.medium,
+    ...LAYOUT.shadows.subtle,
+  },
+
+  warmupText: {
+    ...TEXT_STYLES.label,
+    color: COLORS.text,
+    textAlign: 'center',
+    marginBottom: SPACING.sm,
+    fontWeight: TYPOGRAPHY.fontWeights.medium,
+  },
+
+  warmupProgressBar: {
+    height: 8,
+    backgroundColor: COLORS.border,
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: SPACING.sm,
+  },
+
+  warmupProgressFill: {
+    height: '100%',
+    backgroundColor: COLORS.primary,
+    borderRadius: 4,
+  },
+
+  warmupSubtext: {
+    ...TEXT_STYLES.secondary,
+    color: COLORS.textSecondary,
     textAlign: 'center',
   },
-  debugMetricsRow: {
+
+  detailSection: {
+    width: '100%',
+    paddingHorizontal: SPACING.md,
+    marginBottom: SPACING.lg,
+  },
+
+  detailTitle: {
+    ...TEXT_STYLES.label,
+    color: COLORS.text,
+    fontWeight: TYPOGRAPHY.fontWeights.semibold,
+    textAlign: 'center',
+    marginBottom: SPACING.sm,
+  },
+
+  detailMetricsGrid: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
+    flexWrap: 'wrap',
+    gap: SPACING.sm,
+    justifyContent: 'center',
+  },
+
+  detailMetricCard: {
+    minWidth: 120,
+    flexGrow: 1,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+    borderRadius: LAYOUT.borderRadius.medium,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+    ...LAYOUT.shadows.subtle,
+  },
+
+  detailMetricLabel: {
+    ...TEXT_STYLES.secondary,
+    color: COLORS.textSecondary,
+    marginBottom: SPACING.xs,
+  },
+
+  detailMetricValue: {
+    ...TEXT_STYLES.label,
+    color: COLORS.text,
+    fontWeight: TYPOGRAPHY.fontWeights.medium,
+  },
+});
+
+const breathingStyles = StyleSheet.create({
+  breathingWrapper: {
+    alignSelf: 'center',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
     marginBottom: 4,
   },
-  thresholdMetricsRow: {
-    marginTop: 4,
+  breathingDot: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#4aa3ff',
+    marginBottom: 4,
   },
-  thresholdText: {
-    color: '#888',
-    fontSize: 10,
-    textAlign: 'center',
-    flexWrap: 'wrap',
+  breathingText: {
+    color: '#999',
+    fontSize: 12,
   },
 });

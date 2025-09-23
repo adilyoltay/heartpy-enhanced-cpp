@@ -2,6 +2,7 @@ import {useCallback, useEffect, useMemo, useReducer, useRef} from 'react';
 import type {
   PPGAnalysisFrame,
   PPGState as PPGLifecycleState,
+  PPGWarmupProgress,
 } from '../../types/PPGTypes';
 
 export interface DebugCounters {
@@ -20,6 +21,7 @@ export interface PPGState {
   readonly waveform: ReadonlyArray<{value: number; timestamp: number}>;
   readonly lastError: string | null;
   readonly debugCounters: DebugCounters;
+  readonly warmupProgress: PPGWarmupProgress;
 }
 
 export type PPGAction =
@@ -33,6 +35,7 @@ export type PPGAction =
     }
   | {type: 'SET_ERROR'; payload: string | null}
   | {type: 'RESET_WAVEFORM'}
+  | {type: 'SET_WARMUP_PROGRESS'; payload: PPGWarmupProgress}
   | {type: 'TICK_DEBUG'; payload: Partial<DebugCounters>};
 
 const MAX_WAVEFORM_POINTS = 240;
@@ -53,6 +56,12 @@ export const initialPPGState: PPGState = {
   waveform: [],
   lastError: null,
   debugCounters: initialDebugCounters,
+  warmupProgress: {
+    isWarmingUp: false,
+    progress: 0,
+    samplesPushed: 0,
+    samplesRequired: 0,
+  },
 };
 
 const clampWaveform = (
@@ -127,6 +136,11 @@ export function ppgReducer(state: PPGState, action: PPGAction): PPGState {
       return {
         ...state,
         debugCounters: mergeDebugCounters(state.debugCounters, action.payload),
+      };
+    case 'SET_WARMUP_PROGRESS':
+      return {
+        ...state,
+        warmupProgress: action.payload,
       };
     default:
       return state;

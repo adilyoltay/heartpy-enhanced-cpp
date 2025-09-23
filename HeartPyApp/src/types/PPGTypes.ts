@@ -16,7 +16,15 @@ export type PPGHeartRateUpdate = {
   readonly confidence: number;
 };
 
+export type PPGWarmupProgress = {
+  readonly isWarmingUp: boolean;
+  readonly progress: number;
+  readonly samplesPushed: number;
+  readonly samplesRequired: number;
+};
+
 export type PPGAnalysisFrame = {
   readonly metrics: Record<string, any> | null;
   readonly waveform: ReadonlyArray<{value: number; timestamp: number}>;
+  readonly warmupProgress?: PPGWarmupProgress;
 };

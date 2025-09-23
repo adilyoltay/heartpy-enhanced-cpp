@@ -5,6 +5,7 @@ import type {
   PPGHeartRateUpdate,
   PPGSample,
   PPGState,
+  PPGWarmupProgress,
 } from '../types/PPGTypes';
 import {PPG_CONFIG} from './PPGConfig';
 
@@ -47,6 +48,7 @@ type AnalyzerOptions = {
   onStateChange: (state: PPGState) => void;
   onFrame: (frame: PPGAnalysisFrame) => void;
   onHeartRateUpdate: (update: PPGHeartRateUpdate) => void;
+  onWarmupProgress?: (progress: PPGWarmupProgress) => void;
 };
 
 type PendingSample = {value: number; timestampMs: number};
@@ -66,6 +68,7 @@ export class PPGAnalyzer {
   private readonly onStateChangeCb: (state: PPGState) => void;
   private readonly onFrameCb: (frame: PPGAnalysisFrame) => void;
   private readonly onHeartRateUpdateCb: (update: PPGHeartRateUpdate) => void;
+  private readonly onWarmupProgressCb?: (progress: PPGWarmupProgress) => void;
 
   private state: PPGState = 'idle';
   private wrapper: HeartPyWrapper | null = null;
@@ -73,6 +76,7 @@ export class PPGAnalyzer {
   private tuningOptions: AnalyzerTuningOptions = {...DEFAULT_ANALYZER_OPTIONS};
   private restartPromise: Promise<void> | null = null;
   private shouldAutoRestart = false;
+  private activeAnalysisWindowSamples: number = PPG_CONFIG.analysisWindow;
 
   private pendingSamples: PendingSample[] = [];
   private readonly sampleBuffer = new RingBuffer<PPGSample>(
@@ -94,6 +98,15 @@ export class PPGAnalyzer {
     this.onStateChangeCb = options.onStateChange;
     this.onFrameCb = options.onFrame;
     this.onHeartRateUpdateCb = options.onHeartRateUpdate;
+    this.onWarmupProgressCb = options.onWarmupProgress;
+  }
+
+  private getActiveAnalysisWindowSamples(): number {
+    const calcFreqEnabled =
+      this.tuningOptions.calcFreq ?? PPG_CONFIG.calcFreqEnabled;
+    return calcFreqEnabled
+      ? PPG_CONFIG.analysisWindowLfHf
+      : PPG_CONFIG.analysisWindowBaseline;
   }
 
   public getOptions(): AnalyzerTuningOptions {
@@ -144,6 +157,10 @@ export class PPGAnalyzer {
       DEFAULT_ANALYZER_OPTIONS.snrActiveTauSec ??
       1.0;
 
+    const analysisWindowSamples = this.getActiveAnalysisWindowSamples();
+    this.activeAnalysisWindowSamples = analysisWindowSamples;
+    const windowSeconds = analysisWindowSamples / this.sampleRate;
+
     const createOptions = {
       // Known-good peak detection parameters
       pHalfOverFundThresholdSoft: 1.2,
@@ -162,7 +179,8 @@ export class PPGAnalyzer {
       snrTauSec,
       snrActiveTauSec,
       calcFreq: this.tuningOptions.calcFreq ?? PPG_CONFIG.calcFreqEnabled,
-      windowSeconds: PPG_CONFIG.analysisWindow / this.sampleRate, // YENİ EKLENDİ
+      windowSeconds,
+      analysisWindowSamples,
       adaptivePsd: PPG_CONFIG.debug.enableAdaptivePsd ?? true,
       thresholdRR:
         this.tuningOptions.thresholdRR ?? PPG_CONFIG.thresholdRR ?? false,
@@ -349,18 +367,32 @@ export class PPGAnalyzer {
 
       if (!this.reservoirReady) {
         const reservoirSamplesRequired = Math.max(
-          PPG_CONFIG.analysisWindow,
+          this.activeAnalysisWindowSamples,
           Math.ceil(PPG_CONFIG.minSamplesBeforePollSec * this.sampleRate),
         );
 
         if (this.totalSamplesPushed < reservoirSamplesRequired) {
-          if (!this.hasLoggedReservoirWait && PPG_CONFIG.debug.enabled) {
+          // Calculate progress percentage
+          const progress = Math.min(100, (this.totalSamplesPushed / reservoirSamplesRequired) * 100);
+          
+          // Update warmup progress in UI
+          if (this.onWarmupProgressCb) {
+            this.onWarmupProgressCb({
+              isWarmingUp: true,
+              progress,
+              samplesPushed: this.totalSamplesPushed,
+              samplesRequired: reservoirSamplesRequired,
+            });
+          }
+          
+          // Log every 50 samples to track progress
+          if (this.totalSamplesPushed % 50 === 0 && PPG_CONFIG.debug.enabled) {
             console.log('[PPGAnalyzer] Waiting for reservoir warm-up', {
               pushedSamples: this.totalSamplesPushed,
               reservoirSamplesRequired,
+              progress: `${progress.toFixed(1)}%`,
             });
           }
-          this.hasLoggedReservoirWait = true;
           this.lastTickSummary = summary;
           return summary;
         }
@@ -368,6 +400,17 @@ export class PPGAnalyzer {
         this.reservoirReady = true;
         summary.reservoirReady = true;
         this.hasLoggedReservoirWait = false;
+        
+        // Notify UI that warmup is complete
+        if (this.onWarmupProgressCb) {
+          this.onWarmupProgressCb({
+            isWarmingUp: false,
+            progress: 100,
+            samplesPushed: this.totalSamplesPushed,
+            samplesRequired: reservoirSamplesRequired,
+          });
+        }
+        
         if (PPG_CONFIG.debug.enabled) {
           console.log(
             '[PPGAnalyzer] Reservoir ready; enabling native polling',

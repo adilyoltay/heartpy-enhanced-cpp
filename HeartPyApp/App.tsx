@@ -9,7 +9,6 @@ import {
 } from 'react-native';
 import {PPGCamera} from './src/components/PPGCamera';
 import {PPGDisplay} from './src/components/PPGDisplay';
-import {PPGParameterControls} from './src/components/PPGParameterControls';
 import {
   PPGAnalyzer,
   DEFAULT_ANALYZER_OPTIONS,
@@ -22,6 +21,10 @@ import type {
   PPGState as PPGLifecycleState,
   PPGAnalysisFrame,
 } from './src/types/PPGTypes';
+import {PPGParameterControls} from './src/components/PPGParameterControls';
+import {HiddenSettings} from './src/components/HiddenSettings';
+import {useSwipeGesture} from './src/hooks/useSwipeGesture';
+import {COLORS} from './src/styles/colors';
 
 function useAnalyzer() {
   const analyzerRef = useRef<PPGAnalyzer | null>(null);
@@ -40,10 +43,11 @@ function useAnalyzer() {
   } = useMasterTimer(masterIntervalMs);
   const tasksRegisteredRef = useRef(false);
   const ppgStateRef = useRef(ppgState);
-  const lastPollAtRef = useRef<number>(0);
+  const lastPollAtRef = useRef<number>(Date.now());
   const schedulerStatsRef = useRef({ticks: 0, skipped: 0});
   const lastDropLogRef = useRef(0);
 
+  // Auto-start measurement once the app settles in idle state
   useEffect(() => {
     ppgStateRef.current = ppgState;
   }, [ppgState]);
@@ -108,7 +112,8 @@ function useAnalyzer() {
           }
         }
 
-        if (summary.polled) {
+        // Update lastPollAtRef for both polling and reservoir warm-up
+        if (summary.polled || summary.reservoirReady) {
           lastPollAtRef.current = Date.now();
         }
 
@@ -161,7 +166,7 @@ function useAnalyzer() {
           return;
         }
         const lastPollDelta = now - lastPollAtRef.current;
-        if (lastPollDelta > 3_000) {
+        if (lastPollDelta > 15_000) { // 15 seconds to accommodate 10s warm-up + buffer
           if (PPG_CONFIG.debug.enabled) {
             console.warn('[App] Watchdog: analyzer poll stalled', {
               lastPollDelta,
@@ -214,6 +219,13 @@ function useAnalyzer() {
     [dispatch, registerSchedulerTasks, teardownSchedulerTasks],
   );
 
+  const handleWarmupProgress = useCallback(
+    (progress: {isWarmingUp: boolean; progress: number; samplesPushed: number; samplesRequired: number}) => {
+      dispatch({type: 'SET_WARMUP_PROGRESS', payload: progress});
+    },
+    [dispatch],
+  );
+
   useEffect(() => {
     console.log('[App] Initializing analyzer');
     analyzerRef.current = new PPGAnalyzer({
@@ -224,6 +236,7 @@ function useAnalyzer() {
           console.log('[App] Heart rate update', update);
         }
       },
+      onWarmupProgress: handleWarmupProgress,
     });
     return () => {
       console.log('[App] Cleaning up analyzer');
@@ -231,7 +244,7 @@ function useAnalyzer() {
       analyzerRef.current?.stop().catch(console.warn);
       analyzerRef.current = null;
     };
-  }, [handleFrame, handleStateChange, teardownSchedulerTasks]);
+  }, [handleFrame, handleStateChange, handleWarmupProgress, teardownSchedulerTasks]);
 
   const start = useCallback(async () => {
     console.log(
@@ -302,11 +315,7 @@ function useAnalyzer() {
       const sanitized = Object.fromEntries(
         entries,
       ) as Partial<AnalyzerTuningOptions>;
-
-      setOptions(prev => ({
-        ...prev,
-        ...sanitized,
-      }));
+      setOptions(prev => ({...prev, ...sanitized}));
 
       try {
         await analyzerRef.current?.configure(sanitized);
@@ -327,14 +336,13 @@ function useAnalyzer() {
     }
   }, []);
 
-  const snrMetrics = analyzerRef.current?.getSnrMetrics();
-
   const analysisData = useMemo<PPGAnalysisFrame>(
     () => ({
       metrics: ppgState.metrics,
       waveform: ppgState.waveform,
+      warmupProgress: ppgState.warmupProgress,
     }),
-    [ppgState.metrics, ppgState.waveform],
+    [ppgState.metrics, ppgState.waveform, ppgState.warmupProgress],
   );
 
   return {
@@ -347,7 +355,6 @@ function useAnalyzer() {
     options,
     updateOptions,
     resetOptions,
-    snrMetrics,
   };
 }
 
@@ -362,32 +369,68 @@ function App(): React.JSX.Element {
     options,
     updateOptions,
     resetOptions,
-    snrMetrics,
   } = useAnalyzer();
+
+  const autoStartInvokedRef = useRef(false);
+  const [showSettings, setShowSettings] = useState(false);
+
+  useEffect(() => {
+    if (!PPG_CONFIG.ui?.autoStart) {
+      return;
+    }
+    if (autoStartInvokedRef.current) {
+      return;
+    }
+    if (state === 'idle') {
+      autoStartInvokedRef.current = true;
+      start();
+    }
+  }, [start, state]);
+
+  const showParameterControls =
+    !PPG_CONFIG.ui?.minimalMode && PPG_CONFIG.debug.enabled;
+
+  // Swipe gesture for settings
+  const {panResponder} = useSwipeGesture({
+    onSwipeRight: () => setShowSettings(true),
+    onSwipeLeft: () => setShowSettings(false),
+  });
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="light-content" />
-      <View style={styles.container}>
+      <StatusBar barStyle="dark-content" />
+      <View style={styles.container} {...panResponder.panHandlers}>
         <PPGDisplay
           data={analysisData}
           state={state}
           onStart={start}
           onStop={stop}
-          snrMetrics={snrMetrics}
         />
-        <ScrollView
-          style={styles.panelScroll}
-          contentContainerStyle={styles.panelScrollContent}
-          keyboardShouldPersistTaps="handled">
-          <PPGParameterControls
-            options={options}
-            onChange={updateOptions}
-            onReset={resetOptions}
-            disabled={state === 'starting'}
-          />
-        </ScrollView>
+        {showParameterControls && (
+          <ScrollView
+            style={styles.panelScroll}
+            contentContainerStyle={styles.panelScrollContent}
+            keyboardShouldPersistTaps="handled">
+            <PPGParameterControls
+              options={options}
+              onChange={updateOptions}
+              onReset={resetOptions}
+              disabled={state === 'starting'}
+            />
+          </ScrollView>
+        )}
       </View>
+
+      {/* Hidden Settings Panel */}
+      <HiddenSettings
+        isVisible={showSettings}
+        onClose={() => setShowSettings(false)}
+        options={options}
+        onChange={updateOptions}
+        onReset={resetOptions}
+        disabled={state === 'starting'}
+      />
+
       <View style={styles.hiddenCameraWrapper} pointerEvents="none">
         <PPGCamera
           hidden
@@ -403,17 +446,17 @@ function App(): React.JSX.Element {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: COLORS.background,
   },
   container: {
     flex: 1,
-    padding: 16,
+    padding: 24,
+    backgroundColor: COLORS.background,
     gap: 24,
-    backgroundColor: '#000',
   },
   panelScroll: {
     flexGrow: 0,
-    maxHeight: 280,
+    maxHeight: 320,
   },
   panelScrollContent: {
     paddingBottom: 16,
