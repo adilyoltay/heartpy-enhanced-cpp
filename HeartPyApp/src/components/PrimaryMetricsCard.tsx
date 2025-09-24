@@ -1,9 +1,10 @@
 import React, {useMemo} from 'react';
-import {StyleSheet, Text, View} from 'react-native';
+import {StyleSheet, View} from 'react-native';
 import type {ViewStyle} from 'react-native';
-import {COLORS} from '../styles/colors';
-import {TYPOGRAPHY, TEXT_STYLES} from '../styles/typography';
-import {SPACING, LAYOUT} from '../styles/spacing';
+import {Card, Typography, Badge} from './ui';
+import {SPACING} from '../theme/spacing';
+import {FONT_SIZES, LINE_HEIGHTS} from '../theme/typography';
+import {useThemeColor} from '../hooks/useThemeColor';
 import type {Breakpoint} from '../styles/responsive';
 
 export type PrimaryMetricsCardProps = {
@@ -30,109 +31,98 @@ export const PrimaryMetricsCard: React.FC<PrimaryMetricsCardProps> = ({
 }) => {
   const isTabletLayout = breakpoint === 'lg' || breakpoint === 'xl';
   const useRowLayout = isTabletLayout || isLandscape;
+  const isBpmProvided = bpmText !== '--';
 
-  const containerStyle = useMemo<ViewStyle>(
+  const defaultBpmColor = useThemeColor('textPrimary');
+  const defaultBadgeBackground = useThemeColor('surfaceMuted');
+  const labelColor = useThemeColor('textSecondary');
+  const defaultConfidenceColor = useThemeColor('primary');
+
+  const resolvedBpmColor = bpmColor ?? defaultBpmColor;
+  const resolvedConfidenceColor = confidenceColor ?? defaultConfidenceColor;
+
+  const contentDirectionStyle = useMemo<ViewStyle>(
     () => ({
       flexDirection: useRowLayout ? 'row' : 'column',
       alignItems: useRowLayout ? 'center' : 'flex-start',
       justifyContent: useRowLayout ? 'space-between' : 'flex-start',
-      borderRadius: LAYOUT.borderRadius.large,
-      backgroundColor: COLORS.surface,
-      paddingVertical: ms(SPACING.sm),
-      paddingHorizontal: ms(SPACING.md),
-      ...LAYOUT.shadows.subtle,
     }),
-    [ms, useRowLayout],
+    [useRowLayout],
   );
 
   const bpmFontSize = useMemo(
-    () => ms(TYPOGRAPHY.fontSizes.large, isTabletLayout ? 0.6 : 0.4),
+    () => ms(FONT_SIZES.headingXL, isTabletLayout ? 0.6 : 0.4),
+    [isTabletLayout, ms],
+  );
+
+  const bpmLineHeight = useMemo(
+    () => ms(LINE_HEIGHTS.headingXL, isTabletLayout ? 0.6 : 0.4),
     [isTabletLayout, ms],
   );
 
   const bpmSpacingStyle = useMemo<ViewStyle>(
     () =>
       useRowLayout
-        ? {marginRight: ms(SPACING.sm)}
-        : {marginBottom: ms(SPACING.sm)},
+        ? {marginRight: ms(SPACING.md)}
+        : {marginBottom: ms(SPACING.md)},
     [ms, useRowLayout],
   );
 
-  const confidenceBadgePadding = useMemo(
-    () => ({
-      paddingHorizontal: ms(12),
-      paddingVertical: ms(6),
-    }),
-    [ms],
-  );
-
-  const confidenceAlignment = useMemo<ViewStyle>(
+  const badgeAlignment = useMemo<ViewStyle>(
     () => ({alignSelf: useRowLayout ? 'center' : 'flex-start'}),
     [useRowLayout],
   );
 
+  const confidenceBadgeSize = useRowLayout ? 'md' : 'sm';
+
   return (
-    <View style={containerStyle} testID="primary-metrics-card">
-      <View style={[styles.bpmColumn, bpmSpacingStyle]}>
-        <Text
-          testID="primary-metrics-bpm"
-          style={[
-            styles.bpmValue,
-            {color: bpmColor, fontSize: bpmFontSize},
-          ]}
-          accessibilityLabel="Heart rate">
-          {bpmText}
-        </Text>
-        {bpmText !== '--' ? (
-          <Text style={styles.bpmLabel}>BPM</Text>
+    <Card padding="lg" radius="lg" testID="primary-metrics-card">
+      <View style={[styles.content, contentDirectionStyle]}>
+        <View style={[styles.bpmWrapper, bpmSpacingStyle]}>
+          <Typography
+            testID="primary-metrics-bpm"
+            variant="headingXL"
+            weight="semibold"
+            style={{
+              color: resolvedBpmColor,
+              fontSize: bpmFontSize,
+              lineHeight: bpmLineHeight,
+            }}
+            accessibilityLabel="Heart rate">
+            {bpmText}
+          </Typography>
+          {isBpmProvided ? (
+            <Typography
+              variant="caption"
+              weight="medium"
+              style={{
+                color: labelColor,
+                marginTop: ms(SPACING.xs),
+              }}>
+              BPM
+            </Typography>
+          ) : null}
+        </View>
+
+        {showConfidence ? (
+          <Badge
+            label={`Confidence ${confidenceText}`}
+            size={confidenceBadgeSize}
+            textColorOverride={resolvedConfidenceColor}
+            backgroundOverride={defaultBadgeBackground}
+            style={badgeAlignment}
+            testID="primary-metrics-confidence"
+          />
         ) : null}
       </View>
-
-      {showConfidence ? (
-        <View
-          style={[
-            styles.confidenceBadge,
-            confidenceBadgePadding,
-            confidenceAlignment,
-            {borderColor: confidenceColor},
-          ]}
-          testID="primary-metrics-confidence">
-          <Text
-            style={[
-              styles.confidenceLabel,
-              {color: confidenceColor},
-            ]}
-            accessibilityLabel="Confidence level">
-            Confidence {confidenceText}
-          </Text>
-        </View>
-      ) : null}
-    </View>
+    </Card>
   );
 };
-
 const styles = StyleSheet.create({
-  bpmColumn: {
+  content: {
+    width: '100%',
+  },
+  bpmWrapper: {
     flexDirection: 'column',
-  },
-  bpmValue: {
-    fontWeight: TYPOGRAPHY.fontWeights.semibold,
-    textAlign: 'left',
-    lineHeight: TYPOGRAPHY.fontSizes.large * TYPOGRAPHY.lineHeights.tight,
-  },
-  bpmLabel: {
-    ...TEXT_STYLES.secondary,
-    marginTop: SPACING.xs,
-    color: COLORS.textSecondary,
-  },
-  confidenceBadge: {
-    borderRadius: LAYOUT.borderRadius.medium,
-    borderWidth: 1,
-    backgroundColor: COLORS.background,
-    alignItems: 'center',
-  },
-  confidenceLabel: {
-    ...TEXT_STYLES.label,
-    fontWeight: TYPOGRAPHY.fontWeights.medium,
   },
 });

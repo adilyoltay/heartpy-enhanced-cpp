@@ -1,21 +1,17 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
-import {
-  Animated,
-  Easing,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import {Animated, Easing, StyleSheet, View} from 'react-native';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import {PPG_CONFIG} from '../core/PPGConfig';
 import type {PPGAnalysisFrame, PPGState} from '../types/PPGTypes';
 import SkiaWaveform from './SkiaWaveform';
 import {PrimaryMetricsCard} from './PrimaryMetricsCard';
-import {COLORS, getBpmColor, getConfidenceColor} from '../styles/colors';
-import {TYPOGRAPHY, TEXT_STYLES} from '../styles/typography';
-import {SPACING, LAYOUT} from '../styles/spacing';
+import {Card, Button, Typography, Badge} from './ui';
+import {getBpmColor, getConfidenceColor} from '../styles/colors';
 import {useResponsive} from '../styles/responsive';
+import {useThemeColor} from '../hooks/useThemeColor';
+import {SPACING} from '../theme/spacing';
+import {BORDER_RADIUS, SHADOWS} from '../theme/layout';
+import {FONT_SIZES, LINE_HEIGHTS} from '../theme/typography';
 
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
@@ -27,6 +23,7 @@ type Props = {
   state: PPGState;
   onStart: () => void;
   onStop: () => void;
+  layoutVariant?: 'single' | 'split';
 };
 
 const MAX_WAVEFORM_POINTS = 240;
@@ -50,28 +47,38 @@ const MinimalMetricCard = React.memo(
     containerWidth,
     containerMaxWidth,
   }: MinimalMetricCardProps) => {
-    const isConfidence = label === 'Confidence';
-    const valueStyle = isConfidence
-      ? styles.minimalConfidenceValue
-      : styles.minimalBpmValue;
+    const secondaryColor = useThemeColor('textSecondary');
+    const defaultValueColor = useThemeColor('textPrimary');
+    const valueVariant = label === 'Confidence' ? 'headingM' : 'headingL';
 
     return (
-      <View
+      <Card
+        padding="lg"
+        radius="lg"
         style={[
           styles.minimalMetricCard,
           containerWidth ? {width: containerWidth} : null,
           containerMaxWidth ? {maxWidth: containerMaxWidth} : null,
         ]}>
-        <Text style={styles.minimalMetricLabel}>{label}</Text>
-        <Text
+        <Typography
+          variant="caption"
+          color="textSecondary"
+          style={styles.minimalMetricLabel}>
+          {label}
+        </Typography>
+        <Typography
+          variant={valueVariant}
+          weight={label === 'Confidence' ? 'medium' : 'semibold'}
           style={[
-            valueStyle,
+            styles.minimalMetricValue,
             fontSizeOverride ? {fontSize: fontSizeOverride} : null,
-            {color: valueColor || COLORS.text},
-          ]}>
+            valueColor ? {color: valueColor} : {color: defaultValueColor},
+          ]}
+          numberOfLines={1}
+          ellipsizeMode="tail">
           {value}
-        </Text>
-      </View>
+        </Typography>
+      </Card>
     );
   },
   (prev, next) =>
@@ -88,11 +95,23 @@ const PPGDisplayComponent = ({
   state,
   onStart,
   onStop,
+  layoutVariant = 'single',
 }: Props): JSX.Element => {
   const r = useResponsive();
   const {metrics, waveform, warmupProgress} = data;
   const isIdle = state === 'idle';
   const isStarting = state === 'starting';
+  const {bp, isLandscape, isTablet, ms, height} = r;
+
+  const backgroundColor = useThemeColor('background');
+  const surfaceColor = useThemeColor('surface');
+  const surfaceMutedColor = useThemeColor('surfaceMuted');
+  const textPrimary = useThemeColor('textPrimary');
+  const textSecondary = useThemeColor('textSecondary');
+  const borderColor = useThemeColor('border');
+  const successColor = useThemeColor('success');
+  const errorColor = useThemeColor('error');
+  const inverseTextColor = useThemeColor('textInverse');
 
   const renderStatsRef = useRef({
     count: 0,
@@ -100,6 +119,8 @@ const PPGDisplayComponent = ({
     lastLogTs: Date.now(),
   });
   renderStatsRef.current.count += 1;
+
+  const isSplitLayout = layoutVariant === 'split';
 
   useEffect(() => {
     if (!PPG_CONFIG.debug.enabled) {
@@ -466,9 +487,7 @@ const PPGDisplayComponent = ({
         key: 'confidence',
         label: 'Confidence',
         value: confidencePercentText,
-        valueColor: getConfidenceColor(
-          metricsViewModel.confidenceNumber ?? 0,
-        ),
+        valueColor: getConfidenceColor(metricsViewModel.confidenceNumber ?? 0),
       });
     }
 
@@ -484,8 +503,10 @@ const PPGDisplayComponent = ({
   const confidenceBadgeText = showConfidenceCard ? null : confidencePercentText;
 
   const detailMetrics = useMemo(() => {
-    const formatValue = (value: number | null | undefined, formatter: (val: number) => string) =>
-      isFiniteNumber(value) ? formatter(value) : '--';
+    const formatValue = (
+      value: number | null | undefined,
+      formatter: (val: number) => string,
+    ) => (isFiniteNumber(value) ? formatter(value) : '--');
 
     return [
       {key: 'snr', label: 'SNR (dB)', value: metricsViewModel.snrText},
@@ -530,7 +551,10 @@ const PPGDisplayComponent = ({
       return false;
     }
     const snr = metricsViewModel.snrNumber;
-    if (!isFiniteNumber(snr) || snr <= (PPG_CONFIG.snrDbThresholdUI ?? -Infinity)) {
+    if (
+      !isFiniteNumber(snr) ||
+      snr <= (PPG_CONFIG.snrDbThresholdUI ?? -Infinity)
+    ) {
       return false;
     }
     return true;
@@ -570,24 +594,24 @@ const PPGDisplayComponent = ({
   ]);
 
   // Responsive derived sizes
-  const bpmFontSize = r.ms(TYPOGRAPHY.fontSizes.large, r.isTablet ? 0.5 : 0.35);
-  const confidenceFontSize = r.ms(
-    TYPOGRAPHY.fontSizes.medium,
-    r.isTablet ? 0.45 : 0.35,
-  );
-  const waveformHeight = r.isTablet
-    ? (r.isLandscape ? Math.max(220, Math.round(r.height * 0.35)) : 220)
-    : (r.isLandscape ? 180 : 160);
-  const cardMaxWidth = r.isTablet ? 420 : 320;
-  const cardWidthPct: `${number}%` = r.isTablet ? '65%' : '80%';
-  const detailCardBasis: `${number}%` = r.isTablet ? '30%' : '45%';
-  const strokeWidth = r.isTablet ? 3 : 2;
+  const bpmFontSize = ms(FONT_SIZES.headingXL, isTablet ? 0.5 : 0.35);
+  const confidenceFontSize = ms(FONT_SIZES.headingM, isTablet ? 0.45 : 0.35);
+  const waveformHeight = isTablet
+    ? isLandscape
+      ? Math.max(220, Math.round(height * 0.35))
+      : 220
+    : isLandscape
+    ? 180
+    : 160;
+  const cardMaxWidth = isTablet ? 420 : 320;
+  const cardWidthPct: `${number}%` = isTablet ? '65%' : '80%';
+  const detailCardBasis: `${number}%` =
+    bp === 'xl' ? '22%' : bp === 'lg' ? '30%' : isLandscape ? '40%' : '48%';
+  const strokeWidth = isTablet ? 3 : 2;
   const useUnifiedPrimaryCard = Boolean(
     PPG_CONFIG.ui?.unifiedPrimaryCard ?? true,
   );
-  const useWaveformGradient = Boolean(
-    PPG_CONFIG.ui?.waveformGradient ?? true,
-  );
+  const useWaveformGradient = Boolean(PPG_CONFIG.ui?.waveformGradient ?? true);
 
   const waveformGradientSettings = useMemo(
     () =>
@@ -601,16 +625,58 @@ const PPGDisplayComponent = ({
     [useWaveformGradient],
   );
 
+  const primaryMetricsSpacingStyle = useMemo(
+    () => ({marginBottom: ms(SPACING.xl)}),
+    [ms],
+  );
+
   const primaryCardWidthStyle = useUnifiedPrimaryCard
     ? {width: cardWidthPct, maxWidth: cardMaxWidth}
     : undefined;
 
+  const detailMetricCardStyle = useMemo(
+    () => ({
+      flexBasis: detailCardBasis,
+      maxWidth: isTablet ? 240 : 200,
+      paddingHorizontal: ms(SPACING.sm),
+      paddingVertical: ms(SPACING.sm),
+      marginHorizontal: ms(SPACING.xs) / 2,
+      marginVertical: ms(SPACING.xs) / 2,
+    }),
+    [detailCardBasis, isTablet, ms],
+  );
+
+  const detailGridGutterStyle = useMemo(
+    () => ({marginHorizontal: -(ms(SPACING.xs) / 2)}),
+    [ms],
+  );
+
+  const detailLabelSpacing = useMemo(
+    () => ({marginBottom: ms(SPACING.xs) / 2}),
+    [ms],
+  );
+
   return (
-    <View style={styles.minimalContainer}>
+    <View
+      style={[
+        styles.minimalContainer,
+        {backgroundColor},
+        isSplitLayout ? styles.minimalContainerSplit : null,
+      ]}>
       {/* Minimalist Metrics - BPM & Confidence */}
-      <View style={styles.minimalMetricsContainer}>
+      <View
+        style={[
+          styles.minimalMetricsContainer,
+          primaryMetricsSpacingStyle,
+          isSplitLayout ? styles.minimalMetricsContainerSplit : null,
+        ]}>
         {useUnifiedPrimaryCard ? (
-          <View style={[styles.primaryCardWrapper, primaryCardWidthStyle]}>
+          <View
+            style={[
+              styles.primaryCardWrapper,
+              primaryCardWidthStyle,
+              isSplitLayout ? styles.primaryCardWrapperSplit : null,
+            ]}>
             <PrimaryMetricsCard
               bpm={metricsViewModel.bpmNumber}
               bpmText={
@@ -645,9 +711,18 @@ const PPGDisplayComponent = ({
               />
             ))}
             {confidenceBadgeText ? (
-              <Text style={styles.confidenceBadge}>
-                Confidence {confidenceBadgeText}
-              </Text>
+              <Badge
+                label={`Confidence ${confidenceBadgeText}`}
+                size="sm"
+                textColorOverride={getConfidenceColor(
+                  metricsViewModel.confidenceNumber ?? 0,
+                )}
+                backgroundOverride={surfaceMutedColor}
+                style={[
+                  styles.confidenceBadge,
+                  isSplitLayout ? styles.confidenceBadgeSplit : null,
+                ]}
+              />
             ) : null}
           </>
         )}
@@ -655,11 +730,22 @@ const PPGDisplayComponent = ({
 
       {/* Warm-up Progress Bar */}
       {warmupProgress?.isWarmingUp && (
-        <View style={styles.warmupContainer}>
-          <Text style={styles.warmupText}>
+        <Card
+          padding="md"
+          radius="md"
+          style={styles.warmupContainer}
+          shadow="subtle">
+          <Typography
+            variant="bodyM"
+            weight="medium"
+            style={[
+              styles.warmupText,
+              {color: textPrimary, textAlign: 'center'},
+            ]}>
             Initializing... {warmupProgress.progress.toFixed(0)}%
-          </Text>
-          <View style={styles.warmupProgressBar}>
+          </Typography>
+          <View
+            style={[styles.warmupProgressBar, {backgroundColor: borderColor}]}>
             {(() => {
               const boundedProgress = Math.min(
                 100,
@@ -670,37 +756,75 @@ const PPGDisplayComponent = ({
                 <View
                   style={[
                     styles.warmupProgressFill,
-                    {width: widthPercent},
+                    {
+                      width: widthPercent,
+                      backgroundColor: successColor,
+                    },
                   ]}
                 />
               );
             })()}
           </View>
-          <Text style={styles.warmupSubtext}>
-            {warmupProgress.samplesPushed} / {warmupProgress.samplesRequired} samples
-          </Text>
-        </View>
+          <Typography
+            variant="caption"
+            color="textSecondary"
+            style={[styles.warmupSubtext, {textAlign: 'center'}]}>
+            {warmupProgress.samplesPushed} / {warmupProgress.samplesRequired}{' '}
+            samples
+          </Typography>
+        </Card>
       )}
 
-      <View style={styles.detailSection}>
-        <Text style={styles.detailTitle}>Advanced Metrics</Text>
-        <View style={styles.detailMetricsGrid}>
+      <View
+        style={[
+          styles.detailSection,
+          isSplitLayout ? styles.detailSectionSplit : null,
+        ]}>
+        <Typography
+          variant="bodyM"
+          weight="semibold"
+          style={[
+            styles.detailTitle,
+            {color: textPrimary, textAlign: 'center'},
+          ]}>
+          Advanced Metrics
+        </Typography>
+        <View style={[styles.detailMetricsGrid, detailGridGutterStyle]}>
           {detailMetrics.map(metric => (
-            <View
+            <Card
               key={metric.key}
-              style={[
-                styles.detailMetricCard,
-                {flexBasis: detailCardBasis, maxWidth: 240},
-              ]}>
-              <Text style={styles.detailMetricLabel}>{metric.label}</Text>
-              <Text style={styles.detailMetricValue}>{metric.value}</Text>
-            </View>
+              variant="outlined"
+              padding="md"
+              radius="md"
+              shadow="none"
+              style={[styles.detailMetricCard, detailMetricCardStyle]}>
+              <Typography
+                variant="caption"
+                color="textSecondary"
+                style={detailLabelSpacing}
+                numberOfLines={1}
+                ellipsizeMode="tail">
+                {metric.label}
+              </Typography>
+              <Typography
+                variant="bodyM"
+                weight="medium"
+                numberOfLines={1}
+                ellipsizeMode="tail"
+                style={{color: textPrimary}}>
+                {metric.value}
+              </Typography>
+            </Card>
           ))}
         </View>
       </View>
 
       {/* Waveform - minimal ve sakin */}
-      <View style={[styles.minimalWaveform, {height: waveformHeight}]}>
+      <View
+        style={[
+          styles.minimalWaveform,
+          {height: waveformHeight, backgroundColor: surfaceColor},
+        ]}>
         <SkiaWaveform
           points={waveformPoints}
           peaks={peakTimestampSet}
@@ -712,19 +836,22 @@ const PPGDisplayComponent = ({
       {showBreathingGuide ? <_BreathingGuide /> : null}
 
       {/* Start/Stop Button - minimal */}
-      <View style={styles.minimalControls}>
-        <TouchableOpacity
+      <View
+        style={[
+          styles.minimalControls,
+          isSplitLayout ? styles.minimalControlsSplit : null,
+        ]}>
+        <Button
+          title={isIdle ? 'Start' : 'Stop'}
           onPress={isIdle ? onStart : onStop}
+          loading={isStarting}
           disabled={isStarting}
-          style={[
-            styles.minimalButton,
-            isIdle ? styles.minimalStartButton : styles.minimalStopButton,
-            isStarting && styles.minimalButtonDisabled,
-          ]}>
-          <Text style={styles.minimalButtonText}>
-            {isIdle ? 'Start' : 'Stop'}
-          </Text>
-        </TouchableOpacity>
+          size="lg"
+          textColorOverride={inverseTextColor}
+          backgroundOverride={isIdle ? successColor : errorColor}
+          borderColorOverride={isIdle ? successColor : errorColor}
+          style={styles.minimalButton}
+        />
       </View>
     </View>
   );
@@ -735,6 +862,8 @@ export const PPGDisplay = React.memo(PPGDisplayComponent);
 // Simple, subtle breathing guide (inhale/exhale) for relaxation
 const _BreathingGuide = () => {
   const anim = React.useRef(new Animated.Value(0)).current;
+  const accentColor = useThemeColor('primary');
+  const secondaryText = useThemeColor('textSecondary');
 
   React.useEffect(() => {
     const loop = () => {
@@ -769,212 +898,124 @@ const _BreathingGuide = () => {
   return (
     <View style={breathingStyles.breathingWrapper}>
       <Animated.View
-        style={[breathingStyles.breathingDot, {transform: [{scale}], opacity}]}
+        style={[
+          breathingStyles.breathingDot,
+          {transform: [{scale}], opacity, backgroundColor: accentColor},
+        ]}
       />
-      <Text style={breathingStyles.breathingText}>Breathe</Text>
+      <Typography variant="caption" style={{color: secondaryText}}>
+        Breathe
+      </Typography>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  // Minimalist Container
   minimalContainer: {
     flex: 1,
     padding: SPACING.md,
-    backgroundColor: COLORS.background,
-    justifyContent: 'flex-start',
-    alignItems: 'center',
     paddingTop: SPACING.xxl,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
   },
-
-  // Minimalist Metrics
+  minimalContainerSplit: {
+    alignItems: 'stretch',
+  },
   minimalMetricsContainer: {
     alignItems: 'center',
     marginBottom: SPACING.xl,
     width: '100%',
     justifyContent: 'center',
   },
-
+  minimalMetricsContainerSplit: {
+    alignItems: 'flex-start',
+  },
   primaryCardWrapper: {
     alignSelf: 'center',
   },
-
+  primaryCardWrapperSplit: {
+    alignSelf: 'flex-start',
+  },
   confidenceBadge: {
     marginTop: SPACING.sm,
-    ...TEXT_STYLES.secondary,
-    color: COLORS.textSecondary,
+    alignSelf: 'center',
   },
-
+  confidenceBadgeSplit: {
+    alignSelf: 'flex-start',
+  },
   minimalMetricCard: {
-    alignItems: 'center',
-    marginBottom: SPACING.lg,
-    backgroundColor: COLORS.surface,
-    padding: SPACING.lg,
-    borderRadius: LAYOUT.borderRadius.large,
+    alignSelf: 'center',
     width: '80%',
     maxWidth: 360,
-    ...LAYOUT.shadows.subtle,
+    marginBottom: SPACING.lg,
   },
-
   minimalMetricLabel: {
-    ...TEXT_STYLES.label,
-    color: COLORS.textSecondary,
+    textAlign: 'center',
     marginBottom: SPACING.sm,
-    textAlign: 'center',
   },
-
   minimalMetricValue: {
-    ...TEXT_STYLES.bpmValue,
-    color: COLORS.text,
     textAlign: 'center',
-    fontWeight: TYPOGRAPHY.fontWeights.semibold,
   },
-
-  minimalBpmValue: {
-    // will be overridden responsively in-line where used
-    fontSize: TYPOGRAPHY.fontSizes.large,
-    color: COLORS.text,
-    textAlign: 'center',
-    fontWeight: TYPOGRAPHY.fontWeights.semibold,
-    lineHeight: TYPOGRAPHY.fontSizes.large * TYPOGRAPHY.lineHeights.tight,
-  },
-
-  minimalConfidenceValue: {
-    // will be overridden responsively in-line where used
-    fontSize: TYPOGRAPHY.fontSizes.medium,
-    color: COLORS.text,
-    textAlign: 'center',
-    fontWeight: TYPOGRAPHY.fontWeights.medium,
-    lineHeight: TYPOGRAPHY.fontSizes.medium * TYPOGRAPHY.lineHeights.normal,
-  },
-
-  // Minimalist Waveform
   minimalWaveform: {
-    height: 160,
     width: '100%',
     marginHorizontal: SPACING.sm,
-    borderRadius: LAYOUT.borderRadius.medium,
-    backgroundColor: COLORS.surface,
     marginBottom: SPACING.xl,
-    ...LAYOUT.shadows.subtle,
+    borderRadius: BORDER_RADIUS.md,
     overflow: 'hidden',
+    ...SHADOWS.subtle,
   },
-
-  // Minimalist Controls
   minimalControls: {
     alignItems: 'center',
+    marginTop: SPACING.xl,
+    width: '100%',
   },
-
+  minimalControlsSplit: {
+    alignItems: 'flex-start',
+  },
   minimalButton: {
-    paddingHorizontal: SPACING.xl,
-    paddingVertical: SPACING.md,
-    borderRadius: LAYOUT.borderRadius.large,
-    alignItems: 'center',
-    minWidth: 140,
-    ...LAYOUT.shadows.medium,
+    minWidth: 160,
   },
-
-  minimalStartButton: {
-    backgroundColor: COLORS.success,
-  },
-
-  minimalStopButton: {
-    backgroundColor: COLORS.error,
-  },
-
-  minimalButtonDisabled: {
-    opacity: 0.4,
-  },
-
-  minimalButtonText: {
-    ...TEXT_STYLES.label,
-    color: COLORS.textInverse,
-    fontWeight: TYPOGRAPHY.fontWeights.semibold,
-    fontSize: 18,
-  },
-
-  // Warm-up Progress Bar Styles
   warmupContainer: {
     marginHorizontal: SPACING.lg,
     marginVertical: SPACING.md,
-    padding: SPACING.md,
-    backgroundColor: COLORS.surface,
-    borderRadius: LAYOUT.borderRadius.medium,
-    ...LAYOUT.shadows.subtle,
   },
-
   warmupText: {
-    ...TEXT_STYLES.label,
-    color: COLORS.text,
-    textAlign: 'center',
     marginBottom: SPACING.sm,
-    fontWeight: TYPOGRAPHY.fontWeights.medium,
   },
-
   warmupProgressBar: {
     height: 8,
-    backgroundColor: COLORS.border,
     borderRadius: 4,
     overflow: 'hidden',
     marginBottom: SPACING.sm,
   },
-
   warmupProgressFill: {
     height: '100%',
-    backgroundColor: COLORS.primary,
     borderRadius: 4,
   },
-
   warmupSubtext: {
-    ...TEXT_STYLES.secondary,
-    color: COLORS.textSecondary,
-    textAlign: 'center',
+    marginTop: SPACING.xs,
   },
-
   detailSection: {
     width: '100%',
     paddingHorizontal: SPACING.md,
     marginBottom: SPACING.lg,
   },
-
+  detailSectionSplit: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: SPACING.sm,
+  },
   detailTitle: {
-    ...TEXT_STYLES.label,
-    color: COLORS.text,
-    fontWeight: TYPOGRAPHY.fontWeights.semibold,
-    textAlign: 'center',
     marginBottom: SPACING.sm,
   },
-
   detailMetricsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: SPACING.sm,
     justifyContent: 'center',
+    alignItems: 'stretch',
   },
-
   detailMetricCard: {
     minWidth: 120,
     flexGrow: 1,
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.sm,
-    borderRadius: LAYOUT.borderRadius.medium,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    alignItems: 'center',
-    ...LAYOUT.shadows.subtle,
-  },
-
-  detailMetricLabel: {
-    ...TEXT_STYLES.secondary,
-    color: COLORS.textSecondary,
-    marginBottom: SPACING.xs,
-  },
-
-  detailMetricValue: {
-    ...TEXT_STYLES.label,
-    color: COLORS.text,
-    fontWeight: TYPOGRAPHY.fontWeights.medium,
   },
 });
 
@@ -990,11 +1031,6 @@ const breathingStyles = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 12,
-    backgroundColor: '#4aa3ff',
     marginBottom: 4,
-  },
-  breathingText: {
-    color: '#999',
-    fontSize: 12,
   },
 });

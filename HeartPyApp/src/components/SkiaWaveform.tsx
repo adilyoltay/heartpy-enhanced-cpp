@@ -2,6 +2,8 @@ import React, {useCallback, useMemo, useState} from 'react';
 import {LayoutChangeEvent, StyleSheet, View} from 'react-native';
 import type {StyleProp, ViewStyle} from 'react-native';
 import {Canvas, Path, Rect, Skia, TileMode} from '@shopify/react-native-skia';
+import {useThemeColor} from '../hooks/useThemeColor';
+import {BORDER_RADIUS} from '../theme/layout';
 
 type WaveformPoint = {
   readonly value: number;
@@ -113,13 +115,18 @@ const createPeakPath = (
 export function SkiaWaveform({
   points,
   peaks,
-  strokeColor = '#39d353',
-  peakColor = '#F44336',
+  strokeColor,
+  peakColor,
   strokeWidth = 2,
   backgroundGradient,
   containerStyle,
 }: Props): JSX.Element {
   const [layout, setLayout] = useState({width: 0, height: 0});
+  const themeStrokeColor = useThemeColor('primary');
+  const themePeakColor = useThemeColor('error');
+
+  const resolvedStrokeColor = strokeColor ?? themeStrokeColor;
+  const resolvedPeakColor = peakColor ?? themePeakColor;
 
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     const {width, height} = event.nativeEvent.layout;
@@ -137,11 +144,7 @@ export function SkiaWaveform({
   );
 
   const gradientPaint = useMemo(() => {
-    if (
-      !backgroundGradient ||
-      layout.width <= 0 ||
-      layout.height <= 0
-    ) {
+    if (!backgroundGradient || layout.width <= 0 || layout.height <= 0) {
       return null;
     }
     const {from, to, opacity = 1} = backgroundGradient;
@@ -163,9 +166,7 @@ export function SkiaWaveform({
   const shouldRender = layout.width > 0 && layout.height > 0;
 
   return (
-    <View
-      style={[styles.container, containerStyle]}
-      onLayout={onLayout}>
+    <View style={[styles.container, containerStyle]} onLayout={onLayout}>
       {shouldRender ? (
         <Canvas style={StyleSheet.absoluteFill}>
           {gradientPaint ? (
@@ -180,11 +181,11 @@ export function SkiaWaveform({
           <Path
             path={waveformPath}
             style="stroke"
-            color={strokeColor}
+            color={resolvedStrokeColor}
             strokeWidth={strokeWidth}
           />
           {peakPath ? (
-            <Path path={peakPath} color={peakColor} style="fill" />
+            <Path path={peakPath} color={resolvedPeakColor} style="fill" />
           ) : null}
         </Canvas>
       ) : null}
@@ -197,7 +198,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignSelf: 'stretch',
     width: '100%',
-    borderRadius: 12,
+    borderRadius: BORDER_RADIUS.md,
     overflow: 'hidden',
   },
 });

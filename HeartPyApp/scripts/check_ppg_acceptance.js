@@ -153,13 +153,13 @@ class PPGAcceptanceChecker {
     this.test(
       'Valid samples received',
       () => {
-        // PPGCamera logs: "LOG  [PPGCamera] Received valid sample from NativeModules"
         const matches = this.logContent.match(
           /LOG\s+\[PPGCamera\]\s+Received\s+valid\s+sample\s+from\s+NativeModules/g,
         );
         return matches && matches.length >= 10;
       },
       'At least 10 valid samples received',
+    );
 
     this.test(
       'HeartPy pushWithTimestamps called',
@@ -170,48 +170,46 @@ class PPGAcceptanceChecker {
         return matches && matches.length >= 5;
       },
       'HeartPy pushWithTimestamps called at least 5 times',
+    );
 
     // HeartPy Warm-up Tests
     console.log('\n🔍 Testing HeartPy Warm-up...');
     this.test(
       'Native confidence preserved',
       () => {
-        // HeartPyWrapper logs: "LOG  [HeartPyWrapper] Native metrics { ... \"confidence\": <num> }"
-        // RN log has no colon after "Native metrics"; confidence is rarely exactly 0 during warm-up.
         const matches = this.logContent.match(
           /LOG\s+\[HeartPyWrapper\]\s+Native\s+metrics\b.*\"confidence\"\s*:\s*-?\d+(?:\.\d+)?/g,
         );
         return matches && matches.length >= 3;
       },
       'Native metrics with confidence logged during warm-up',
+    );
 
     this.test(
       'BPM calculation started',
       () => {
-        // HeartPyWrapper logs: "LOG  [HeartPyWrapper] poll response" with "bpm" field (even if undefined)
         const matches = this.logContent.match(
           /LOG\s+\[HeartPyWrapper\]\s+poll\s+response.*"bpm"/g,
         );
         return matches && matches.length >= 2;
       },
       'BPM calculation started',
+    );
 
     this.test(
       'NaN sample handling',
       () => {
-        // PPGCamera logs: "LOG  [PPGCamera] Received NaN sample (warm-up/low signal)"
         const matches = this.logContent.match(
           /LOG\s+\[PPGCamera\]\s+Received\s+NaN\s+sample\s+\(warm-up\/low\s+signal\)/g,
         );
-        // If no NaN samples found, consider it optional (good signal quality)
         return matches ? matches.length >= 1 : true;
       },
       'NaN samples properly handled during warm-up (optional)',
+    );
 
     this.test(
       'NaN ratio monitoring',
       () => {
-        // Check for reasonable NaN ratio (only upper bound - too many NaNs indicate poor signal)
         const nanMatches = this.logContent.match(
           /LOG\s+\[PPGCamera\]\s+Received\s+NaN\s+sample/g,
         );
@@ -219,40 +217,34 @@ class PPGAcceptanceChecker {
           /LOG\s+\[PPGCamera\]\s+Received\s+valid\s+sample\s+from\s+NativeModules/g,
         );
 
-        // If no NaN samples found, consider it excellent signal quality
         if (!nanMatches || nanMatches.length === 0) {
-          return true; // No NaN samples = excellent signal quality
+          return true;
         }
-
-        // If there are NaNs but never any valid samples, this is a real failure.
         if (!validMatches || validMatches.length === 0) {
           return false;
         }
 
         const totalSamples = nanMatches.length + validMatches.length;
-
-        // Skip the ratio check when the log only contains a tiny warm-up slice.
         if (totalSamples < 20) {
           return true;
         }
 
         const nanRatio = nanMatches.length / totalSamples;
-
-        // Only check upper bound: NaN ratio should not be too high (indicates poor signal)
-        return nanRatio <= 0.8; // Guard against too many NaNs
+        return nanRatio <= 0.8;
       },
       'NaN ratio not excessive (optional)',
+    );
 
     this.test(
       'Confidence fallback logic',
       () => {
-        // Check for confidence fallback usage (native confidence undefined/NaN cases)
         const nativeMetricsMatches = this.logContent.match(
-          /LOG\s+\[HeartPyWrapper\]\s+Native\s+metrics\b/g,
+          /LOG\s+\[HeartPyWrapper\]\]\s+Native\s+metrics\b/g,
         );
         return nativeMetricsMatches && nativeMetricsMatches.length >= 5;
       },
       'Confidence fallback logic working',
+    );
 
     // Peak Filtering Tests
     console.log('\n🔍 Testing Peak Filtering...');
@@ -265,6 +257,7 @@ class PPGAcceptanceChecker {
         return matches && matches.length >= 2;
       },
       'Peak filtering logs present',
+    );
 
     // UI Haptic Tests
     console.log('\n🔍 Testing UI Haptic Feedback...');
@@ -277,11 +270,11 @@ class PPGAcceptanceChecker {
         return matches && matches.length >= 1;
       },
       'Haptic feedback logic working',
+    );
 
     this.test(
       'Signal recovery detection',
       () => {
-        // Check for signal quality indicators in various formats
         const signalQualityMatches = this.logContent.match(
           /Signal quality.*(?:poor|good)/gi,
         );
@@ -290,38 +283,36 @@ class PPGAcceptanceChecker {
         );
         const hapticTriggeredMatches = this.logContent.match(
           /LOG\s+💓\s+Heart\s+beat\s+detected.*Haptic\s+triggered/gi,
+        );
 
-
-        // If we have haptic disabled patterns, consider it as signal quality indication
         if (hapticDisabledMatches && hapticDisabledMatches.length >= 1) {
-          return true; // Haptic disabled indicates signal quality awareness
+          return true;
         }
 
-      // If we have both haptic patterns, consider it as signal recovery
         if (hapticDisabledMatches && hapticTriggeredMatches) {
           return (
             hapticDisabledMatches.length >= 1 &&
             hapticTriggeredMatches.length >= 1
           );
+        }
 
-
-        // Fallback to signal quality logs if available
         return signalQualityMatches && signalQualityMatches.length >= 2;
       },
       'Signal recovery after poor quality detected (optional)',
+    );
 
     // Error Handling Tests
     console.log('\n🔍 Testing Error Handling...');
     this.test(
       'No critical errors',
       () => {
-        // Case-insensitive error detection
         const matches = this.logContent.match(
           /ERROR|CRITICAL|FATAL|Error|Critical|Fatal/gi,
         );
         return !matches || matches.length === 0;
       },
       'No critical errors in log',
+    );
 
     this.reportMetrics();
     this.printSummary();

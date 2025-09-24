@@ -1,12 +1,14 @@
 import React, {useMemo} from 'react';
-import {StyleSheet, Switch, Text, TouchableOpacity, View} from 'react-native';
+import {StyleSheet, Switch, View} from 'react-native';
 import {
   DEFAULT_ANALYZER_OPTIONS,
   type AnalyzerTuningOptions,
 } from '../core/PPGAnalyzer';
-import {COLORS} from '../styles/colors';
-import {TYPOGRAPHY, TEXT_STYLES} from '../styles/typography';
-import {SPACING, LAYOUT} from '../styles/spacing';
+import {Card, Typography, IconButton, SettingRow, Button} from './ui';
+import {useThemeColor} from '../hooks/useThemeColor';
+import {useResponsive} from '../styles/responsive';
+import {SPACING} from '../theme/spacing';
+import {BORDER_RADIUS} from '../theme/layout';
 
 type Props = {
   options: AnalyzerTuningOptions;
@@ -122,6 +124,12 @@ export function PPGParameterControls({
     return CONTROL_CONFIG.filter(config => allowed.has(config.key));
   }, [includeKeys]);
 
+  const {ms} = useResponsive();
+  const primaryColor = useThemeColor('primary');
+  const borderColor = useThemeColor('border');
+  const surfaceColor = useThemeColor('surface');
+  const surfaceMutedColor = useThemeColor('surfaceMuted');
+
   const rows = useMemo(
     () =>
       configs.map(config => {
@@ -148,38 +156,49 @@ export function PPGParameterControls({
           await onChange({[config.key]: next});
         };
 
-        return (
-          <View key={config.key as string} style={styles.row}>
-            <View style={styles.labelColumn}>
-              <Text style={styles.label}>{config.label}</Text>
-              <Text style={styles.value}>{displayValue}</Text>
-            </View>
-            <View style={styles.actions}>
-              <TouchableOpacity
-                onPress={() => void adjust(-1)}
-                style={[
-                  styles.button,
-                  styles.decreaseButton,
-                  disabled && styles.buttonDisabled,
-                ]}
-                disabled={disabled}>
-                <Text style={styles.buttonText}>−</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => void adjust(1)}
-                style={[
-                  styles.button,
-                  styles.increaseButton,
-                  disabled && styles.buttonDisabled,
-                ]}
-                disabled={disabled}>
-                <Text style={styles.buttonText}>+</Text>
-              </TouchableOpacity>
-            </View>
+        const rightSlot = (
+          <View
+            style={[
+              styles.rowActions,
+              {gap: ms(SPACING.xs), alignItems: 'center'},
+            ]}>
+            <IconButton
+              label="−"
+              size="sm"
+              variant="outline"
+              onPress={() => void adjust(-1)}
+              disabled={disabled}
+              accessibilityLabel={`Decrease ${config.label}`}
+            />
+            <IconButton
+              label="+"
+              size="sm"
+              variant="outline"
+              onPress={() => void adjust(1)}
+              disabled={disabled}
+              accessibilityLabel={`Increase ${config.label}`}
+            />
           </View>
         );
+
+        return {
+          key: config.key as string,
+          node: (
+            <SettingRow
+              label={config.label}
+              hint={displayValue}
+              rightSlot={rightSlot}
+              contentStyle={{
+                backgroundColor: surfaceMutedColor,
+                borderRadius: BORDER_RADIUS.sm,
+                borderWidth: 1,
+                borderColor,
+              }}
+            />
+          ),
+        };
       }),
-    [configs, options, onChange, disabled],
+    [borderColor, configs, disabled, ms, onChange, options, surfaceMutedColor],
   );
 
   const headingLabel = title ?? 'Anlık Ayarlar';
@@ -187,162 +206,73 @@ export function PPGParameterControls({
     caption ??
     'Parametreleri değiştirirken dalga formu ve metriklere göz at. Ayarlar koşarken yeniden uygulanır.';
 
+  const dividerStyle = useMemo(
+    () => ({
+      height: 1,
+      width: '100%' as const,
+      backgroundColor: borderColor,
+      marginVertical: ms(SPACING.sm),
+    }),
+    [borderColor, ms],
+  );
+
   return (
-    <View style={styles.container}>
-      <Text style={styles.heading}>{headingLabel}</Text>
-      <Text style={styles.caption}>{captionLabel}</Text>
+    <Card
+      padding="md"
+      radius="md"
+      style={{gap: ms(SPACING.sm), backgroundColor: surfaceColor}}>
+      <Typography variant="headingS" weight="semibold">
+        {headingLabel}
+      </Typography>
+      <Typography
+        variant="bodyS"
+        color="textSecondary"
+        style={{marginTop: ms(SPACING.xs), lineHeight: 20}}>
+        {captionLabel}
+      </Typography>
       {showCalcFreqToggle ? (
         <>
-          <View style={styles.divider} />
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleLabelColumn}>
-              <Text style={styles.label}>Frequency Domain (LF/HF)</Text>
-              <Text style={styles.toggleCaption}>
-                LF/HF analizi daha fazla CPU tüketir. Gerekli olduğunda açın.
-              </Text>
-            </View>
-            <Switch
-              value={!!options.calcFreq}
-              onValueChange={value => onChange({calcFreq: value})}
-              disabled={disabled}
-              trackColor={{false: '#555', true: '#4caf50'}}
-              thumbColor={disabled ? '#777' : '#fff'}
-            />
-          </View>
+          <View style={dividerStyle} />
+          <SettingRow
+            label="Frequency Domain (LF/HF)"
+            hint="LF/HF analizi daha fazla CPU tüketir. Gerekli olduğunda açın."
+            rightSlot={
+              <Switch
+                value={!!options.calcFreq}
+                onValueChange={value => onChange({calcFreq: value})}
+                disabled={disabled}
+                trackColor={{false: borderColor, true: primaryColor}}
+                thumbColor={disabled ? borderColor : surfaceColor}
+              />
+            }
+          />
         </>
       ) : null}
-      <View style={styles.divider} />
-      {rows}
+      <View style={dividerStyle} />
+      {rows.map(({key, node}, index) => (
+        <View key={key}>
+          {node}
+          {index < rows.length - 1 ? <View style={dividerStyle} /> : null}
+        </View>
+      ))}
       {typeof onReset === 'function' ? (
-        <TouchableOpacity
+        <Button
+          title="Varsayılanlara dön"
+          variant="outline"
           onPress={() => void onReset()}
-          style={styles.resetButton}
-          disabled={disabled}>
-          <Text style={styles.resetText}>Varsayılanlara dön</Text>
-        </TouchableOpacity>
+          disabled={disabled}
+          style={{alignSelf: 'flex-start'}}
+        />
       ) : null}
-    </View>
+    </Card>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    backgroundColor: COLORS.surface,
-    borderRadius: LAYOUT.borderRadius.medium,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: SPACING.md,
-    gap: SPACING.sm,
-    ...LAYOUT.shadows.subtle,
+  rowWrapper: {
+    width: '100%',
   },
-
-  heading: {
-    ...TEXT_STYLES.label,
-    color: COLORS.text,
-    fontWeight: TYPOGRAPHY.fontWeights.medium,
-  },
-
-  caption: {
-    ...TEXT_STYLES.secondary,
-    color: COLORS.textSecondary,
-    lineHeight: TYPOGRAPHY.lineHeights.normal,
-  },
-
-  divider: {
-    height: 1,
-    backgroundColor: COLORS.border,
-  },
-
-  toggleRow: {
+  rowActions: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: SPACING.sm,
-  },
-
-  toggleLabelColumn: {
-    flex: 1,
-  },
-
-  toggleCaption: {
-    ...TEXT_STYLES.secondary,
-    color: COLORS.textSecondary,
-    marginTop: SPACING.xs,
-  },
-
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: COLORS.background,
-    borderRadius: LAYOUT.borderRadius.small,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.sm,
-    gap: SPACING.md,
-  },
-
-  labelColumn: {
-    flex: 1,
-  },
-
-  label: {
-    ...TEXT_STYLES.label,
-    color: COLORS.text,
-    fontWeight: TYPOGRAPHY.fontWeights.medium,
-  },
-
-  value: {
-    ...TEXT_STYLES.label,
-    color: COLORS.text,
-    marginTop: SPACING.xs,
-  },
-
-  actions: {
-    flexDirection: 'row',
-    gap: SPACING.xs,
-  },
-
-  button: {
-    width: 44,
-    height: 44,
-    borderRadius: LAYOUT.borderRadius.small,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-
-  decreaseButton: {
-    backgroundColor: COLORS.secondary,
-  },
-
-  increaseButton: {
-    backgroundColor: COLORS.primary,
-  },
-
-  buttonDisabled: {
-    opacity: 0.4,
-  },
-
-  buttonText: {
-    ...TEXT_STYLES.label,
-    color: COLORS.textInverse,
-    fontWeight: TYPOGRAPHY.fontWeights.medium,
-    marginTop: -4,
-  },
-
-  resetButton: {
-    marginTop: SPACING.xs,
-    alignSelf: 'flex-start',
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs,
-    borderRadius: LAYOUT.borderRadius.small,
-    backgroundColor: COLORS.background,
-  },
-
-  resetText: {
-    ...TEXT_STYLES.secondary,
-    color: COLORS.textSecondary,
-    fontWeight: TYPOGRAPHY.fontWeights.medium,
   },
 });

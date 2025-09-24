@@ -83,6 +83,8 @@ export const PPG_CONFIG = {
     confidenceCollapseThreshold: 0.95,
     unifiedPrimaryCard: true,
     waveformGradient: true,
+    tabletTwoColumnLayout: true,
+    themeMode: 'system' as const,
   },
 
   debug: {
