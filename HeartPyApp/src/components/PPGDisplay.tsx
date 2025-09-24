@@ -14,6 +14,7 @@ import SkiaWaveform from './SkiaWaveform';
 import {COLORS, getBpmColor, getConfidenceColor} from '../styles/colors';
 import {TYPOGRAPHY, TEXT_STYLES} from '../styles/typography';
 import {SPACING, LAYOUT} from '../styles/spacing';
+import {useResponsive} from '../styles/responsive';
 
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
@@ -34,19 +35,39 @@ type MinimalMetricCardProps = {
   label: string;
   value: string;
   valueColor?: string;
+  fontSizeOverride?: number;
+  containerWidth?: number | `${number}%`;
+  containerMaxWidth?: number;
 };
 
 const MinimalMetricCard = React.memo(
-  ({label, value, valueColor}: MinimalMetricCardProps) => {
+  ({
+    label,
+    value,
+    valueColor,
+    fontSizeOverride,
+    containerWidth,
+    containerMaxWidth,
+  }: MinimalMetricCardProps) => {
     const isConfidence = label === 'Confidence';
     const valueStyle = isConfidence
       ? styles.minimalConfidenceValue
       : styles.minimalBpmValue;
 
     return (
-      <View style={styles.minimalMetricCard}>
+      <View
+        style={[
+          styles.minimalMetricCard,
+          containerWidth ? {width: containerWidth} : null,
+          containerMaxWidth ? {maxWidth: containerMaxWidth} : null,
+        ]}>
         <Text style={styles.minimalMetricLabel}>{label}</Text>
-        <Text style={[valueStyle, {color: valueColor || COLORS.text}]}>
+        <Text
+          style={[
+            valueStyle,
+            fontSizeOverride ? {fontSize: fontSizeOverride} : null,
+            {color: valueColor || COLORS.text},
+          ]}>
           {value}
         </Text>
       </View>
@@ -55,7 +76,10 @@ const MinimalMetricCard = React.memo(
   (prev, next) =>
     prev.label === next.label &&
     prev.value === next.value &&
-    prev.valueColor === next.valueColor,
+    prev.valueColor === next.valueColor &&
+    prev.fontSizeOverride === next.fontSizeOverride &&
+    prev.containerWidth === next.containerWidth &&
+    prev.containerMaxWidth === next.containerMaxWidth,
 );
 
 const PPGDisplayComponent = ({
@@ -64,6 +88,7 @@ const PPGDisplayComponent = ({
   onStart,
   onStop,
 }: Props): JSX.Element => {
+  const r = useResponsive();
   const {metrics, waveform, warmupProgress} = data;
   const isIdle = state === 'idle';
   const isStarting = state === 'starting';
@@ -543,6 +568,20 @@ const PPGDisplayComponent = ({
     metrics?.breathingRate,
   ]);
 
+  // Responsive derived sizes
+  const bpmFontSize = r.ms(TYPOGRAPHY.fontSizes.large, r.isTablet ? 0.5 : 0.35);
+  const confidenceFontSize = r.ms(
+    TYPOGRAPHY.fontSizes.medium,
+    r.isTablet ? 0.45 : 0.35,
+  );
+  const waveformHeight = r.isTablet
+    ? (r.isLandscape ? Math.max(220, Math.round(r.height * 0.35)) : 220)
+    : (r.isLandscape ? 180 : 160);
+  const cardMaxWidth = r.isTablet ? 420 : 320;
+  const cardWidthPct: `${number}%` = r.isTablet ? '65%' : '80%';
+  const detailCardBasis: `${number}%` = r.isTablet ? '30%' : '45%';
+  const strokeWidth = r.isTablet ? 3 : 2;
+
   return (
     <View style={styles.minimalContainer}>
       {/* Minimalist Metrics - sadece BPM ve Confidence */}
@@ -553,6 +592,11 @@ const PPGDisplayComponent = ({
             label={metric.label}
             value={metric.value}
             valueColor={metric.valueColor}
+            fontSizeOverride={
+              metric.key === 'bpm' ? bpmFontSize : confidenceFontSize
+            }
+            containerWidth={cardWidthPct}
+            containerMaxWidth={cardMaxWidth}
           />
         ))}
         {confidenceBadgeText ? (
@@ -567,12 +611,21 @@ const PPGDisplayComponent = ({
             Initializing... {warmupProgress.progress.toFixed(0)}%
           </Text>
           <View style={styles.warmupProgressBar}>
-            <View 
-              style={[
-                styles.warmupProgressFill, 
-                {width: `${warmupProgress.progress}%`}
-              ]} 
-            />
+            {(() => {
+              const boundedProgress = Math.min(
+                100,
+                Math.max(0, warmupProgress.progress ?? 0),
+              );
+              const widthPercent = `${boundedProgress}%` as `${number}%`;
+              return (
+                <View
+                  style={[
+                    styles.warmupProgressFill,
+                    {width: widthPercent},
+                  ]}
+                />
+              );
+            })()}
           </View>
           <Text style={styles.warmupSubtext}>
             {warmupProgress.samplesPushed} / {warmupProgress.samplesRequired} samples
@@ -584,7 +637,12 @@ const PPGDisplayComponent = ({
         <Text style={styles.detailTitle}>Advanced Metrics</Text>
         <View style={styles.detailMetricsGrid}>
           {detailMetrics.map(metric => (
-            <View key={metric.key} style={styles.detailMetricCard}>
+            <View
+              key={metric.key}
+              style={[
+                styles.detailMetricCard,
+                {flexBasis: detailCardBasis, maxWidth: 240},
+              ]}>
               <Text style={styles.detailMetricLabel}>{metric.label}</Text>
               <Text style={styles.detailMetricValue}>{metric.value}</Text>
             </View>
@@ -593,8 +651,12 @@ const PPGDisplayComponent = ({
       </View>
 
       {/* Waveform - minimal ve sakin */}
-      <View style={styles.minimalWaveform}>
-        <SkiaWaveform points={waveformPoints} peaks={peakTimestampSet} />
+      <View style={[styles.minimalWaveform, {height: waveformHeight, width: '92%'}]}>
+        <SkiaWaveform
+          points={waveformPoints}
+          peaks={peakTimestampSet}
+          strokeWidth={strokeWidth}
+        />
       </View>
 
       {showBreathingGuide ? <_BreathingGuide /> : null}
@@ -696,7 +758,7 @@ const styles = StyleSheet.create({
     padding: SPACING.lg,
     borderRadius: LAYOUT.borderRadius.large,
     width: '80%',
-    maxWidth: 300,
+    maxWidth: 360,
     ...LAYOUT.shadows.subtle,
   },
 
@@ -715,6 +777,7 @@ const styles = StyleSheet.create({
   },
 
   minimalBpmValue: {
+    // will be overridden responsively in-line where used
     fontSize: TYPOGRAPHY.fontSizes.large,
     color: COLORS.text,
     textAlign: 'center',
@@ -723,6 +786,7 @@ const styles = StyleSheet.create({
   },
 
   minimalConfidenceValue: {
+    // will be overridden responsively in-line where used
     fontSize: TYPOGRAPHY.fontSizes.medium,
     color: COLORS.text,
     textAlign: 'center',
@@ -732,8 +796,8 @@ const styles = StyleSheet.create({
 
   // Minimalist Waveform
   minimalWaveform: {
-    height: 150,
-    width: '90%',
+    height: 160,
+    width: '92%',
     borderRadius: LAYOUT.borderRadius.medium,
     backgroundColor: COLORS.surface,
     marginBottom: SPACING.xl,
