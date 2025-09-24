@@ -81,6 +81,8 @@ export const PPG_CONFIG = {
     adaptiveColor: true,
     breathingGuide: false,
     confidenceCollapseThreshold: 0.95,
+    unifiedPrimaryCard: true,
+    waveformGradient: true,
   },
 
   debug: {

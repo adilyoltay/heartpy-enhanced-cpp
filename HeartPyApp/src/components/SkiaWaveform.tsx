@@ -1,10 +1,17 @@
 import React, {useCallback, useMemo, useState} from 'react';
 import {LayoutChangeEvent, StyleSheet, View} from 'react-native';
-import {Canvas, Path, Skia} from '@shopify/react-native-skia';
+import type {StyleProp, ViewStyle} from 'react-native';
+import {Canvas, Path, Rect, Skia, TileMode} from '@shopify/react-native-skia';
 
 type WaveformPoint = {
   readonly value: number;
   readonly timestamp: number;
+};
+
+type WaveformGradient = {
+  readonly from: string;
+  readonly to: string;
+  readonly opacity?: number;
 };
 
 type Props = {
@@ -13,6 +20,8 @@ type Props = {
   readonly strokeColor?: string;
   readonly peakColor?: string;
   readonly strokeWidth?: number;
+  readonly backgroundGradient?: WaveformGradient;
+  readonly containerStyle?: StyleProp<ViewStyle>;
 };
 
 const PADDING_Y = 6;
@@ -107,6 +116,8 @@ export function SkiaWaveform({
   strokeColor = '#39d353',
   peakColor = '#F44336',
   strokeWidth = 2,
+  backgroundGradient,
+  containerStyle,
 }: Props): JSX.Element {
   const [layout, setLayout] = useState({width: 0, height: 0});
 
@@ -125,12 +136,47 @@ export function SkiaWaveform({
     [points, peaks, layout.height, layout.width],
   );
 
+  const gradientPaint = useMemo(() => {
+    if (
+      !backgroundGradient ||
+      layout.width <= 0 ||
+      layout.height <= 0
+    ) {
+      return null;
+    }
+    const {from, to, opacity = 1} = backgroundGradient;
+    const colors = [Skia.Color(from), Skia.Color(to)];
+    const positions = [0, 1];
+    const shader = Skia.Shader.MakeLinearGradient(
+      {x: 0, y: 0},
+      {x: 0, y: layout.height},
+      colors,
+      positions,
+      TileMode.Clamp,
+    );
+    const paint = Skia.Paint();
+    paint.setShader(shader);
+    paint.setAlphaf(opacity);
+    return paint;
+  }, [backgroundGradient, layout.height, layout.width]);
+
   const shouldRender = layout.width > 0 && layout.height > 0;
 
   return (
-    <View style={styles.container} onLayout={onLayout}>
+    <View
+      style={[styles.container, containerStyle]}
+      onLayout={onLayout}>
       {shouldRender ? (
         <Canvas style={StyleSheet.absoluteFill}>
+          {gradientPaint ? (
+            <Rect
+              x={0}
+              y={0}
+              width={layout.width}
+              height={layout.height}
+              paint={gradientPaint}
+            />
+          ) : null}
           <Path
             path={waveformPath}
             style="stroke"
@@ -149,6 +195,8 @@ export function SkiaWaveform({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    alignSelf: 'stretch',
+    width: '100%',
     borderRadius: 12,
     overflow: 'hidden',
   },

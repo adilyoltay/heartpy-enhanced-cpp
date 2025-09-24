@@ -11,6 +11,7 @@ import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import {PPG_CONFIG} from '../core/PPGConfig';
 import type {PPGAnalysisFrame, PPGState} from '../types/PPGTypes';
 import SkiaWaveform from './SkiaWaveform';
+import {PrimaryMetricsCard} from './PrimaryMetricsCard';
 import {COLORS, getBpmColor, getConfidenceColor} from '../styles/colors';
 import {TYPOGRAPHY, TEXT_STYLES} from '../styles/typography';
 import {SPACING, LAYOUT} from '../styles/spacing';
@@ -581,27 +582,75 @@ const PPGDisplayComponent = ({
   const cardWidthPct: `${number}%` = r.isTablet ? '65%' : '80%';
   const detailCardBasis: `${number}%` = r.isTablet ? '30%' : '45%';
   const strokeWidth = r.isTablet ? 3 : 2;
+  const useUnifiedPrimaryCard = Boolean(
+    PPG_CONFIG.ui?.unifiedPrimaryCard ?? true,
+  );
+  const useWaveformGradient = Boolean(
+    PPG_CONFIG.ui?.waveformGradient ?? true,
+  );
+
+  const waveformGradientSettings = useMemo(
+    () =>
+      useWaveformGradient
+        ? {
+            from: 'rgba(16, 185, 129, 0.16)',
+            to: 'rgba(59, 130, 246, 0.06)',
+            opacity: 1,
+          }
+        : undefined,
+    [useWaveformGradient],
+  );
+
+  const primaryCardWidthStyle = useUnifiedPrimaryCard
+    ? {width: cardWidthPct, maxWidth: cardMaxWidth}
+    : undefined;
 
   return (
     <View style={styles.minimalContainer}>
-      {/* Minimalist Metrics - sadece BPM ve Confidence */}
+      {/* Minimalist Metrics - BPM & Confidence */}
       <View style={styles.minimalMetricsContainer}>
-        {primaryMetrics.map(metric => (
-          <MinimalMetricCard
-            key={metric.key}
-            label={metric.label}
-            value={metric.value}
-            valueColor={metric.valueColor}
-            fontSizeOverride={
-              metric.key === 'bpm' ? bpmFontSize : confidenceFontSize
-            }
-            containerWidth={cardWidthPct}
-            containerMaxWidth={cardMaxWidth}
-          />
-        ))}
-        {confidenceBadgeText ? (
-          <Text style={styles.confidenceBadge}>Confidence {confidenceBadgeText}</Text>
-        ) : null}
+        {useUnifiedPrimaryCard ? (
+          <View style={[styles.primaryCardWrapper, primaryCardWidthStyle]}>
+            <PrimaryMetricsCard
+              bpm={metricsViewModel.bpmNumber}
+              bpmText={
+                metricsViewModel.bpmNumber !== undefined
+                  ? metricsViewModel.bpmText
+                  : '--'
+              }
+              confidenceText={confidencePercentText}
+              bpmColor={getBpmColor(metricsViewModel.bpmNumber ?? 0)}
+              confidenceColor={getConfidenceColor(
+                metricsViewModel.confidenceNumber ?? 0,
+              )}
+              showConfidence={showConfidenceCard}
+              breakpoint={r.bp}
+              isLandscape={r.isLandscape}
+              ms={r.ms}
+            />
+          </View>
+        ) : (
+          <>
+            {primaryMetrics.map(metric => (
+              <MinimalMetricCard
+                key={metric.key}
+                label={metric.label}
+                value={metric.value}
+                valueColor={metric.valueColor}
+                fontSizeOverride={
+                  metric.key === 'bpm' ? bpmFontSize : confidenceFontSize
+                }
+                containerWidth={cardWidthPct}
+                containerMaxWidth={cardMaxWidth}
+              />
+            ))}
+            {confidenceBadgeText ? (
+              <Text style={styles.confidenceBadge}>
+                Confidence {confidenceBadgeText}
+              </Text>
+            ) : null}
+          </>
+        )}
       </View>
 
       {/* Warm-up Progress Bar */}
@@ -651,11 +700,12 @@ const PPGDisplayComponent = ({
       </View>
 
       {/* Waveform - minimal ve sakin */}
-      <View style={[styles.minimalWaveform, {height: waveformHeight, width: '92%'}]}>
+      <View style={[styles.minimalWaveform, {height: waveformHeight}]}>
         <SkiaWaveform
           points={waveformPoints}
           peaks={peakTimestampSet}
           strokeWidth={strokeWidth}
+          backgroundGradient={waveformGradientSettings}
         />
       </View>
 
@@ -745,6 +795,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
+  primaryCardWrapper: {
+    alignSelf: 'center',
+  },
+
   confidenceBadge: {
     marginTop: SPACING.sm,
     ...TEXT_STYLES.secondary,
@@ -797,7 +851,8 @@ const styles = StyleSheet.create({
   // Minimalist Waveform
   minimalWaveform: {
     height: 160,
-    width: '92%',
+    width: '100%',
+    marginHorizontal: SPACING.sm,
     borderRadius: LAYOUT.borderRadius.medium,
     backgroundColor: COLORS.surface,
     marginBottom: SPACING.xl,

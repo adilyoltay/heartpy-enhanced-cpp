@@ -383,8 +383,11 @@ export class PPGAnalyzer {
 
         if (this.totalSamplesPushed < reservoirSamplesRequired) {
           // Calculate progress percentage
-          const progress = Math.min(100, (this.totalSamplesPushed / reservoirSamplesRequired) * 100);
-          
+          const progress = Math.min(
+            100,
+            (this.totalSamplesPushed / reservoirSamplesRequired) * 100,
+          );
+
           // Update warmup progress in UI
           if (this.onWarmupProgressCb) {
             this.onWarmupProgressCb({
@@ -394,7 +397,7 @@ export class PPGAnalyzer {
               samplesRequired: reservoirSamplesRequired,
             });
           }
-          
+
           // Log every 50 samples to track progress
           if (this.totalSamplesPushed % 50 === 0 && PPG_CONFIG.debug.enabled) {
             console.log('[PPGAnalyzer] Waiting for reservoir warm-up', {
@@ -410,7 +413,7 @@ export class PPGAnalyzer {
         this.reservoirReady = true;
         summary.reservoirReady = true;
         this.hasLoggedReservoirWait = false;
-        
+
         // Notify UI that warmup is complete
         if (this.onWarmupProgressCb) {
           this.onWarmupProgressCb({
@@ -420,7 +423,7 @@ export class PPGAnalyzer {
             samplesRequired: reservoirSamplesRequired,
           });
         }
-        
+
         if (PPG_CONFIG.debug.enabled) {
           console.log(
             '[PPGAnalyzer] Reservoir ready; enabling native polling',
