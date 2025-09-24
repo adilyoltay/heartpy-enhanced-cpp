@@ -1210,27 +1210,6 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - Yoga
-  - RNSound (0.12.0):
-    - DoubleConversion
-    - glog
-    - RCT-Folly (= 2024.01.01.00)
-    - RCTRequired
-    - RCTTypeSafety
-    - React-Codegen
-    - React-Core
-    - React-debug
-    - React-Fabric
-    - React-featureflags
-    - React-graphics
-    - React-ImageManager
-    - React-jsi
-    - React-NativeModulesApple
-    - React-RCTFabric
-    - React-rendererdebug
-    - React-utils
-    - ReactCommon/turbomodule/bridging
-    - ReactCommon/turbomodule/core
-    - Yoga
   - SocketRocket (0.7.0)
   - VisionCamera (4.7.2):
     - VisionCamera/Core (= 4.7.2)
@@ -1306,7 +1285,6 @@ DEPENDENCIES:
   - "RNCAsyncStorage (from `../node_modules/@react-native-async-storage/async-storage`)"
   - RNReactNativeHapticFeedback (from `../node_modules/react-native-haptic-feedback`)
   - RNReanimated (from `../node_modules/react-native-reanimated`)
-  - RNSound (from `../node_modules/react-native-sound`)
   - VisionCamera (from `../node_modules/react-native-vision-camera`)
   - Yoga (from `../node_modules/react-native/ReactCommon/yoga`)
 
@@ -1429,8 +1407,6 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native-haptic-feedback"
   RNReanimated:
     :path: "../node_modules/react-native-reanimated"
-  RNSound:
-    :path: "../node_modules/react-native-sound"
   VisionCamera:
     :path: "../node_modules/react-native-vision-camera"
   Yoga:
@@ -1494,11 +1470,10 @@ SPEC CHECKSUMS:
   RNCAsyncStorage: b6410dead2732b5c72a7fdb1ecb5651bbcf4674b
   RNReactNativeHapticFeedback: 12e29a351735879f9e3c32c36a3439cdf2a49a5b
   RNReanimated: deb12f1bd42fc63496ef626d0ccbefa9e80e5a03
-  RNSound: 2116e0b11248cb51a5c28cb4015efe5b6c3572d8
   SocketRocket: abac6f5de4d4d62d24e11868d7a2f427e0ef940d
   VisionCamera: 4146fa2612c154f893a42a9b1feedf868faa6b23
   Yoga: 04f1db30bb810187397fa4c37dd1868a27af229c
 
-PODFILE CHECKSUM: fcc6cee5e0e407c31c40d57932c6a82324c6932f
+PODFILE CHECKSUM: f68cdd6d663d7ada55f61756084239f2687f0090
 
 COCOAPODS: 1.16.2

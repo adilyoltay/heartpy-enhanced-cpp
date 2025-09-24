@@ -1,15 +1,22 @@
 import React, {useMemo} from 'react';
-import {StyleSheet, Text, TouchableOpacity, View} from 'react-native';
+import {StyleSheet, Switch, Text, TouchableOpacity, View} from 'react-native';
 import {
   DEFAULT_ANALYZER_OPTIONS,
   type AnalyzerTuningOptions,
 } from '../core/PPGAnalyzer';
+import {COLORS} from '../styles/colors';
+import {TYPOGRAPHY, TEXT_STYLES} from '../styles/typography';
+import {SPACING, LAYOUT} from '../styles/spacing';
 
 type Props = {
   options: AnalyzerTuningOptions;
   onChange: (update: Partial<AnalyzerTuningOptions>) => Promise<void> | void;
   onReset?: () => Promise<void> | void;
   disabled?: boolean;
+  includeKeys?: ReadonlyArray<keyof AnalyzerTuningOptions>;
+  title?: string;
+  caption?: string;
+  showCalcFreqToggle?: boolean;
 };
 
 type ControlConfig = {
@@ -102,16 +109,26 @@ export function PPGParameterControls({
   onChange,
   onReset,
   disabled,
+  includeKeys,
+  title,
+  caption,
+  showCalcFreqToggle = true,
 }: Props): JSX.Element {
+  const configs = useMemo(() => {
+    if (!includeKeys || includeKeys.length === 0) {
+      return CONTROL_CONFIG;
+    }
+    const allowed = new Set(includeKeys);
+    return CONTROL_CONFIG.filter(config => allowed.has(config.key));
+  }, [includeKeys]);
+
   const rows = useMemo(
     () =>
-      CONTROL_CONFIG.map(config => {
+      configs.map(config => {
         const baseValue = options[config.key];
         const defaultValue = DEFAULT_ANALYZER_OPTIONS[config.key];
         const value =
-          typeof baseValue === 'number'
-            ? baseValue
-            : (defaultValue as number);
+          typeof baseValue === 'number' ? baseValue : (defaultValue as number);
 
         const displayValue = config.format
           ? config.format(value)
@@ -122,7 +139,9 @@ export function PPGParameterControls({
             return;
           }
           const next = clamp(
-            Number((value + direction * config.step).toFixed(config.decimals ?? 3)),
+            Number(
+              (value + direction * config.step).toFixed(config.decimals ?? 3),
+            ),
             config.min,
             config.max,
           );
@@ -138,13 +157,21 @@ export function PPGParameterControls({
             <View style={styles.actions}>
               <TouchableOpacity
                 onPress={() => void adjust(-1)}
-                style={[styles.button, styles.decreaseButton, disabled && styles.buttonDisabled]}
+                style={[
+                  styles.button,
+                  styles.decreaseButton,
+                  disabled && styles.buttonDisabled,
+                ]}
                 disabled={disabled}>
                 <Text style={styles.buttonText}>−</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => void adjust(1)}
-                style={[styles.button, styles.increaseButton, disabled && styles.buttonDisabled]}
+                style={[
+                  styles.button,
+                  styles.increaseButton,
+                  disabled && styles.buttonDisabled,
+                ]}
                 disabled={disabled}>
                 <Text style={styles.buttonText}>+</Text>
               </TouchableOpacity>
@@ -152,16 +179,38 @@ export function PPGParameterControls({
           </View>
         );
       }),
-    [options, onChange, disabled],
+    [configs, options, onChange, disabled],
   );
+
+  const headingLabel = title ?? 'Anlık Ayarlar';
+  const captionLabel =
+    caption ??
+    'Parametreleri değiştirirken dalga formu ve metriklere göz at. Ayarlar koşarken yeniden uygulanır.';
 
   return (
     <View style={styles.container}>
-      <Text style={styles.heading}>Anlık Ayarlar</Text>
-      <Text style={styles.caption}>
-        Parametreleri değiştirirken dalga formu ve metriklere göz at. Ayarlar koşarken
-        yeniden uygulanır.
-      </Text>
+      <Text style={styles.heading}>{headingLabel}</Text>
+      <Text style={styles.caption}>{captionLabel}</Text>
+      {showCalcFreqToggle ? (
+        <>
+          <View style={styles.divider} />
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleLabelColumn}>
+              <Text style={styles.label}>Frequency Domain (LF/HF)</Text>
+              <Text style={styles.toggleCaption}>
+                LF/HF analizi daha fazla CPU tüketir. Gerekli olduğunda açın.
+              </Text>
+            </View>
+            <Switch
+              value={!!options.calcFreq}
+              onValueChange={value => onChange({calcFreq: value})}
+              disabled={disabled}
+              trackColor={{false: '#555', true: '#4caf50'}}
+              thumbColor={disabled ? '#777' : '#fff'}
+            />
+          </View>
+        </>
+      ) : null}
       <View style={styles.divider} />
       {rows}
       {typeof onReset === 'function' ? (
@@ -178,85 +227,122 @@ export function PPGParameterControls({
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#111',
-    borderRadius: 16,
-    padding: 16,
-    gap: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: LAYOUT.borderRadius.medium,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: SPACING.md,
+    gap: SPACING.sm,
+    ...LAYOUT.shadows.subtle,
   },
+
   heading: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
+    ...TEXT_STYLES.label,
+    color: COLORS.text,
+    fontWeight: TYPOGRAPHY.fontWeights.medium,
   },
+
   caption: {
-    color: '#9aa0a6',
-    fontSize: 13,
-    lineHeight: 18,
+    ...TEXT_STYLES.secondary,
+    color: COLORS.textSecondary,
+    lineHeight: TYPOGRAPHY.lineHeights.normal,
   },
+
   divider: {
     height: 1,
-    backgroundColor: '#222',
+    backgroundColor: COLORS.border,
   },
+
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: SPACING.sm,
+  },
+
+  toggleLabelColumn: {
+    flex: 1,
+  },
+
+  toggleCaption: {
+    ...TEXT_STYLES.secondary,
+    color: COLORS.textSecondary,
+    marginTop: SPACING.xs,
+  },
+
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#1b1b1b',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 16,
+    backgroundColor: COLORS.background,
+    borderRadius: LAYOUT.borderRadius.small,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    gap: SPACING.md,
   },
+
   labelColumn: {
     flex: 1,
   },
+
   label: {
-    color: '#d1d5db',
-    fontSize: 14,
-    fontWeight: '500',
+    ...TEXT_STYLES.label,
+    color: COLORS.text,
+    fontWeight: TYPOGRAPHY.fontWeights.medium,
   },
+
   value: {
-    color: '#fff',
-    fontSize: 16,
-    marginTop: 4,
+    ...TEXT_STYLES.label,
+    color: COLORS.text,
+    marginTop: SPACING.xs,
   },
+
   actions: {
     flexDirection: 'row',
-    gap: 8,
+    gap: SPACING.xs,
   },
+
   button: {
     width: 44,
     height: 44,
-    borderRadius: 10,
+    borderRadius: LAYOUT.borderRadius.small,
     alignItems: 'center',
     justifyContent: 'center',
   },
+
   decreaseButton: {
-    backgroundColor: '#374151',
+    backgroundColor: COLORS.secondary,
   },
+
   increaseButton: {
-    backgroundColor: '#2563eb',
+    backgroundColor: COLORS.primary,
   },
+
   buttonDisabled: {
     opacity: 0.4,
   },
+
   buttonText: {
-    color: '#fff',
-    fontSize: 24,
-    fontWeight: '600',
+    ...TEXT_STYLES.label,
+    color: COLORS.textInverse,
+    fontWeight: TYPOGRAPHY.fontWeights.medium,
     marginTop: -4,
   },
+
   resetButton: {
-    marginTop: 4,
+    marginTop: SPACING.xs,
     alignSelf: 'flex-start',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 12,
-    backgroundColor: '#2d2d2d',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+    borderRadius: LAYOUT.borderRadius.small,
+    backgroundColor: COLORS.background,
   },
+
   resetText: {
-    color: '#9aa0a6',
-    fontSize: 13,
-    fontWeight: '500',
+    ...TEXT_STYLES.secondary,
+    color: COLORS.textSecondary,
+    fontWeight: TYPOGRAPHY.fontWeights.medium,
   },
 });

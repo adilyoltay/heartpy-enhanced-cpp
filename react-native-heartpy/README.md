@@ -52,12 +52,36 @@ Packaging notes:
 - The package vendors the enhanced C++ core under `cpp/` and KissFFT under `third_party/` and builds them automatically on iOS/Android.
 - TypeScript sources are compiled to `dist/` during installation.
 
-### Example Usage Component
+### Example Usage (Typed + JSON)
 
-See `react-native-heartpy/examples/AppUsage.tsx` for a minimal component that:
-- Generates synthetic PPG (60s or 300s) and runs `analyzeAsync()`
-- Renders time domain metrics and FD metrics, with a short-window warning when `< 240s`.
-- Copy it into your app for quick testing.
+You can call either the legacy JSON path or the typed (bridge‑optimized) path.
+
+```ts
+import {
+  analyze,
+  analyzeAsync,
+  analyzeTyped,
+  analyzeAsyncTyped,
+  analyzeSegmentwiseTyped,
+  analyzeRRTyped,
+  type HeartPyOptions,
+} from 'react-native-heartpy';
+
+const fs = 50;
+const signal: number[] = /* your samples */ [];
+const options: HeartPyOptions = {
+  bandpass: { lowHz: 0.5, highHz: 5, order: 2 },
+  quality: { thresholdRR: true },
+  calcFreq: false,
+  filter: { mode: 'butter-filtfilt', order: 3 },
+};
+
+// Legacy JSON
+const resJson = await analyzeAsync(signal, fs, options);
+
+// Typed
+const resTyped = await analyzeAsyncTyped(signal, fs, options);
+```
 
 ### Streaming (concepts)
 
@@ -73,6 +97,23 @@ const rt = await RealtimeAnalyzer.create(30, {
   windowSeconds: 12,
 });
 ```
+
+### Bridge Benchmark / Parity
+
+See `react-native-heartpy/examples/BridgeBench.ts` to compare JSON vs typed bridge timings (p50/p95/avg). This script should be run in a RN environment (device/emulator). For quick parity checks, type‑level functions return the same shape as JSON.
+
+### Camera SIMD Flags (App)
+
+The demo app exposes camera SIMD flags in `PPG_CONFIG`:
+
+```ts
+// HeartPyApp/src/core/PPGConfig.ts
+camera: {
+  simdEnabled: true,          // Enable SIMD (iOS vDSP / Android NEON)
+  performanceLogging: false,  // Log p50/p95 every ~100 frames
+}
+```
+Turn them on for QA runs; keep them off for normal usage to minimize log overhead.
 
 ### License
 

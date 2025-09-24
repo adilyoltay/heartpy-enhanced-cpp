@@ -36,8 +36,31 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
   private var agcGain = 1.0
   private var histPos = 0
   private var histCount = 0
+  private var simdEnabledFlag = true
+  private var performanceLoggingFlag = false
+  private var parityCountdown = PARITY_INTERVAL
+  private var parityMaxDiff = 0.0
+  private var parityAccumDiff = 0.0
+  private var paritySamples = 0
+  private val frameTimesMs = DoubleArray(PERF_WINDOW)
+  private var frameTimeIndex = 0
+  private var frameTimeCount = 0
+  private var frameCounter = 0
   override fun callback(frame: Frame, params: Map<String, Any?>?): Any? {
     return try {
+      val simdFlagParam = params?.get("simdEnabled") as? Boolean
+      if (simdFlagParam != null) {
+        simdEnabledFlag = simdFlagParam
+      }
+      performanceLoggingFlag = (params?.get("performanceLogging") as? Boolean) == true
+
+      val simdActiveThisFrame = simdEnabledFlag && nativeLibLoaded
+      if (performanceLoggingFlag && simdActiveThisFrame && parityCountdown > 0) {
+        parityCountdown -= 1
+      }
+      var parityCheckPending = performanceLoggingFlag && simdActiveThisFrame && parityCountdown <= 0
+      val perfStartNanos = if (performanceLoggingFlag) System.nanoTime() else 0L
+
       var roiIn = (params?.get("roi") as? Number)?.toFloat() ?: 0.4f
       val channel = (params?.get("channel") as? String) ?: "green"
       val mode = (params?.get("mode") as? String) ?: "mean" // mean | chrom | pos
@@ -83,6 +106,7 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       val yStep = step
 
       val useRedOrGreen = (channel == "red" || channel == "green") && planes.size >= 3
+      val useSimdPaths = simdActiveThisFrame
       // Multi-ROI aggregation across grid x grid patches
       var weightedSum = 0.0
       var weightTotal = 0.0
@@ -109,8 +133,35 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
           val py0 = startY + gy * patchH
           val px1 = if (gx == grid - 1) startX + roiW else px0 + patchW
           val py1 = if (gy == grid - 1) startY + roiH else py0 + patchH
-          var sR = 0.0; var sG = 0.0; var sB = 0.0; var sY = 0.0; var cntD = 0.0
           val px1c = (startX + roiW).coerceAtMost(px1)
+          val sampleCols = computeSampleCount(px1c - px0, xStep)
+          val sampleRows = computeSampleCount(py1 - py0, yStep)
+          var sampleCount = sampleCols * sampleRows
+          val baseOffset = py0 * yRowStride + px0 * yPixStride
+          val simdStats = if (useSimdPaths) {
+            sumChannelSimd(
+              yBuffer,
+              baseOffset,
+              yRowStride,
+              px1c - px0,
+              py1 - py0,
+              yPixStride,
+              0,
+              xStep,
+              yStep,
+            )
+          } else {
+            null
+          }
+          if (simdStats != null) {
+            sampleCount = simdStats.count
+          }
+          val doParityForPatch = parityCheckPending && simdStats != null
+          var paritySumY = 0.0
+          var parityCount = 0
+          var sR = 0.0; var sG = 0.0; var sB = 0.0
+          var scalarSumY = 0.0; var scalarSumSqY = 0.0; var scalarCount = 0
+
           for (y in py0 until py1 step yStep) {
             val yRow = y * yRowStride
             val uvY = y shr 1
@@ -118,7 +169,7 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
             val vRow = uvY * vRowStride
             for (x in px0 until px1c step xStep) {
               val yIdx = yRow + x * yPixStride
-              val Y = (yBuffer.get(yIdx).toInt() and 0xFF).toDouble()
+              val yVal = (yBuffer.get(yIdx).toInt() and 0xFF).toDouble()
               val uvX = x shr 1
               val uIdx = uRow + uvX * uPixStride
               val vIdx = vRow + uvX * vPixStride
@@ -126,20 +177,47 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
               val Cr = (vBuffer?.get(vIdx)?.toInt() ?: 128) and 0xFF
               val cb = Cb.toDouble() - 128.0
               val cr = Cr.toDouble() - 128.0
-              var R = Y + 1.402 * cr
-              var G = Y - 0.344 * cb - 0.714 * cr
-              var B = Y + 1.772 * cb
+              var R = yVal + 1.402 * cr
+              var G = yVal - 0.344 * cb - 0.714 * cr
+              var B = yVal + 1.772 * cb
               if (R < 0.0) R = 0.0; if (R > 255.0) R = 255.0
               if (G < 0.0) G = 0.0; if (G > 255.0) G = 255.0
               if (B < 0.0) B = 0.0; if (B > 255.0) B = 255.0
-              sR += R; sG += G; sB += B; sY += Y; cntD += 1.0
-              spatialSum += Y
-              spatialSqSum += Y * Y
-              spatialSamples += 1.0
+              sR += R; sG += G; sB += B
+              if (simdStats == null) {
+                scalarSumY += yVal
+                scalarSumSqY += yVal * yVal
+                scalarCount += 1
+              }
+              if (doParityForPatch) {
+                paritySumY += yVal
+                parityCount += 1
+              }
             }
           }
-          if (cntD <= 0.0) continue
-          val Rm = sR / cntD; val Gm = sG / cntD; val Bm = sB / cntD; val Ym = sY / cntD
+          if (simdStats == null) {
+            sampleCount = scalarCount
+          }
+          if (sampleCount <= 0) continue
+
+          val patchSumY = simdStats?.sum ?: scalarSumY
+          val patchSumSqY = simdStats?.sumSq ?: scalarSumSqY
+          val Ym = patchSumY / sampleCount.toDouble()
+          spatialSum += patchSumY
+          spatialSqSum += patchSumSqY
+          spatialSamples += sampleCount.toDouble()
+
+          if (doParityForPatch && parityCount > 0 && simdStats != null && simdStats.count > 0) {
+            val simdMean = simdStats.sum / simdStats.count.toDouble()
+            val scalarMean = paritySumY / parityCount.toDouble()
+            updateParityStats(kotlin.math.abs(simdMean - scalarMean))
+            parityCheckPending = false
+            parityCountdown = PARITY_INTERVAL
+          }
+
+          val Rm = sR / sampleCount.toDouble()
+          val Gm = sG / sampleCount.toDouble()
+          val Bm = sB / sampleCount.toDouble()
           var value = when (channel) {
             "red" -> Rm
             "luma" -> Ym
@@ -387,6 +465,11 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
       val pushSample = if (processedSample.isFinite()) processedSample else Double.NaN
       val finalConfidence = confidenceOut.coerceIn(0.0, 1.0)
 
+      if (performanceLoggingFlag) {
+        val elapsedMs = (System.nanoTime() - perfStartNanos) / 1_000_000.0
+        recordFrameTiming(elapsedMs, simdActiveThisFrame)
+      }
+
       if (histCount % 30 == 0) {
         Log.d(
           "PPGMeanPlugin",
@@ -426,7 +509,133 @@ class PPGMeanPlugin : FrameProcessorPlugin() {
     }
   }
 
+  private data class SimdStats(val sum: Double, val sumSq: Double, val count: Int)
+
+  private fun computeSampleCount(length: Int, step: Int): Int {
+    if (length <= 0 || step <= 0) return 0
+    return (length + step - 1) / step
+  }
+
+  private fun sumChannelSimd(
+    buffer: ByteBuffer,
+    baseOffset: Int,
+    rowStride: Int,
+    roiWidth: Int,
+    roiHeight: Int,
+    pixelStride: Int,
+    channelOffset: Int,
+    xStep: Int,
+    yStep: Int,
+  ): SimdStats? {
+    if (!simdEnabledFlag || !nativeLibLoaded) return null
+    if (!buffer.isDirect) return null
+    if (roiWidth <= 0 || roiHeight <= 0) return null
+    val cols = computeSampleCount(roiWidth, xStep)
+    val rows = computeSampleCount(roiHeight, yStep)
+    if (cols <= 0 || rows <= 0) return null
+    return try {
+      val result = nativeSumAndSquares(
+        buffer,
+        baseOffset,
+        rowStride,
+        roiWidth,
+        roiHeight,
+        pixelStride,
+        channelOffset,
+        xStep,
+        yStep,
+      )
+      if (result == null || result.size < 2) {
+        null
+      } else {
+        SimdStats(result[0], result[1], cols * rows)
+      }
+    } catch (t: Throwable) {
+      Log.w("PPGMeanPlugin", "SIMD sum fallback: ${t.message}")
+      null
+    }
+  }
+
+  private fun updateParityStats(diff: Double) {
+    if (diff > parityMaxDiff) {
+      parityMaxDiff = diff
+    }
+    parityAccumDiff += diff
+    paritySamples += 1
+  }
+
+  private fun resetParityStats() {
+    parityMaxDiff = 0.0
+    parityAccumDiff = 0.0
+    paritySamples = 0
+  }
+
+  private fun percentile(sorted: DoubleArray, fraction: Double): Double {
+    if (sorted.isEmpty()) return Double.NaN
+    val clamped = fraction.coerceIn(0.0, 1.0)
+    val index = (clamped * (sorted.size - 1)).toInt()
+    return sorted[index]
+  }
+
+  private fun recordFrameTiming(elapsedMs: Double, simdActive: Boolean) {
+    frameTimesMs[frameTimeIndex] = elapsedMs
+    if (frameTimeCount < frameTimesMs.size) frameTimeCount++
+    frameTimeIndex = (frameTimeIndex + 1) % frameTimesMs.size
+    frameCounter += 1
+    if (frameCounter % 100 == 0 && frameTimeCount > 0) {
+      val sorted = frameTimesMs.copyOf(frameTimeCount)
+      sorted.sort()
+      val p50 = percentile(sorted, 0.5)
+      val p95 = percentile(sorted, 0.95)
+      val meanDiff = if (paritySamples > 0) parityAccumDiff / paritySamples.toDouble() else 0.0
+      Log.d(
+        "PPGMeanPlugin",
+        String.format(
+          Locale.US,
+          "SIMD perf: frames=%d simd=%s p50=%.3fms p95=%.3fms diffMax=%.4f diffMean=%.4f samples=%d",
+          frameTimeCount,
+          if (simdActive) "ON" else "OFF",
+          p50,
+          p95,
+          parityMaxDiff,
+          meanDiff,
+          paritySamples,
+        ),
+      )
+      resetParityStats()
+    }
+  }
+
   companion object Registrar {
+    private const val NATIVE_LIB_NAME = "ppg_simd"
+    private const val PERF_WINDOW = 300
+    private const val PARITY_INTERVAL = 10
+
+    private var nativeLibLoaded = false
+
+    init {
+      nativeLibLoaded = try {
+        System.loadLibrary(NATIVE_LIB_NAME)
+        true
+      } catch (error: UnsatisfiedLinkError) {
+        Log.w("PPGMeanPlugin", "SIMD native library unavailable; using scalar fallback", error)
+        false
+      }
+    }
+
+    @JvmStatic
+    private external fun nativeSumAndSquares(
+      buffer: ByteBuffer,
+      baseOffset: Int,
+      bytesPerRow: Int,
+      roiWidth: Int,
+      roiHeight: Int,
+      pixelStride: Int,
+      channelOffset: Int,
+      xStep: Int,
+      yStep: Int,
+    ): DoubleArray?
+
     @JvmStatic
     fun register() {
       FrameProcessorPluginRegistry.addFrameProcessorPlugin("ppgMean") { _, _ ->

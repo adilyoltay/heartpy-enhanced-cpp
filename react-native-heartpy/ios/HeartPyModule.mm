@@ -633,6 +633,37 @@ RCT_EXPORT_METHOD(analyzeAsyncTyped:(NSArray<NSNumber*>*)signal
     [self analyzeAsync:signal fs:fs options:options resolver:resolve rejecter:reject];
 }
 
+// Typed segmentwise/rr wrappers (NSDictionary already typed)
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(analyzeSegmentwiseTyped:(NSArray<NSNumber*>*)signal
+                                     fs:(nonnull NSNumber*)fs
+                                     options:(NSDictionary*)options)
+{
+    return [self analyzeSegmentwise:signal fs:fs options:options];
+}
+
+RCT_EXPORT_METHOD(analyzeSegmentwiseAsyncTyped:(NSArray<NSNumber*>*)signal
+                  fs:(nonnull NSNumber*)fs
+                  options:(NSDictionary*)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    [self analyzeSegmentwiseAsync:signal fs:fs options:options resolver:resolve rejecter:reject];
+}
+
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(analyzeRRTyped:(NSArray<NSNumber*>*)rr
+                                    options:(NSDictionary*)options)
+{
+    return [self analyzeRR:rr options:options];
+}
+
+RCT_EXPORT_METHOD(analyzeRRAsyncTyped:(NSArray<NSNumber*>*)rr
+                  options:(NSDictionary*)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    [self analyzeRRAsync:rr options:options resolver:resolve rejecter:reject];
+}
+
 // Async Promise-based variants to avoid blocking the JS thread
 RCT_EXPORT_METHOD(analyzeAsync:(NSArray<NSNumber*>*)signal
                   fs:(nonnull NSNumber*)fs

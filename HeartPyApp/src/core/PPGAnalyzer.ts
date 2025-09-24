@@ -293,6 +293,16 @@ export class PPGAnalyzer {
     this.reservoirReady = false;
     this.hasLoggedReservoirWait = false;
     this.sampleBuffer.clear();
+
+    if (this.onWarmupProgressCb) {
+      this.onWarmupProgressCb({
+        isWarmingUp: false,
+        progress: 0,
+        samplesPushed: 0,
+        samplesRequired: 0,
+      });
+    }
+
     this.setState('idle');
     console.log('[PPGAnalyzer] Stopped');
   }

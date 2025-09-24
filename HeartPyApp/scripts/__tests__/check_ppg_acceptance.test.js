@@ -7,9 +7,9 @@ const {
 describe('PPG acceptance utilities', () => {
   it('computes warm-up timing and amplitude stats', () => {
     const series = [
-      { hasResult: false, quality: { goodQuality: false }, snrDb: -10 },
-      { hasResult: true, quality: { goodQuality: true }, snrDb: -2 },
-      { hasResult: true, quality: { goodQuality: true }, snrDb: 4 },
+      {hasResult: false, quality: {goodQuality: false}, snrDb: -10},
+      {hasResult: true, quality: {goodQuality: true}, snrDb: -2},
+      {hasResult: true, quality: {goodQuality: true}, snrDb: 4},
     ];
     const samples = new Float32Array([0.01, -0.01, 0.02, -0.02, 0.03, -0.03]);
     const metrics = computeMetrics(series, samples, 0.05);

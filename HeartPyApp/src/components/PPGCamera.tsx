@@ -1,5 +1,12 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {NativeEventEmitter, NativeModules, Platform, StyleSheet, Text, View} from 'react-native';
+import {
+  NativeEventEmitter,
+  NativeModules,
+  Platform,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import {
   Camera,
   type Frame,
@@ -22,7 +29,12 @@ type Props = {
   hidden?: boolean;
 };
 
-export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Props): JSX.Element {
+export function PPGCamera({
+  onSample,
+  isActive,
+  onFpsUpdate,
+  hidden = false,
+}: Props): JSX.Element {
   const device = useCameraDevice('back');
   const {hasPermission, requestPermission} = useCameraPermission();
   const enableProcessorTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -30,36 +42,41 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
   const cameraRef = useRef<Camera | null>(null);
   const [androidTorchMode, setAndroidTorchMode] = useState<'off' | 'on'>('off');
   const requireTorch = PPG_CONFIG.ppgChannel === 'red';
-  
+
   // FPS Monitoring
   const frameTimestamps = useRef<number[]>([]);
   const fpsRef = useRef<number>(0);
-  
+
   // Calculate FPS from frame timestamps
   const calculateFPS = useCallback((timestamp: number) => {
     frameTimestamps.current.push(timestamp);
-    
+
     // Keep only last 30 timestamps (1 second at 30fps)
     if (frameTimestamps.current.length > 30) {
       frameTimestamps.current.shift();
     }
-    
+
     // Calculate FPS if we have enough samples
     if (frameTimestamps.current.length >= 10) {
-      const timeSpan = frameTimestamps.current[frameTimestamps.current.length - 1] - frameTimestamps.current[0];
+      const timeSpan =
+        frameTimestamps.current[frameTimestamps.current.length - 1] -
+        frameTimestamps.current[0];
       const frameCount = frameTimestamps.current.length - 1;
       const fps = frameCount / timeSpan; // Keep in seconds (VisionCamera timestamps are in seconds)
-      
+
       if (Number.isFinite(fps) && fps > 0) {
         fpsRef.current = fps;
-        
+
         // Notify parent component about FPS update
         if (onFpsUpdate) {
           onFpsUpdate(fps);
         }
-        
+
         // Log FPS periodically
-        if (PPG_CONFIG.debug.enabled && frameTimestamps.current.length % 30 === 0) {
+        if (
+          PPG_CONFIG.debug.enabled &&
+          frameTimestamps.current.length % 30 === 0
+        ) {
           console.log('[PPGCamera] FPS calculated:', {
             fps: fps.toFixed(1),
             frameCount,
@@ -70,7 +87,6 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
     }
   }, []);
 
-  
   // SAMPLE FLOW DEBUG: Check onSample prop
   useEffect(() => {
     console.log('[PPGCamera] Props received', {
@@ -84,7 +100,10 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
   useEffect(() => {
     console.log('[PPGCamera] Setting up NativeModules event listener');
     console.log('[PPGCamera] PPGCameraManager available:', !!PPGCameraManager);
-    console.log('[PPGCamera] onSample available:', typeof onSample === 'function');
+    console.log(
+      '[PPGCamera] onSample available:',
+      typeof onSample === 'function',
+    );
 
     if (!PPGCameraManager) {
       console.warn('[PPGCamera] PPGCameraManager not available');
@@ -93,40 +112,40 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
 
     const eventEmitter = new NativeEventEmitter(PPGCameraManager);
     console.log('[PPGCamera] EventEmitter created, adding PPGSample listener');
-           const subscription = eventEmitter.addListener('PPGSample', (event) => {
-             console.log('[PPGCamera] PPGSample event received:', event);
+    const subscription = eventEmitter.addListener('PPGSample', event => {
+      console.log('[PPGCamera] PPGSample event received:', event);
 
-             // FIXED: Reduce log flooding for NaN values during warm-up
-             if (typeof event.value === 'number' && !isNaN(event.value)) {
-               console.log('[PPGCamera] Received valid sample from NativeModules', {
-                 value: event.value,
-                 timestamp: event.timestamp,
-                 confidence: event.confidence,
-               });
-             } else {
-               console.log('[PPGCamera] Received NaN sample (warm-up/low signal):', {
-                 value: event.value,
-                 timestamp: event.timestamp,
-                 confidence: event.confidence,
-               });
-             }
+      // FIXED: Reduce log flooding for NaN values during warm-up
+      if (typeof event.value === 'number' && !isNaN(event.value)) {
+        console.log('[PPGCamera] Received valid sample from NativeModules', {
+          value: event.value,
+          timestamp: event.timestamp,
+          confidence: event.confidence,
+        });
+      } else {
+        console.log('[PPGCamera] Received NaN sample (warm-up/low signal):', {
+          value: event.value,
+          timestamp: event.timestamp,
+          confidence: event.confidence,
+        });
+      }
 
-             // FPS Monitoring: Calculate FPS from JS event timestamps (safe from worklet context)
-             calculateFPS(event.timestamp);
+      // FPS Monitoring: Calculate FPS from JS event timestamps (safe from worklet context)
+      calculateFPS(event.timestamp);
 
-             // NOTE: Camera confidence is always ~0.85, so we don't filter here
-             // Poor signal detection is handled by PPGAnalyzer based on metrics/SNR
+      // NOTE: Camera confidence is always ~0.85, so we don't filter here
+      // Poor signal detection is handled by PPGAnalyzer based on metrics/SNR
 
-             const sample: PPGSample = {
-               value: event.value,
-               timestamp: event.timestamp,
-               confidence: event.confidence,
-             };
-             // CRITICAL: Handle async addSample to prevent race conditions
-             onSample(sample).catch(error => {
-               console.warn('[PPGCamera] Sample processing failed:', error);
-             });
-           });
+      const sample: PPGSample = {
+        value: event.value,
+        timestamp: event.timestamp,
+        confidence: event.confidence,
+      };
+      // CRITICAL: Handle async addSample to prevent race conditions
+      onSample(sample).catch(error => {
+        console.warn('[PPGCamera] Sample processing failed:', error);
+      });
+    });
 
     return () => {
       console.log('[PPGCamera] Clearing NativeModules event listener');
@@ -138,7 +157,7 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
     console.log('[PPGCamera] Permission status:', hasPermission);
     if (!hasPermission) {
       console.log('[PPGCamera] Requesting camera permission...');
-      requestPermission().catch((error) => {
+      requestPermission().catch(error => {
         console.error('[PPGCamera] Permission request failed:', error);
       });
     }
@@ -147,10 +166,14 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
   const plugin = useMemo<FrameProcessorPlugin | null>(() => {
     try {
       console.log('[PPGCamera] Initializing frame processor plugin');
-      const created = VisionCameraProxy.initFrameProcessorPlugin('ppgMean', {}) ?? null;
+      const created =
+        VisionCameraProxy.initFrameProcessorPlugin('ppgMean', {}) ?? null;
       console.log('[PPGCamera] Frame processor plugin ready:', !!created);
       console.log('[PPGCamera] Plugin type:', typeof created);
-      console.log('[PPGCamera] Plugin callable:', typeof created?.call === 'function');
+      console.log(
+        '[PPGCamera] Plugin callable:',
+        typeof created?.call === 'function',
+      );
       return created;
     } catch (error) {
       console.warn('[PPGCamera] frame processor unavailable', error);
@@ -162,15 +185,12 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
   const [frameProcessorEnabled, setFrameProcessorEnabled] = useState(false);
 
   // WORKLET CRASH FIX: Disable worklet to prevent crash
-  const emitSample = useMemo(
-    () => {
-      console.log('[PPGCamera] Creating emitSample callback (worklet disabled)', {
-        hasOnSample: typeof onSample === 'function',
-      });
-      return onSample;
-    },
-    [onSample],
-  );
+  const emitSample = useMemo(() => {
+    console.log('[PPGCamera] Creating emitSample callback (worklet disabled)', {
+      hasOnSample: typeof onSample === 'function',
+    });
+    return onSample;
+  }, [onSample]);
 
   const pluginParams = useMemo(
     () => ({
@@ -195,7 +215,7 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
       console.log('[PPGCamera] Frame processor called with frame:', {
         timestamp: frame.timestamp,
         width: frame.width,
-        height: frame.height
+        height: frame.height,
       });
 
       if (!plugin || typeof plugin.call !== 'function') {
@@ -203,7 +223,10 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
         return;
       }
 
-      console.log('[PPGCamera] Frame processor: calling plugin with params:', pluginParams);
+      console.log(
+        '[PPGCamera] Frame processor: calling plugin with params:',
+        pluginParams,
+      );
       const value = plugin.call(frame, pluginParams) as unknown;
 
       console.log('[PPGCamera] Frame processor: plugin returned value:', {
@@ -211,23 +234,31 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
         type: typeof value,
         isNumber: typeof value === 'number',
         isNaN: Number.isNaN(value),
-        isFinite: Number.isFinite(value)
+        isFinite: Number.isFinite(value),
       });
 
       if (typeof value !== 'number' || Number.isNaN(value)) {
-        console.log('[PPGCamera] Frame processor: invalid value', {value, type: typeof value});
+        console.log('[PPGCamera] Frame processor: invalid value', {
+          value,
+          type: typeof value,
+        });
         return;
       }
 
       const timestamp = frame.timestamp ?? Date.now();
-      console.log('[PPGCamera] Frame processor: emitting sample', {value, timestamp});
+      console.log('[PPGCamera] Frame processor: emitting sample', {
+        value,
+        timestamp,
+      });
 
       // WORKLET CRASH FIX: FPS monitoring moved to JS event listener
       // No runOnJS calls from frame processor to prevent iOS crashes
 
       // NATIVE NOTIFICATION: PPGMeanPlugin sends NSNotification, PPGCameraManager forwards to JS
       // No worklet callback needed - samples come via NativeModules event
-      console.log('[PPGCamera] Frame processor: sample processed by PPGMeanPlugin');
+      console.log(
+        '[PPGCamera] Frame processor: sample processed by PPGMeanPlugin',
+      );
     },
     [onSample, plugin, pluginParams],
   );
@@ -258,10 +289,14 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
     };
   }, [isActive, plugin]);
 
-   // FLASH FIX: Use native torch control safely
+  // FLASH FIX: Use native torch control safely
   const setTorchProp = useCallback((mode: 'on' | 'off') => {
-    if (Platform.OS !== 'android') return;
-    if (!cameraRef.current) return;
+    if (Platform.OS !== 'android') {
+      return;
+    }
+    if (!cameraRef.current) {
+      return;
+    }
     try {
       setAndroidTorchMode(mode);
       (cameraRef.current as any).setTorch(mode);
@@ -332,12 +367,16 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
     const lock = async () => {
       if (Platform.OS === 'android') {
         if (PPG_CONFIG.debug.enabled) {
-          console.log('[PPGCamera] Android fallback: camera lock not available; relying on auto settings');
+          console.log(
+            '[PPGCamera] Android fallback: camera lock not available; relying on auto settings',
+          );
         }
         return;
       }
 
-      if (typeof PPGCameraManager?.lockCameraSettings !== 'function') return;
+      if (typeof PPGCameraManager?.lockCameraSettings !== 'function') {
+        return;
+      }
       try {
         const result = await PPGCameraManager.lockCameraSettings({
           whiteBalance: 'locked',
@@ -358,7 +397,9 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
       if (Platform.OS === 'android') {
         return;
       }
-      if (typeof PPGCameraManager?.unlockCameraSettings !== 'function') return;
+      if (typeof PPGCameraManager?.unlockCameraSettings !== 'function') {
+        return;
+      }
       try {
         await PPGCameraManager.unlockCameraSettings();
         if (PPG_CONFIG.debug.enabled) {
@@ -397,21 +438,32 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
       platform: Platform.OS,
       hasTorch,
       isActive,
-      torchStrategy: Platform.OS === 'ios' ? 'PPGCameraManager' : 'Camera.setTorch',
+      torchStrategy:
+        Platform.OS === 'ios' ? 'PPGCameraManager' : 'Camera.setTorch',
     });
   }, [hasTorch, isActive]);
 
   if (!device || !hasPermission) {
+    console.log('[PPGCamera] Camera not ready:', {
+      hasDevice: !!device,
+      hasPermission,
+      hidden,
+    });
+
     if (hidden) {
       return (
         <View style={styles.hiddenPlaceholder}>
-          <Text style={styles.hiddenPlaceholderText}>Kamera izni gerekli</Text>
+          <Text style={styles.hiddenPlaceholderText}>
+            {!device ? 'Kamera bulunamadı' : 'Kamera izni gerekli'}
+          </Text>
         </View>
       );
     }
     return (
       <View style={styles.placeholder}>
-        <Text style={styles.placeholderText}>Kamera izni gerekli</Text>
+        <Text style={styles.placeholderText}>
+          {!device ? 'Kamera bulunamadı' : 'Kamera izni gerekli'}
+        </Text>
       </View>
     );
   }
@@ -421,7 +473,9 @@ export function PPGCamera({onSample, isActive, onFpsUpdate, hidden = false}: Pro
       style={hidden ? styles.hiddenCamera : styles.camera}
       device={device}
       isActive={isActive}
-      frameProcessor={plugin && frameProcessorEnabled ? frameProcessor : undefined}
+      frameProcessor={
+        plugin && frameProcessorEnabled ? frameProcessor : undefined
+      }
       ref={cameraRef}
       {...cameraProps}
     />

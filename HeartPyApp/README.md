@@ -93,6 +93,57 @@ You've successfully run and modified your React Native App. :partying_face:
 - If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
 - If you're curious to learn more about React Native, check out the [Introduction to React Native](https://reactnative.dev/docs/getting-started).
 
+## HeartPy Runtime Notes
+
+### SNR Cadence
+
+- HeartPy'nın SNR yenileme döngüsü yaklaşık 2 saniyelik aralıklarla çalışır.
+- Ardışık iki örnek arasındaki süre `dt < 2.0s` olduğunda aşağıdaki gibi bir log görürsünüz ve önceki kalite değeri yeniden kullanılır:
+
+  ```
+  [HeartPySNR] updateSNR cadence skip: dt=1.265 < 2.000, reuse previous quality
+  ```
+- Bu davranış tasarımsaldır; SNR serisini yumuşatır ve gereksiz dalgalanmaları engeller.
+
+### Watchdog Uyarıları
+
+- Warm-up aşamasında (rezervuar hazır olana kadar) watchdog otomatik olarak sessizdir; ilk başarılı poll sonrası aktifleşir.
+- Geliştirici modunda dahi uyarıları tamamen kapatmak isterseniz `PPG_CONFIG.debug.watchdogLogsEnabled` bayrağını `false` yapabilirsiniz.
+
+### Metro & DevTools İpuçları
+
+- React DevTools için: `npx react-devtools` (varsayılan port 8097).
+- Aynı ağdaki cihazların bağlanabilmesi için Metro'yu herkese açık IP üzerinde başlatın: `npx react-native start --host 0.0.0.0`.
+- 8097 portuna erişim sorunları yaşıyorsanız firewall ayarlarını ve cihazların aynı Wi‑Fi ağında olduğunu kontrol edin.
+
+### Gerçek Zamanlı HRV Metrik Eşikleri
+
+- **RR örnek sayısı (rrCount)** belirli eşiklere ulaşmadan kartlar `—` gösterir:
+  - `rmssd` / `sdsd`: rrCount ≥ **3**
+  - `sdnn` / `pnn20` / `pnn50`: rrCount ≥ **8**
+  - `breathingRate`: rrCount ≥ **10**
+- `HeartPyWrapper` bu eşiklere göre alanları `undefined` bırakır; UI değeri doldurmak için yeni poll’ü bekler.
+
+### pNN Normalizasyonu
+
+- Native HeartPy pNN değerleri bazı platformlarda oran (0..1), bazılarında yüzde (0..100) döndürebilir.
+- Wrapper her zaman bir **oran** döndürür:
+  - `value > 1.5` ise `value / 100`
+  - Sonuç 0..1 arasında tutulur
+- UI kartları bu oranı `×100` yapıp `%` formatında gösterir, böylece çift ölçekleme engellenir.
+
+### LF/HF Detay Modu
+
+- LF/HF analizi **Frequency Domain (LF/HF)** toggle’ı ile açılır.
+- Toggle **OFF** (varsayılan):
+  - Analiz penceresi ≈ **12 s** (360 örnek)
+  - LF/HF kartı `—` gösterir
+- Toggle **ON**:
+  - Analiz penceresi ≈ **30 s** (900 örnek)
+  - rrCount ≥ **17** toplandığında LF/HF hesaplanır ve kart dolmaya başlar
+  - Welch PSD kadansı ≈ **2 s**; CPU/pil maliyeti artabileceği için uzun ölçümlerde kullanım tavsiye edilir
+- Toggle değiştirildiğinde analyzer otomatik olarak yeniden başlatılır (Stop/Start), yeni ayarlar native köprüye aktarılır.
+
 # Troubleshooting
 
 If you can't get this to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.

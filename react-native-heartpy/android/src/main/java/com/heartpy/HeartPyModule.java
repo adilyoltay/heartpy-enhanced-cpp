@@ -144,6 +144,40 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
             int filterMode
     );
 
+    private static native HeartMetricsTyped analyzeSegmentwiseNativeTyped(
+            double[] signal, double fs,
+            double lowHz, double highHz, int order,
+            int nfft, double overlap, double welchWsizeSec,
+            double refractoryMs, double thresholdScale, double bpmMin, double bpmMax,
+            boolean interpClipping, double clippingThreshold,
+            boolean hampelCorrect, int hampelWindow, double hampelThreshold,
+            boolean removeBaselineWander, boolean enhancePeaks,
+            boolean highPrecision, double highPrecisionFs,
+            boolean rejectSegmentwise, double segmentRejectThreshold, int segmentRejectMaxRejects, int segmentRejectWindowBeats, double segmentRejectOverlap,
+            boolean cleanRR, int cleanMethod,
+            double segmentWidth, double segmentOverlap, double segmentMinSize, boolean replaceOutliers,
+            double rrSplineS, double rrSplineTargetSse, double rrSplineSmooth,
+            boolean breathingAsBpm,
+            int sdsdMode,
+            int poincareMode,
+            boolean pnnAsPercent,
+            double snrTauSec, double snrActiveTauSec,
+            boolean adaptivePsd,
+            boolean thresholdRR,
+            boolean calcFreq,
+            int filterMode
+    );
+
+    private static native HeartMetricsTyped analyzeRRNativeTyped(
+            double[] rr,
+            boolean cleanRR, int cleanMethod,
+            boolean breathingAsBpm,
+            boolean thresholdRR,
+            int sdsdMode,
+            int poincareMode,
+            boolean pnnAsPercent
+    );
+
     static final class QualityTyped {
         QualityTyped() {}
         double totalBeats;
@@ -783,6 +817,92 @@ public class HeartPyModule extends ReactContextBaseJavaModule {
                 promise.resolve(typedToWritableMap(metrics));
             } catch (Exception e) {
                 promise.reject("analyzeTyped_error", e);
+            }
+        }).start();
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableMap analyzeSegmentwiseTyped(double[] signal, double fs,
+                                                                         com.facebook.react.bridge.ReadableMap options) {
+        Opts o = parseOptions(options);
+        HeartMetricsTyped metrics = analyzeSegmentwiseNativeTyped(signal, fs,
+                o.lowHz, o.highHz, o.order,
+                o.nfft, o.overlap, o.wsizeSec,
+                o.refractoryMs, o.thresholdScale, o.bpmMin, o.bpmMax,
+                o.interpClipping, o.clippingThreshold,
+                o.hampelCorrect, o.hampelWindow, o.hampelThreshold,
+                o.removeBaselineWander, o.enhancePeaks,
+                o.highPrecision, o.highPrecisionFs,
+                o.rejectSegmentwise, o.segmentRejectThreshold, o.segmentRejectMaxRejects, o.segmentRejectWindowBeats, o.segmentRejectOverlap,
+                o.cleanRR, o.cleanMethod,
+                o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
+                o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
+                o.breathingAsBpm,
+                o.sdsdMode,
+                o.poincareMode,
+                o.pnnAsPercent,
+                o.snrTauSec, o.snrActiveTauSec,
+                o.adaptivePsd,
+                o.thresholdRR,
+                o.calcFreq,
+                o.filterMode);
+        return typedToWritableMap(metrics);
+    }
+
+    @ReactMethod
+    public void analyzeSegmentwiseAsyncTyped(double[] signal, double fs,
+                                             com.facebook.react.bridge.ReadableMap options,
+                                             com.facebook.react.bridge.Promise promise) {
+        new Thread(() -> {
+            try {
+                Opts o = parseOptions(options);
+                HeartMetricsTyped metrics = analyzeSegmentwiseNativeTyped(signal, fs,
+                        o.lowHz, o.highHz, o.order,
+                        o.nfft, o.overlap, o.wsizeSec,
+                        o.refractoryMs, o.thresholdScale, o.bpmMin, o.bpmMax,
+                        o.interpClipping, o.clippingThreshold,
+                        o.hampelCorrect, o.hampelWindow, o.hampelThreshold,
+                        o.removeBaselineWander, o.enhancePeaks,
+                        o.highPrecision, o.highPrecisionFs,
+                        o.rejectSegmentwise, o.segmentRejectThreshold, o.segmentRejectMaxRejects, o.segmentRejectWindowBeats, o.segmentRejectOverlap,
+                        o.cleanRR, o.cleanMethod,
+                        o.segmentWidth, o.segmentOverlap, o.segmentMinSize, o.replaceOutliers,
+                        o.rrSplineS, o.rrSplineTargetSse, o.rrSplineSmooth,
+                        o.breathingAsBpm,
+                        o.sdsdMode,
+                        o.poincareMode,
+                        o.pnnAsPercent,
+                        o.snrTauSec, o.snrActiveTauSec,
+                        o.adaptivePsd,
+                        o.thresholdRR,
+                        o.calcFreq,
+                        o.filterMode);
+                promise.resolve(typedToWritableMap(metrics));
+            } catch (Exception e) {
+                promise.reject("analyzeSegmentwiseTyped_error", e);
+            }
+        }).start();
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public com.facebook.react.bridge.WritableMap analyzeRRTyped(double[] rr,
+                                                                com.facebook.react.bridge.ReadableMap options) {
+        Opts o = parseOptions(options);
+        HeartMetricsTyped metrics = analyzeRRNativeTyped(rr, o.cleanRR, o.cleanMethod, o.breathingAsBpm, o.thresholdRR, o.sdsdMode, o.poincareMode, o.pnnAsPercent);
+        return typedToWritableMap(metrics);
+    }
+
+    @ReactMethod
+    public void analyzeRRAsyncTyped(double[] rr,
+                                    com.facebook.react.bridge.ReadableMap options,
+                                    com.facebook.react.bridge.Promise promise) {
+        new Thread(() -> {
+            try {
+                Opts o = parseOptions(options);
+                HeartMetricsTyped metrics = analyzeRRNativeTyped(rr, o.cleanRR, o.cleanMethod, o.breathingAsBpm, o.thresholdRR, o.sdsdMode, o.poincareMode, o.pnnAsPercent);
+                promise.resolve(typedToWritableMap(metrics));
+            } catch (Exception e) {
+                promise.reject("analyzeRRTyped_error", e);
             }
         }).start();
     }

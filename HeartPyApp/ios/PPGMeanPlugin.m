@@ -7,6 +7,10 @@
 @interface PPGMeanPlugin : FrameProcessorPlugin
 @end
 
+// SIMD buffers shared across helpers
+static float* g_simdScratchBuffer = NULL;
+static size_t g_simdScratchSize = 0;
+
 // SIMD helper function for BGRA green channel processing
 static double processBGRARoiWithSIMD(uint8_t* base, size_t bytesPerRow, 
                                     size_t px0, size_t py0, size_t px1, size_t py1,
@@ -73,8 +77,6 @@ static double processBGRARoiScalar(uint8_t* base, size_t bytesPerRow,
 @implementation PPGMeanPlugin
 
 // SIMD optimization buffers and performance tracking
-static float* g_simdScratchBuffer = NULL;
-static size_t g_simdScratchSize = 0;
 static BOOL g_simdEnabled = YES; // Default enabled
 static BOOL g_performanceLogging = NO; // Default disabled
 

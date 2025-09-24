@@ -243,6 +243,38 @@ export async function analyzeRRAsync(rrIntervals: number[], options?: HeartPyOpt
 	return Native.analyzeRRAsync(rrIntervals, options ?? {});
 }
 
+// Typed (bridge-optimized) variants - REMOVED DUPLICATE FUNCTIONS
+
+export function analyzeSegmentwiseTyped(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): HeartPyResult {
+	const { NativeModules, Platform } = require('react-native');
+	const Native: any = NativeModules?.HeartPyModule;
+	if (!Native?.analyzeSegmentwiseTyped) throw new Error('HeartPyModule.analyzeSegmentwiseTyped not available');
+	const arr = (signal instanceof Float64Array ? Array.from(signal) : signal) as number[];
+	return Native.analyzeSegmentwiseTyped(arr, fs, options ?? {});
+}
+
+export async function analyzeSegmentwiseAsyncTyped(signal: number[] | Float64Array, fs: number, options?: HeartPyOptions): Promise<HeartPyResult> {
+	const { NativeModules } = require('react-native');
+	const Native: any = NativeModules?.HeartPyModule;
+	if (!Native?.analyzeSegmentwiseAsyncTyped) throw new Error('HeartPyModule.analyzeSegmentwiseAsyncTyped not available');
+	const arr = (signal instanceof Float64Array ? Array.from(signal) : signal) as number[];
+	return Native.analyzeSegmentwiseAsyncTyped(arr, fs, options ?? {});
+}
+
+export function analyzeRRTyped(rrIntervals: number[], options?: HeartPyOptions): HeartPyResult {
+	const { NativeModules } = require('react-native');
+	const Native: any = NativeModules?.HeartPyModule;
+	if (!Native?.analyzeRRTyped) throw new Error('HeartPyModule.analyzeRRTyped not available');
+	return Native.analyzeRRTyped(rrIntervals, options ?? {});
+}
+
+export async function analyzeRRAsyncTyped(rrIntervals: number[], options?: HeartPyOptions): Promise<HeartPyResult> {
+	const { NativeModules } = require('react-native');
+	const Native: any = NativeModules?.HeartPyModule;
+	if (!Native?.analyzeRRAsyncTyped) throw new Error('HeartPyModule.analyzeRRAsyncTyped not available');
+	return Native.analyzeRRAsyncTyped(rrIntervals, options ?? {});
+}
+
 // Optional JSI path (iOS installed via installJSI)
 // ------------------------------
 // Step 0: Risk mitigation flags & profiling (JS-only)

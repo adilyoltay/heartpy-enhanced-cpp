@@ -32,8 +32,12 @@ const createWavePath = (
   let max = Number.NEGATIVE_INFINITY;
   for (let i = 0; i < points.length; i++) {
     const v = points[i].value;
-    if (v < min) min = v;
-    if (v > max) max = v;
+    if (v < min) {
+      min = v;
+    }
+    if (v > max) {
+      max = v;
+    }
   }
   if (!Number.isFinite(min) || !Number.isFinite(max)) {
     return path;
@@ -70,8 +74,12 @@ const createPeakPath = (
   let max = Number.NEGATIVE_INFINITY;
   for (let i = 0; i < points.length; i++) {
     const v = points[i].value;
-    if (v < min) min = v;
-    if (v > max) max = v;
+    if (v < min) {
+      min = v;
+    }
+    if (v > max) {
+      max = v;
+    }
   }
   if (!Number.isFinite(min) || !Number.isFinite(max)) {
     return null;
@@ -104,12 +112,7 @@ export function SkiaWaveform({
 
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     const {width, height} = event.nativeEvent.layout;
-    setLayout(prev => {
-      if (prev.width === width && prev.height === height) {
-        return prev;
-      }
-      return {width, height};
-    });
+    setLayout({width, height});
   }, []);
 
   const waveformPath = useMemo(

@@ -22,6 +22,7 @@
 - (NSURL *)bundleURL
 {
 #if DEBUG
+  // Use standard React Native entry to bypass Expo virtual entry/splash overlay during debugging
   return [[RCTBundleURLProvider sharedSettings] jsBundleURLForBundleRoot:@"index"];
 #else
   return [[NSBundle mainBundle] URLForResource:@"main" withExtension:@"jsbundle"];

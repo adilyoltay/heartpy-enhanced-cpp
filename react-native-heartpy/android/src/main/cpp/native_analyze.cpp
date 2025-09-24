@@ -721,6 +721,172 @@ Java_com_heartpy_HeartPyModule_analyzeRRNativeJson(
     return env->NewStringUTF(json.c_str());
 }
 
+// ----- Typed Helpers and Typed JNI for Segmentwise / RR -----
+static jobject makeTypedMetrics(JNIEnv* env, const heartpy::HeartMetrics& res) {
+    auto& cache = getTypedClassCache(env);
+    jobject metricsObj = env->NewObject(cache.metricsCls, cache.metricsCtor);
+    if (!metricsObj) return nullptr;
+
+    // Scalars
+    env->SetDoubleField(metricsObj, cache.bpmField, res.bpm);
+    env->SetDoubleField(metricsObj, cache.sdnnField, res.sdnn);
+    env->SetDoubleField(metricsObj, cache.rmssdField, res.rmssd);
+    env->SetDoubleField(metricsObj, cache.sdsdField, res.sdsd);
+    env->SetDoubleField(metricsObj, cache.pnn20Field, res.pnn20);
+    env->SetDoubleField(metricsObj, cache.pnn50Field, res.pnn50);
+    env->SetDoubleField(metricsObj, cache.nn20Field, res.nn20);
+    env->SetDoubleField(metricsObj, cache.nn50Field, res.nn50);
+    env->SetDoubleField(metricsObj, cache.madField, res.mad);
+    env->SetDoubleField(metricsObj, cache.sd1Field, res.sd1);
+    env->SetDoubleField(metricsObj, cache.sd2Field, res.sd2);
+    env->SetDoubleField(metricsObj, cache.sd1sd2RatioField, res.sd1sd2Ratio);
+    env->SetDoubleField(metricsObj, cache.ellipseAreaField, res.ellipseArea);
+    env->SetDoubleField(metricsObj, cache.vlfField, res.vlf);
+    env->SetDoubleField(metricsObj, cache.lfField, res.lf);
+    env->SetDoubleField(metricsObj, cache.hfField, res.hf);
+    env->SetDoubleField(metricsObj, cache.lfhfField, res.lfhf);
+    env->SetDoubleField(metricsObj, cache.totalPowerField, res.totalPower);
+    env->SetDoubleField(metricsObj, cache.lfNormField, res.lfNorm);
+    env->SetDoubleField(metricsObj, cache.hfNormField, res.hfNorm);
+    env->SetDoubleField(metricsObj, cache.breathingRateField, res.breathingRate);
+
+    // Arrays
+    jdoubleArray ibiArr = toJDoubleArray(env, res.ibiMs); env->SetObjectField(metricsObj, cache.ibiMsField, ibiArr); if (ibiArr) env->DeleteLocalRef(ibiArr);
+    jdoubleArray rrArr = toJDoubleArray(env, res.rrList); env->SetObjectField(metricsObj, cache.rrListField, rrArr); if (rrArr) env->DeleteLocalRef(rrArr);
+    jintArray peakList = toJIntArray(env, res.peakList); env->SetObjectField(metricsObj, cache.peakListField, peakList); if (peakList) env->DeleteLocalRef(peakList);
+    jintArray peakListRaw = toJIntArray(env, res.peakListRaw); env->SetObjectField(metricsObj, cache.peakListRawField, peakListRaw); if (peakListRaw) env->DeleteLocalRef(peakListRaw);
+    jintArray binaryMask = toJIntArray(env, res.binaryPeakMask); env->SetObjectField(metricsObj, cache.binaryPeakMaskField, binaryMask); if (binaryMask) env->DeleteLocalRef(binaryMask);
+    jdoubleArray peakTsArr = toJDoubleArray(env, res.peakTimestamps); env->SetObjectField(metricsObj, cache.peakTimestampsField, peakTsArr); if (peakTsArr) env->DeleteLocalRef(peakTsArr);
+    jdoubleArray waveformValues = toJDoubleArray(env, res.waveform_values); env->SetObjectField(metricsObj, cache.waveformValuesField, waveformValues); if (waveformValues) env->DeleteLocalRef(waveformValues);
+    jdoubleArray waveformTs = toJDoubleArray(env, res.waveform_timestamps); env->SetObjectField(metricsObj, cache.waveformTimestampsField, waveformTs); if (waveformTs) env->DeleteLocalRef(waveformTs);
+
+    // Quality
+    jobject q = env->NewObject(cache.qualityCls, cache.qualityCtor);
+    if (q) {
+        const auto& qu = res.quality;
+        env->SetDoubleField(q, cache.qualityTotalBeatsField, static_cast<double>(qu.totalBeats));
+        env->SetDoubleField(q, cache.qualityRejectedBeatsField, static_cast<double>(qu.rejectedBeats));
+        env->SetDoubleField(q, cache.qualityRejectionRateField, qu.rejectionRate);
+        env->SetBooleanField(q, cache.qualityGoodField, qu.goodQuality ? JNI_TRUE : JNI_FALSE);
+        env->SetDoubleField(q, cache.qualitySnrDbField, qu.snrDb);
+        env->SetDoubleField(q, cache.qualityConfidenceField, qu.confidence);
+        env->SetDoubleField(q, cache.qualityF0HzField, qu.f0Hz);
+        env->SetDoubleField(q, cache.qualityMaPercField, qu.maPercActive);
+        env->SetDoubleField(q, cache.qualityDoublingFlagField, static_cast<double>(qu.doublingFlag));
+        env->SetDoubleField(q, cache.qualitySoftDoublingFlagField, static_cast<double>(qu.softDoublingFlag));
+        env->SetDoubleField(q, cache.qualityDoublingHintFlagField, static_cast<double>(qu.doublingHintFlag));
+        env->SetDoubleField(q, cache.qualityHardFallbackField, static_cast<double>(qu.hardFallbackActive));
+        env->SetDoubleField(q, cache.qualityRrFallbackField, static_cast<double>(qu.rrFallbackModeActive));
+        env->SetDoubleField(q, cache.qualitySnrWarmupField, static_cast<double>(qu.snrWarmupActive));
+        env->SetDoubleField(q, cache.qualitySnrSampleCountField, qu.snrSampleCount);
+        env->SetDoubleField(q, cache.qualityRefractoryField, qu.refractoryMsActive);
+        env->SetDoubleField(q, cache.qualityMinRRBoundField, qu.minRRBoundMs);
+        env->SetDoubleField(q, cache.qualityPairFracField, qu.pairFrac);
+        env->SetDoubleField(q, cache.qualityRrShortFracField, qu.rrShortFrac);
+        env->SetDoubleField(q, cache.qualityRrLongMsField, qu.rrLongMs);
+        env->SetDoubleField(q, cache.qualityPHalfOverFundField, qu.pHalfOverFund);
+        if (!qu.qualityWarning.empty()) {
+            jstring s = env->NewStringUTF(qu.qualityWarning.c_str());
+            env->SetObjectField(q, cache.qualityWarningField, s);
+            env->DeleteLocalRef(s);
+        }
+        env->SetObjectField(metricsObj, cache.qualityField, q);
+        env->DeleteLocalRef(q);
+    }
+
+    jobjectArray segs = createBinarySegmentsArray(env, cache, res.binarySegments);
+    env->SetObjectField(metricsObj, cache.binarySegmentsField, segs);
+    if (segs) env->DeleteLocalRef(segs);
+    return metricsObj;
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_heartpy_HeartPyModule_analyzeSegmentwiseNativeTyped(
+        JNIEnv* env,
+        jclass,
+        jdoubleArray jSignal,
+        jdouble fs,
+        jdouble lowHz,
+        jdouble highHz,
+        jint order,
+        jint nfft,
+        jdouble overlap,
+        jdouble welchWsizeSec,
+        jdouble refractoryMs,
+        jdouble thresholdScale,
+        jdouble bpmMin,
+        jdouble bpmMax,
+        jboolean interpClipping,
+        jdouble clippingThreshold,
+        jboolean hampelCorrect,
+        jint hampelWindow,
+        jdouble hampelThreshold,
+        jboolean removeBaselineWander,
+        jboolean enhancePeaks,
+        jboolean highPrecision,
+        jdouble highPrecisionFs,
+        jboolean rejectSegmentwise,
+        jdouble segmentRejectThreshold,
+        jint segmentRejectMaxRejects,
+        jint segmentRejectWindowBeats,
+        jdouble segmentRejectOverlap,
+        jboolean cleanRR,
+        jint cleanMethod,
+        jdouble segmentWidth,
+        jdouble segmentOverlap,
+        jdouble segmentMinSize,
+        jboolean replaceOutliers,
+        jdouble rrSplineS,
+        jdouble rrSplineTargetSse,
+        jdouble rrSplineSmooth,
+        jboolean breathingAsBpm,
+        jint sdsdMode,
+        jint poincareMode,
+        jboolean pnnAsPercent,
+        jdouble snrTauSec,
+        jdouble snrActiveTauSec,
+        jboolean adaptivePsd,
+        jboolean thresholdRR,
+        jboolean calcFreq,
+        jint filterMode) {
+    jsize len = env->GetArrayLength(jSignal);
+    std::vector<double> signal(len);
+    env->GetDoubleArrayRegion(jSignal, 0, len, signal.data());
+    heartpy::Options opt = buildOptions(lowHz, highHz, order, nfft, overlap, welchWsizeSec, refractoryMs, thresholdScale, bpmMin, bpmMax,
+        interpClipping, clippingThreshold, hampelCorrect, hampelWindow, hampelThreshold, removeBaselineWander, enhancePeaks,
+        highPrecision, highPrecisionFs, rejectSegmentwise, segmentRejectThreshold, segmentRejectMaxRejects, segmentRejectWindowBeats, segmentRejectOverlap,
+        cleanRR, cleanMethod, segmentWidth, segmentOverlap, segmentMinSize, replaceOutliers, rrSplineS, rrSplineTargetSse, rrSplineSmooth,
+        breathingAsBpm, sdsdMode, poincareMode, pnnAsPercent, snrTauSec, snrActiveTauSec, adaptivePsd, thresholdRR, calcFreq, filterMode);
+    auto res = heartpy::analyzeSignalSegmentwise(signal, fs, opt);
+    return makeTypedMetrics(env, res);
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_heartpy_HeartPyModule_analyzeRRNativeTyped(
+        JNIEnv* env,
+        jclass,
+        jdoubleArray jRR,
+        jboolean cleanRR,
+        jint cleanMethod,
+        jboolean breathingAsBpm,
+        jboolean thresholdRR,
+        jint sdsdMode,
+        jint poincareMode,
+        jboolean pnnAsPercent) {
+    jsize len = env->GetArrayLength(jRR);
+    std::vector<double> rr(len);
+    env->GetDoubleArrayRegion(jRR, 0, len, rr.data());
+    heartpy::Options opt;
+    opt.cleanRR = cleanRR; opt.cleanMethod = (cleanMethod==1? heartpy::Options::CleanMethod::IQR : (cleanMethod==2? heartpy::Options::CleanMethod::Z_SCORE : heartpy::Options::CleanMethod::QUOTIENT_FILTER));
+    opt.breathingAsBpm = breathingAsBpm;
+    opt.thresholdRR = (thresholdRR==JNI_TRUE);
+    opt.sdsdMode = (sdsdMode==0 ? heartpy::Options::SdsdMode::SIGNED : heartpy::Options::SdsdMode::ABS);
+    opt.poincareMode = (poincareMode==1 ? heartpy::Options::PoincareMode::MASKED : heartpy::Options::PoincareMode::FORMULA);
+    opt.pnnAsPercent = (pnnAsPercent==JNI_TRUE);
+    auto res = heartpy::analyzeRRIntervals(rr, opt);
+    return makeTypedMetrics(env, res);
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_heartpy_HeartPyModule_analyzeSegmentwiseNativeJson(
         JNIEnv* env,

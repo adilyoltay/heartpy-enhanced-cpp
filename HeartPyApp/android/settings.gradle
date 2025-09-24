@@ -6,15 +6,15 @@ pluginManagement {
     }
 }
 
-rootProject.name = 'HeartPyApp'
-
 plugins {
     id("com.facebook.react.settings")
 }
 
-extensions.configure(com.facebook.react.ReactSettingsExtension){ ex ->
+extensions.configure(com.facebook.react.ReactSettingsExtension) { ex ->
     ex.autolinkLibrariesWithApp()
 }
 
-include ':app'
+rootProject.name = 'HeartPyApp'
+
+include(':app')
 includeBuild('../node_modules/@react-native/gradle-plugin')

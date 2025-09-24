@@ -7,8 +7,11 @@ const isDebugMode = __DEV__ || process.env.NODE_ENV === 'development';
 export const PPG_CONFIG = {
   // Sampling & buffering
   sampleRate: 30,
-  analysisWindow: 360, // samples (~12 s @ 30 Hz)
-  ringBufferSize: 720, // analyzer/history buffer length (~24 s)
+  // LF/HF için dinamik olarak seçilecek pencere değerleri
+  analysisWindowBaseline: 360, // samples (~12 s @ 30 Hz)
+  analysisWindowLfHf: 900, // samples (~30 s @ 30 Hz)
+  analysisWindow: 900, // varsayılan olarak uzun pencereyi kullan (LF/HF modu)
+  ringBufferSize: 1350, // analyzer/history buffer length (~45 s)
   waveformTailSamples: 180, // UI waveform tail displayed (~6 s)
   expectedBpm: 75, // average BPM used for segment rejection tuning
 
@@ -41,7 +44,7 @@ export const PPG_CONFIG = {
   agcGainMax: 20,
 
   // Analyzer warm-up / batching
-  minSamplesBeforePollSec: 12.0, // Require ~12 s reservoir before polling native
+  minSamplesBeforePollSec: 10.0, // Require ~10 s reservoir before polling native
   microBatchSamples: 16,
   microBatchLatencyMs: 150,
 
@@ -49,17 +52,18 @@ export const PPG_CONFIG = {
   rrOutlierPercent: 0.25,
   rrOutlierMinMs: 180,
   rrOutlierMaxMs: 320,
-  peakMinSpacingMs: 320,
+  refractoryMs: 350, // Minimum refractory period between peaks (ms)
+  peakMinSpacingMs: 350,
   thresholdRR: true, // Enable HeartPy-style RR masking by default
-  calcFreqEnabled: false, // Default OFF on mobile to save CPU; enable only when needed
+  calcFreqEnabled: false, // LF/HF varsayılan olarak kapalı (detay modunda açılır)
   filterMode: 'butter-filtfilt', // Use zero-phase Butterworth by default
-  filterOrder: 2, // Order for the Butterworth cascades
+  filterOrder: 3, // Order for the Butterworth cascades (HP-like)
 
   // Camera preferences
   ppgChannel: 'red', // 'red' (torch) | 'green'
   roiBoxPct: 0.5, // central box (fraction of width/height)
   cameraTorchLevel: 1.0,
-  
+
   // Camera processing optimization
   camera: {
     simdEnabled: true, // Enable SIMD optimizations for iOS BGRA processing
@@ -69,12 +73,23 @@ export const PPG_CONFIG = {
   // UI refresh cadence
   uiUpdateIntervalMs: 50,
 
+  // UI feature flags & design tokens
+  ui: {
+    minimalMode: true,
+    autoStart: true,
+    progressiveDisclosure: false,
+    adaptiveColor: true,
+    breathingGuide: false,
+    confidenceCollapseThreshold: 0.95,
+  },
+
   debug: {
-    enabled: isDebugMode,
+    enabled: true, // Enable debug logs to see reservoir status
     sampleLogThrottle: 30,
-    enableSnrLogging: true, // Surface C++ SNR log stream
+    enableSnrLogging: false, // Surface C++ SNR log stream
     enableDetailedSnrLogging: false, // Verbose SNR logs (default kapalı, ihtiyaç halinde aç)
     enableAdaptivePsd: true, // Toggle adaptive PSD + fallbacks during QA
-    enableSchedulerLogging: false,
+    enableSchedulerLogging: true, // Enable scheduler logging
+    watchdogLogsEnabled: true, // Enable watchdog logs
   },
 } as const;
