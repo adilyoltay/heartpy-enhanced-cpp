@@ -64,10 +64,57 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
   const surfaceMutedColor = useThemeColor('surfaceMuted');
   const borderColor = useThemeColor('border');
   const primaryColor = useThemeColor('primary');
-  const primaryMutedColor = useThemeColor('primaryMuted');
   const textPrimaryColor = useThemeColor('textPrimary');
-  const textSecondaryColor = useThemeColor('textSecondary');
   const textInverseColor = useThemeColor('textInverse');
+
+  const rowActionGapStyle = useMemo(() => ({gap: ms(SPACING.xs)}), [ms]);
+
+  const basicSettingContentStyle = useMemo(
+    () => [
+      styles.settingSurfaceBase,
+      styles.settingSurfaceSm,
+      {backgroundColor: surfaceMutedColor, borderColor},
+    ],
+    [borderColor, surfaceMutedColor],
+  );
+
+  const filterModeChipSpacing = useMemo(
+    () => ({
+      marginRight: ms(SPACING.xs),
+      marginBottom: ms(SPACING.xs),
+    }),
+    [ms],
+  );
+
+  const advancedTriggerContentStyle = useMemo(
+    () => [
+      styles.advancedTriggerContent,
+      {
+        backgroundColor: surfaceMutedColor,
+        borderColor,
+        paddingHorizontal: ms(SPACING.md),
+        paddingVertical: ms(SPACING.sm),
+      },
+    ],
+    [borderColor, ms, surfaceMutedColor],
+  );
+
+  const basicCardStyle = useMemo(
+    () => [styles.basicCard, {gap: ms(SPACING.sm), borderColor}],
+    [borderColor, ms],
+  );
+
+  const footerSpacerStyle = useMemo(() => ({height: ms(SPACING.xl)}), [ms]);
+
+  const dividerStyle = useMemo(
+    () => ({
+      height: 1,
+      width: '100%' as const,
+      backgroundColor: borderColor,
+      marginVertical: ms(SPACING.sm),
+    }),
+    [borderColor, ms],
+  );
 
   const thresholdScale = useMemo(() => {
     const value = options.thresholdScale;
@@ -150,16 +197,6 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
     return null;
   }
 
-  const dividerStyle = useMemo(
-    () => ({
-      height: 1,
-      width: '100%' as const,
-      backgroundColor: borderColor,
-      marginVertical: ms(SPACING.sm),
-    }),
-    [borderColor, ms],
-  );
-
   const renderStepperRow = (
     label: string,
     value: number,
@@ -172,7 +209,7 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
       ? format(value)
       : value.toFixed(config.decimals ?? 2);
 
-    const adjust = async (direction: -1 | 1) => {
+    const adjust = (direction: -1 | 1) => {
       if (disabled) {
         return;
       }
@@ -180,7 +217,7 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
         (value + direction * config.step).toFixed(config.decimals ?? 3),
       );
       const next = clamp(rounded, config.min, config.max);
-      await onChange({
+      onChange({
         [key]: transform ? transform(next) : next,
       });
     };
@@ -191,16 +228,12 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
         label={label}
         hint={displayValue}
         rightSlot={
-          <View
-            style={[
-              styles.rowActions,
-              {gap: ms(SPACING.xs), alignItems: 'center'},
-            ]}>
+          <View style={[styles.rowActions, rowActionGapStyle]}>
             <IconButton
               label="−"
               size="sm"
               variant="outline"
-              onPress={() => void adjust(-1)}
+              onPress={() => adjust(-1)}
               disabled={disabled}
               accessibilityLabel={`Decrease ${label}`}
             />
@@ -208,18 +241,13 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
               label="+"
               size="sm"
               variant="outline"
-              onPress={() => void adjust(1)}
+              onPress={() => adjust(1)}
               disabled={disabled}
               accessibilityLabel={`Increase ${label}`}
             />
           </View>
         }
-        contentStyle={{
-          backgroundColor: surfaceMutedColor,
-          borderRadius: BORDER_RADIUS.sm,
-          borderWidth: 1,
-          borderColor,
-        }}
+        contentStyle={basicSettingContentStyle}
       />
     );
   };
@@ -307,14 +335,7 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
           <ScrollView
             style={[styles.content, {padding: ms(SPACING.md)}]}
             showsVerticalScrollIndicator={false}>
-            <Card
-              padding="md"
-              radius="md"
-              style={{
-                gap: ms(SPACING.sm),
-                borderWidth: 1,
-                borderColor,
-              }}>
+            <Card padding="md" radius="md" style={basicCardStyle}>
               <Typography variant="headingS" weight="semibold">
                 Basic Settings
               </Typography>
@@ -331,15 +352,10 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
                     onValueChange={value => onChange({calcFreq: value})}
                     disabled={disabled}
                     trackColor={{false: borderColor, true: primaryColor}}
-                    thumbColor={disabled ? borderColor : surfaceColor}
+                    thumbColor={disabled ? borderColor : textInverseColor}
                   />
                 }
-                contentStyle={{
-                  backgroundColor: surfaceMutedColor,
-                  borderRadius: BORDER_RADIUS.sm,
-                  borderWidth: 1,
-                  borderColor,
-                }}
+                contentStyle={basicSettingContentStyle}
               />
               <View style={dividerStyle} />
               {renderStepperRow(
@@ -372,12 +388,7 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
                 <SettingRow
                   label="Filter Mode"
                   hint="Örnekleme koşullarına göre uygun filtreyi seç."
-                  contentStyle={{
-                    backgroundColor: surfaceMutedColor,
-                    borderRadius: BORDER_RADIUS.sm,
-                    borderWidth: 1,
-                    borderColor,
-                  }}
+                  contentStyle={basicSettingContentStyle}
                 />
                 <View
                   style={[styles.selectChipRow, {marginTop: ms(SPACING.xs)}]}>
@@ -388,11 +399,10 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
                         key={option.key ?? option.label}
                         onPress={() => onChange({filterMode: option.key})}
                         disabled={disabled}
-                        style={{
-                          marginRight: ms(SPACING.xs),
-                          marginBottom: ms(SPACING.xs),
-                          opacity: disabled ? 0.5 : 1,
-                        }}>
+                        style={[
+                          filterModeChipSpacing,
+                          disabled && styles.filterChipDisabled,
+                        ]}>
                         <Badge
                           label={option.label}
                           size="sm"
@@ -434,14 +444,7 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
                   {showAdvanced ? '▲' : '▼'}
                 </Typography>
               }
-              contentStyle={{
-                backgroundColor: surfaceMutedColor,
-                borderRadius: BORDER_RADIUS.md,
-                borderWidth: 1,
-                borderColor,
-                paddingHorizontal: ms(SPACING.md),
-                paddingVertical: ms(SPACING.sm),
-              }}
+              contentStyle={advancedTriggerContentStyle}
             />
 
             {showAdvanced ? (
@@ -460,7 +463,7 @@ export const HiddenSettings: React.FC<HiddenSettingsProps> = ({
               </View>
             ) : null}
 
-            <View style={{height: ms(SPACING.xl)}} />
+            <View style={footerSpacerStyle} />
           </ScrollView>
         </Animated.View>
       </View>
@@ -502,6 +505,7 @@ const styles = StyleSheet.create({
   },
   rowActions: {
     flexDirection: 'row',
+    alignItems: 'center',
   },
   selectChipRow: {
     flexDirection: 'row',
@@ -509,5 +513,21 @@ const styles = StyleSheet.create({
   },
   advancedContainer: {
     width: '100%',
+  },
+  settingSurfaceBase: {
+    borderWidth: 1,
+  },
+  settingSurfaceSm: {
+    borderRadius: BORDER_RADIUS.sm,
+  },
+  basicCard: {
+    borderWidth: 1,
+  },
+  advancedTriggerContent: {
+    borderRadius: BORDER_RADIUS.md,
+    borderWidth: 1,
+  },
+  filterChipDisabled: {
+    opacity: 0.5,
   },
 });

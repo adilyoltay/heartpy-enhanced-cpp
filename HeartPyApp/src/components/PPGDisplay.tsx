@@ -11,7 +11,7 @@ import {useResponsive} from '../styles/responsive';
 import {useThemeColor} from '../hooks/useThemeColor';
 import {SPACING} from '../theme/spacing';
 import {BORDER_RADIUS, SHADOWS} from '../theme/layout';
-import {FONT_SIZES, LINE_HEIGHTS} from '../theme/typography';
+import {FONT_SIZES} from '../theme/typography';
 
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
@@ -47,7 +47,6 @@ const MinimalMetricCard = React.memo(
     containerWidth,
     containerMaxWidth,
   }: MinimalMetricCardProps) => {
-    const secondaryColor = useThemeColor('textSecondary');
     const defaultValueColor = useThemeColor('textPrimary');
     const valueVariant = label === 'Confidence' ? 'headingM' : 'headingL';
 
@@ -107,7 +106,6 @@ const PPGDisplayComponent = ({
   const surfaceColor = useThemeColor('surface');
   const surfaceMutedColor = useThemeColor('surfaceMuted');
   const textPrimary = useThemeColor('textPrimary');
-  const textSecondary = useThemeColor('textSecondary');
   const borderColor = useThemeColor('border');
   const successColor = useThemeColor('success');
   const errorColor = useThemeColor('error');
@@ -560,39 +558,6 @@ const PPGDisplayComponent = ({
     return true;
   }, [metricsViewModel.confidenceNumber, metricsViewModel.snrNumber, state]);
 
-  const _hrvMetricsViewModel = useMemo(() => {
-    const toMs = (value?: number, decimals = 0) =>
-      isFiniteNumber(value) ? `${value.toFixed(decimals)} ms` : '--';
-    const toPercent = (value?: number) =>
-      isFiniteNumber(value) ? `${(value * 100).toFixed(1)}%` : '--';
-    const toRatio = (value?: number) =>
-      isFiniteNumber(value) ? value.toFixed(2) : '--';
-    const toBreathsPerMinute = (value?: number) =>
-      isFiniteNumber(value) ? `${(value * 60).toFixed(1)} brpm` : '--';
-
-    return [
-      {key: 'sdnn', label: 'SDNN', value: toMs(metrics?.sdnn)},
-      {key: 'rmssd', label: 'RMSSD', value: toMs(metrics?.rmssd)},
-      {key: 'sdsd', label: 'SDSD', value: toMs(metrics?.sdsd)},
-      {key: 'pnn20', label: 'pNN20', value: toPercent(metrics?.pnn20)},
-      {key: 'pnn50', label: 'pNN50', value: toPercent(metrics?.pnn50)},
-      {key: 'lfhf', label: 'LF/HF', value: toRatio(metrics?.lfhf)},
-      {
-        key: 'breathingRate',
-        label: 'Breathing Rate',
-        value: toBreathsPerMinute(metrics?.breathingRate),
-      },
-    ];
-  }, [
-    metrics?.sdnn,
-    metrics?.rmssd,
-    metrics?.sdsd,
-    metrics?.pnn20,
-    metrics?.pnn50,
-    metrics?.lfhf,
-    metrics?.breathingRate,
-  ]);
-
   // Responsive derived sizes
   const bpmFontSize = ms(FONT_SIZES.headingXL, isTablet ? 0.5 : 0.35);
   const confidenceFontSize = ms(FONT_SIZES.headingM, isTablet ? 0.45 : 0.35);
@@ -740,7 +705,8 @@ const PPGDisplayComponent = ({
             weight="medium"
             style={[
               styles.warmupText,
-              {color: textPrimary, textAlign: 'center'},
+              styles.centeredText,
+              {color: textPrimary},
             ]}>
             Initializing... {warmupProgress.progress.toFixed(0)}%
           </Typography>
@@ -768,7 +734,7 @@ const PPGDisplayComponent = ({
           <Typography
             variant="caption"
             color="textSecondary"
-            style={[styles.warmupSubtext, {textAlign: 'center'}]}>
+            style={[styles.warmupSubtext, styles.centeredText]}>
             {warmupProgress.samplesPushed} / {warmupProgress.samplesRequired}{' '}
             samples
           </Typography>
@@ -785,7 +751,8 @@ const PPGDisplayComponent = ({
           weight="semibold"
           style={[
             styles.detailTitle,
-            {color: textPrimary, textAlign: 'center'},
+            styles.centeredText,
+            {color: textPrimary},
           ]}>
           Advanced Metrics
         </Typography>
@@ -954,6 +921,9 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.sm,
   },
   minimalMetricValue: {
+    textAlign: 'center',
+  },
+  centeredText: {
     textAlign: 'center',
   },
   minimalWaveform: {

@@ -36,8 +36,11 @@ export const Badge: React.FC<BadgeProps> = ({
   textStyle,
   testID,
 }) => {
-  const textColor = textColorOverride ?? useThemeColor(color);
-  const bgColor = backgroundOverride ?? useThemeColor(backgroundColor);
+  const paletteTextColor = useThemeColor(color);
+  const paletteBackgroundColor = useThemeColor(backgroundColor);
+
+  const textColor = textColorOverride ?? paletteTextColor;
+  const bgColor = backgroundOverride ?? paletteBackgroundColor;
 
   const containerStyle = useMemo<ViewStyle>(
     () => ({

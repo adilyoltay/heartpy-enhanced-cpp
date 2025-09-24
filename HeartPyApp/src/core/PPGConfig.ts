@@ -88,7 +88,7 @@ export const PPG_CONFIG = {
   },
 
   debug: {
-    enabled: true, // Enable debug logs to see reservoir status
+    enabled: isDebugMode, // Enable debug logs to see reservoir status
     sampleLogThrottle: 30,
     enableSnrLogging: false, // Surface C++ SNR log stream
     enableDetailedSnrLogging: false, // Verbose SNR logs (default kapalı, ihtiyaç halinde aç)

@@ -65,7 +65,6 @@ function computeMetrics(series, samples, intervalSec = UI_INTERVAL_MS / 1000) {
     };
   }
 
-  const clamp01 = v => Math.min(1, Math.max(0, v));
   const warmIdx = series.findIndex(entry => {
     const hasResult = !!entry.hasResult;
     const goodQuality = !!entry?.quality?.goodQuality;
@@ -98,8 +97,12 @@ function computeMetrics(series, samples, intervalSec = UI_INTERVAL_MS / 1000) {
     let max = -Infinity;
     let sumSq = 0;
     samples.forEach(value => {
-      if (value < min) {min = value;}
-      if (value > max) {max = value;}
+      if (value < min) {
+        min = value;
+      }
+      if (value > max) {
+        max = value;
+      }
       sumSq += value * value;
     });
     peakToPeak = max - min;
@@ -178,7 +181,7 @@ class PPGAcceptanceChecker {
       'Native confidence preserved',
       () => {
         const matches = this.logContent.match(
-          /LOG\s+\[HeartPyWrapper\]\s+Native\s+metrics\b.*\"confidence\"\s*:\s*-?\d+(?:\.\d+)?/g,
+          /LOG\s+\[HeartPyWrapper\]\s+Native\s+metrics\b.*"confidence"\s*:\s*-?\d+(?:\.\d+)?/g,
         );
         return matches && matches.length >= 3;
       },

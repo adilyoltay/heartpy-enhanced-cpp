@@ -10,7 +10,6 @@ const Tab = createBottomTabNavigator();
 function PlaceholderScreen({title}: {title: string}) {
   const backgroundColor = useThemeColor('background');
   const textPrimary = useThemeColor('textPrimary');
-  const textSecondary = useThemeColor('textSecondary');
 
   return (
     <View style={[styles.placeholderContainer, {backgroundColor}]}>
@@ -20,7 +19,10 @@ function PlaceholderScreen({title}: {title: string}) {
         style={{color: textPrimary}}>
         {title}
       </Typography>
-      <Typography variant="bodyS" color="textSecondary" style={{marginTop: 8}}>
+      <Typography
+        variant="bodyS"
+        color="textSecondary"
+        style={styles.placeholderSubtitle}>
         Yakında eklenecek.
       </Typography>
     </View>
@@ -68,5 +70,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
+  },
+  placeholderSubtitle: {
+    marginTop: 8,
   },
 });

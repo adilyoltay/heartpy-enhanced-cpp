@@ -315,18 +315,18 @@ export class HeartPyWrapper {
       this.pollSequence = 0;
       // HOTFIX: Disable JSI to prevent EXC_BAD_ACCESS crash
       console.log('[HeartPyWrapper] Loading react-native-heartpy...');
-      const {RealtimeAnalyzer} = require('react-native-heartpy');
+      const {
+        RealtimeAnalyzer: RequiredRealtimeAnalyzer,
+      } = require('react-native-heartpy');
 
       console.log('[HeartPyWrapper] Setting JSI config...');
-      RealtimeAnalyzer.setConfig({jsiEnabled: false, debug: true});
+      RequiredRealtimeAnalyzer.setConfig({jsiEnabled: false, debug: true});
 
       console.log('[HeartPyWrapper] Creating RealtimeAnalyzer...');
       const windowSamples =
         options?.analysisWindowSamples ?? PPG_CONFIG.analysisWindow;
       this.analysisWindowSamples = windowSamples;
       const windowSeconds = windowSamples / sampleRate;
-      const _expectedBeatsInWindow =
-        (PPG_CONFIG.expectedBpm / 60) * windowSeconds;
 
       // FIXED: Use actual window duration (~12 seconds) for segment rejection
       const rejectionWindowSeconds = windowSamples / sampleRate;
@@ -463,7 +463,7 @@ export class HeartPyWrapper {
         realtimeOptions.snrActiveTauSec = options.snrActiveTauSec;
       }
 
-      this.analyzer = await RealtimeAnalyzer.create(
+      this.analyzer = await RequiredRealtimeAnalyzer.create(
         sampleRate,
         realtimeOptions,
       );
@@ -1062,7 +1062,7 @@ export class HeartPyWrapper {
     return {signalRms, noiseRms};
   }
 
-  private normalizePeaks(rawPeaks: number[], result?: any): number[] {
+  private normalizePeaks(rawPeaks: number[], _result?: any): number[] {
     if (!Array.isArray(rawPeaks) || rawPeaks.length === 0) {
       if (PPG_CONFIG.debug.enabled) {
         console.log('[HeartPyWrapper] Peak normalization: no raw peaks', {
@@ -1117,9 +1117,6 @@ export class HeartPyWrapper {
 
     // P0 CRITICAL FIX: Use current result data instead of stale lastResult
     // Check if we have peakListRaw and windowStartAbs from current native bridge data
-    const _nativePeakListRaw = result?.peakListRaw;
-    const _nativeWindowStartAbs = result?.windowStartAbs;
-
     let adjustedPeaks = sanitizedPeaks;
 
     // P0 CRITICAL FIX: Disable faulty nativeWindowStartAbs logic temporarily

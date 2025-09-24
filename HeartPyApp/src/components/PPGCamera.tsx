@@ -16,7 +16,6 @@ import {
   useFrameProcessor,
   VisionCameraProxy,
 } from 'react-native-vision-camera';
-import {Worklets} from 'react-native-worklets-core';
 import {PPG_CONFIG} from '../core/PPGConfig';
 import type {PPGSample} from '../types/PPGTypes';
 
@@ -48,44 +47,45 @@ export function PPGCamera({
   const fpsRef = useRef<number>(0);
 
   // Calculate FPS from frame timestamps
-  const calculateFPS = useCallback((timestamp: number) => {
-    frameTimestamps.current.push(timestamp);
+  const calculateFPS = useCallback(
+    (timestamp: number) => {
+      frameTimestamps.current.push(timestamp);
 
-    // Keep only last 30 timestamps (1 second at 30fps)
-    if (frameTimestamps.current.length > 30) {
-      frameTimestamps.current.shift();
-    }
+      // Keep only last 30 timestamps (1 second at 30fps)
+      if (frameTimestamps.current.length > 30) {
+        frameTimestamps.current.shift();
+      }
 
-    // Calculate FPS if we have enough samples
-    if (frameTimestamps.current.length >= 10) {
-      const timeSpan =
-        frameTimestamps.current[frameTimestamps.current.length - 1] -
-        frameTimestamps.current[0];
-      const frameCount = frameTimestamps.current.length - 1;
-      const fps = frameCount / timeSpan; // Keep in seconds (VisionCamera timestamps are in seconds)
+      // Calculate FPS if we have enough samples
+      if (frameTimestamps.current.length >= 10) {
+        const timeSpan =
+          frameTimestamps.current[frameTimestamps.current.length - 1] -
+          frameTimestamps.current[0];
+        const frameCount = frameTimestamps.current.length - 1;
+        const fps = frameCount / timeSpan; // Keep in seconds (VisionCamera timestamps are in seconds)
+        if (Number.isFinite(fps) && fps > 0) {
+          fpsRef.current = fps;
+          // Notify parent component about FPS update
+          if (onFpsUpdate) {
+            onFpsUpdate(fps);
+          }
 
-      if (Number.isFinite(fps) && fps > 0) {
-        fpsRef.current = fps;
-
-        // Notify parent component about FPS update
-        if (onFpsUpdate) {
-          onFpsUpdate(fps);
-        }
-
-        // Log FPS periodically
-        if (
-          PPG_CONFIG.debug.enabled &&
-          frameTimestamps.current.length % 30 === 0
-        ) {
-          console.log('[PPGCamera] FPS calculated:', {
-            fps: fps.toFixed(1),
-            frameCount,
-            timeSpan: timeSpan.toFixed(3) + 's',
-          });
+          // Log FPS periodically
+          if (
+            PPG_CONFIG.debug.enabled &&
+            frameTimestamps.current.length % 30 === 0
+          ) {
+            console.log('[PPGCamera] FPS calculated:', {
+              fps: fps.toFixed(1),
+              frameCount,
+              timeSpan: timeSpan.toFixed(3) + 's',
+            });
+          }
         }
       }
-    }
-  }, []);
+    },
+    [onFpsUpdate],
+  );
 
   // SAMPLE FLOW DEBUG: Check onSample prop
   useEffect(() => {
@@ -183,14 +183,6 @@ export function PPGCamera({
 
   const hasTorch = device?.hasTorch === true;
   const [frameProcessorEnabled, setFrameProcessorEnabled] = useState(false);
-
-  // WORKLET CRASH FIX: Disable worklet to prevent crash
-  const emitSample = useMemo(() => {
-    console.log('[PPGCamera] Creating emitSample callback (worklet disabled)', {
-      hasOnSample: typeof onSample === 'function',
-    });
-    return onSample;
-  }, [onSample]);
 
   const pluginParams = useMemo(
     () => ({
@@ -337,10 +329,10 @@ export function PPGCamera({
 
     if (isActive && requireTorch) {
       torchTimerRef.current = setTimeout(() => {
-        void setTorch(PPG_CONFIG.cameraTorchLevel);
+        setTorch(PPG_CONFIG.cameraTorchLevel);
       }, 1000);
     } else {
-      void setTorch(0);
+      setTorch(0);
     }
 
     return () => {
@@ -348,7 +340,7 @@ export function PPGCamera({
         clearTimeout(torchTimerRef.current);
         torchTimerRef.current = null;
       }
-      void setTorch(0);
+      setTorch(0);
     };
   }, [hasTorch, isActive, requireTorch, setTorchProp]);
 
@@ -411,9 +403,9 @@ export function PPGCamera({
     };
 
     if (isActive) {
-      void lock();
+      lock();
     } else {
-      void unlock();
+      unlock();
     }
 
     return () => {

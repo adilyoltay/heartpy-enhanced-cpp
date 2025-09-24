@@ -129,6 +129,30 @@ export function PPGParameterControls({
   const borderColor = useThemeColor('border');
   const surfaceColor = useThemeColor('surface');
   const surfaceMutedColor = useThemeColor('surfaceMuted');
+  const textInverseColor = useThemeColor('textInverse');
+
+  const rowActionGapStyle = useMemo(() => ({gap: ms(SPACING.xs)}), [ms]);
+
+  const settingRowContentStyle = useMemo(
+    () => [
+      styles.settingRowSurface,
+      {backgroundColor: surfaceMutedColor, borderColor},
+    ],
+    [borderColor, surfaceMutedColor],
+  );
+
+  const cardContainerStyle = useMemo(
+    () => ({
+      gap: ms(SPACING.sm),
+      backgroundColor: surfaceColor,
+    }),
+    [ms, surfaceColor],
+  );
+
+  const captionStyle = useMemo(
+    () => [styles.captionText, {marginTop: ms(SPACING.xs)}],
+    [ms],
+  );
 
   const rows = useMemo(
     () =>
@@ -142,7 +166,7 @@ export function PPGParameterControls({
           ? config.format(value)
           : value.toFixed(config.decimals ?? 2);
 
-        const adjust = async (direction: -1 | 1) => {
+        const adjust = (direction: -1 | 1) => {
           if (disabled) {
             return;
           }
@@ -153,20 +177,16 @@ export function PPGParameterControls({
             config.min,
             config.max,
           );
-          await onChange({[config.key]: next});
+          onChange({[config.key]: next});
         };
 
         const rightSlot = (
-          <View
-            style={[
-              styles.rowActions,
-              {gap: ms(SPACING.xs), alignItems: 'center'},
-            ]}>
+          <View style={[styles.rowActions, rowActionGapStyle]}>
             <IconButton
               label="−"
               size="sm"
               variant="outline"
-              onPress={() => void adjust(-1)}
+              onPress={() => adjust(-1)}
               disabled={disabled}
               accessibilityLabel={`Decrease ${config.label}`}
             />
@@ -174,7 +194,7 @@ export function PPGParameterControls({
               label="+"
               size="sm"
               variant="outline"
-              onPress={() => void adjust(1)}
+              onPress={() => adjust(1)}
               disabled={disabled}
               accessibilityLabel={`Increase ${config.label}`}
             />
@@ -188,17 +208,19 @@ export function PPGParameterControls({
               label={config.label}
               hint={displayValue}
               rightSlot={rightSlot}
-              contentStyle={{
-                backgroundColor: surfaceMutedColor,
-                borderRadius: BORDER_RADIUS.sm,
-                borderWidth: 1,
-                borderColor,
-              }}
+              contentStyle={settingRowContentStyle}
             />
           ),
         };
       }),
-    [borderColor, configs, disabled, ms, onChange, options, surfaceMutedColor],
+    [
+      configs,
+      disabled,
+      onChange,
+      options,
+      rowActionGapStyle,
+      settingRowContentStyle,
+    ],
   );
 
   const headingLabel = title ?? 'Anlık Ayarlar';
@@ -215,19 +237,12 @@ export function PPGParameterControls({
     }),
     [borderColor, ms],
   );
-
   return (
-    <Card
-      padding="md"
-      radius="md"
-      style={{gap: ms(SPACING.sm), backgroundColor: surfaceColor}}>
+    <Card padding="md" radius="md" style={cardContainerStyle}>
       <Typography variant="headingS" weight="semibold">
         {headingLabel}
       </Typography>
-      <Typography
-        variant="bodyS"
-        color="textSecondary"
-        style={{marginTop: ms(SPACING.xs), lineHeight: 20}}>
+      <Typography variant="bodyS" color="textSecondary" style={captionStyle}>
         {captionLabel}
       </Typography>
       {showCalcFreqToggle ? (
@@ -242,7 +257,7 @@ export function PPGParameterControls({
                 onValueChange={value => onChange({calcFreq: value})}
                 disabled={disabled}
                 trackColor={{false: borderColor, true: primaryColor}}
-                thumbColor={disabled ? borderColor : surfaceColor}
+                thumbColor={disabled ? borderColor : textInverseColor}
               />
             }
           />
@@ -259,9 +274,9 @@ export function PPGParameterControls({
         <Button
           title="Varsayılanlara dön"
           variant="outline"
-          onPress={() => void onReset()}
+          onPress={onReset}
           disabled={disabled}
-          style={{alignSelf: 'flex-start'}}
+          style={styles.resetButton}
         />
       ) : null}
     </Card>
@@ -274,5 +289,16 @@ const styles = StyleSheet.create({
   },
   rowActions: {
     flexDirection: 'row',
+    alignItems: 'center',
+  },
+  settingRowSurface: {
+    borderRadius: BORDER_RADIUS.sm,
+    borderWidth: 1,
+  },
+  captionText: {
+    lineHeight: 20,
+  },
+  resetButton: {
+    alignSelf: 'flex-start',
   },
 });
